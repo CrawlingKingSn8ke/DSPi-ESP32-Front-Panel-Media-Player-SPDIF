@@ -1,6 +1,7 @@
 #include "MediaPlayerPoC.h"
 #include "Mp3SeekPolicy.h"
 #include "Mp3ArtworkPolicy.h"
+#include "SpdifBlockEncoder.h"
 
 #define DR_WAV_NO_STDIO
 #define DR_WAV_IMPLEMENTATION
@@ -21,6 +22,7 @@
 #include <esp_system.h>
 #include <freertos/semphr.h>
 #include <new>
+#include <soc/soc_caps.h>
 
 namespace {
 
@@ -45,8 +47,8 @@ constexpr size_t kSeekPrefillFrames = 8192;
 constexpr uint32_t kMinimumPsramBandwidthTenthsMiB = 40;  // 4.0 MiB/s.
 constexpr UBaseType_t kDecoderTaskPriority = 3;
 constexpr UBaseType_t kOutputTaskPriority = 4;
-// Keep the time-critical I2S writer isolated on CPU1. Let decode/SD work use
-// whichever CPU is available: I2S always preempts it on CPU1, while an idle
+// Keep the time-critical S/PDIF writer isolated on CPU1. Let decode/SD work use
+// whichever CPU is available: output always preempts it on CPU1, while an idle
 // CPU0 can absorb it between Bluetooth controller work. Automatic BLE scans
 // are already suspended for active playback.
 constexpr BaseType_t kDecoderTaskCore = tskNO_AFFINITY;
@@ -79,7 +81,7 @@ static_assert((kFallbackRingFrames & (kFallbackRingFrames - 1)) == 0,
 static_assert((kEmergencyRingFrames & (kEmergencyRingFrames - 1)) == 0,
               "Emergency PCM ring frame count must be a power of two");
 static_assert(kOutputTaskPriority > kDecoderTaskPriority,
-              "I2S output must always preempt media decoding");
+              "S/PDIF output must always preempt media decoding");
 
 SemaphoreHandle_t sharedSpiMutex()
 {
@@ -1186,7 +1188,7 @@ bool MediaPlayerPoC::begin(SPIClass &spi, int8_t chipSelectPin, int8_t clockPin,
   xEventGroupClearBits(mediaControlEvents,
                        kSeekActiveBit | kOutputQuiescentBit |
                        kExternalHoldBit);
-  suppressI2sTimeoutsUntil = 0;
+  suppressSpdifTimeoutsUntil = 0;
 
   // Media subsystem initialisation is deliberately separate from card mount.
   // A full-flash reset is only a warm reset for the separately powered SD card;
@@ -3054,12 +3056,11 @@ size_t MediaPlayerPoC::readRing(int32_t *stereoOutput, size_t frames)
   return frames;
 }
 
-bool MediaPlayerPoC::startI2s(int8_t bitClockPin, int8_t wordSelectPin,
-                              int8_t dataOutPin)
+bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
 {
-  stopI2s();
+  stopSpdif();
   i2s_chan_config_t channelConfig =
-      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_SLAVE);
+      I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
   channelConfig.dma_desc_num = 8;
   channelConfig.dma_frame_num = kOutputChunkFrames;
   channelConfig.auto_clear_after_cb = true;
@@ -3069,15 +3070,18 @@ bool MediaPlayerPoC::startI2s(int8_t bitClockPin, int8_t wordSelectPin,
 
   i2s_std_config_t standardConfig = {};
   i2s_std_clk_config_t clockConfig =
-      I2S_STD_CLK_DEFAULT_CONFIG(currentFile.sampleRate);
+      I2S_STD_CLK_DEFAULT_CONFIG(currentFile.sampleRate * 2u);
+#if SOC_CLK_APLL_SUPPORTED
+  clockConfig.clk_src = I2S_CLK_SRC_APLL;
+#endif
   i2s_std_slot_config_t slotConfig =
-      I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT,
-                                          I2S_SLOT_MODE_STEREO);
+      I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT,
+                                     I2S_SLOT_MODE_STEREO);
   standardConfig.clk_cfg = clockConfig;
   standardConfig.slot_cfg = slotConfig;
   standardConfig.gpio_cfg.mclk = I2S_GPIO_UNUSED;
-  standardConfig.gpio_cfg.bclk = (gpio_num_t)bitClockPin;
-  standardConfig.gpio_cfg.ws = (gpio_num_t)wordSelectPin;
+  standardConfig.gpio_cfg.bclk = I2S_GPIO_UNUSED;
+  standardConfig.gpio_cfg.ws = I2S_GPIO_UNUSED;
   standardConfig.gpio_cfg.dout = (gpio_num_t)dataOutPin;
   standardConfig.gpio_cfg.din = I2S_GPIO_UNUSED;
   standardConfig.gpio_cfg.invert_flags.mclk_inv = false;
@@ -3090,17 +3094,22 @@ bool MediaPlayerPoC::startI2s(int8_t bitClockPin, int8_t wordSelectPin,
     i2s_del_channel(tx);
     return false;
   }
-  i2sTxChannel = tx;
+  spdifTxChannel = tx;
+  Serial.printf(
+      "MEDIA SPDIF TX: enabled rate=%lu Hz carrier=%lu Hz data=GPIO%d "
+      "depth=24-bit block-DMA\n",
+      (unsigned long)currentFile.sampleRate,
+      (unsigned long)(currentFile.sampleRate * 2u), dataOutPin);
   return true;
 }
 
-void MediaPlayerPoC::stopI2s()
+void MediaPlayerPoC::stopSpdif()
 {
-  if (!i2sTxChannel) return;
-  i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(i2sTxChannel);
+  if (!spdifTxChannel) return;
+  i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(spdifTxChannel);
   i2s_channel_disable(tx);
   i2s_del_channel(tx);
-  i2sTxChannel = nullptr;
+  spdifTxChannel = nullptr;
 }
 
 void MediaPlayerPoC::setError(const char *message)
@@ -3111,8 +3120,7 @@ void MediaPlayerPoC::setError(const char *message)
   terminalEventPending = true;
 }
 
-bool MediaPlayerPoC::beginPlay(const char *path, int8_t bitClockPin,
-                               int8_t wordSelectPin, int8_t dataOutPin,
+bool MediaPlayerPoC::beginPlay(const char *path, int8_t dataOutPin,
                                MediaRouteCallback routeCallback,
                                void *routeContext, Stream &out)
 {
@@ -3181,8 +3189,6 @@ bool MediaPlayerPoC::beginPlay(const char *path, int8_t bitClockPin,
   }
 
   strlcpy(currentPath, path, sizeof(currentPath));
-  startBitClockPin = bitClockPin;
-  startWordSelectPin = wordSelectPin;
   startDataOutPin = dataOutPin;
   startRouteCallback = routeCallback;
   startRouteContext = routeContext;
@@ -3266,19 +3272,19 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
     return MediaStartStatus::Preparing;
   }
 
-  if (!startI2s(startBitClockPin, startWordSelectPin, startDataOutPin)) {
+  if (!startSpdif(startDataOutPin)) {
     closeDecoder();
     resetRing();
     startStage = StartStage::Idle;
-    setError("ESP32 I2S slave TX setup failed");
+    setError("ESP32 S/PDIF TX setup failed");
   } else if (!startRouteCallback ||
              !startRouteCallback(currentFile.sampleRate,
                                  startRouteContext)) {
-    stopI2s();
+    stopSpdif();
     closeDecoder();
     resetRing();
     startStage = StartStage::Idle;
-    setError("DSPi I2S route verification failed");
+    setError("DSPi S/PDIF route verification failed");
   }
 
   if (state == MediaPlaybackState::Error) {
@@ -3302,11 +3308,11 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
   }
 
   created = xTaskCreatePinnedToCore(
-      outputTaskEntry, "media-i2s", 8192, this, kOutputTaskPriority,
+      outputTaskEntry, "media-spdif", 8192, this, kOutputTaskPriority,
       &outputTaskHandle, kOutputTaskCore);
   if (created != pdPASS) {
     stop();
-    setError("I2S output task creation failed");
+    setError("S/PDIF output task creation failed");
     out.printf("MEDIA PLAY: failed path=%s reason=%s\n", currentPath,
                errorText);
     return MediaStartStatus::Failed;
@@ -3323,12 +3329,11 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
   return MediaStartStatus::Started;
 }
 
-bool MediaPlayerPoC::play(const char *path, int8_t bitClockPin,
-                          int8_t wordSelectPin, int8_t dataOutPin,
+bool MediaPlayerPoC::play(const char *path, int8_t dataOutPin,
                           MediaRouteCallback routeCallback,
                           void *routeContext, Stream &out)
 {
-  if (!beginPlay(path, bitClockPin, wordSelectPin, dataOutPin,
+  if (!beginPlay(path, dataOutPin,
                  routeCallback, routeContext, out)) {
     return false;
   }
@@ -3349,7 +3354,7 @@ bool MediaPlayerPoC::play(const char *path, int8_t bitClockPin,
 void MediaPlayerPoC::requestStop()
 {
   const bool haveResources = decoderTaskHandle || outputTaskHandle || decoder ||
-                             i2sTxChannel;
+                             spdifTxChannel;
   if (state == MediaPlaybackState::Stopped && !haveResources) return;
 
   stopRequested = true;
@@ -3399,7 +3404,7 @@ bool MediaPlayerPoC::serviceStopCleanup()
     return state == MediaPlaybackState::Stopped;
   }
 
-  stopI2s();
+  stopSpdif();
   closeDecoder();
   resetRing();
   if (seekCommandQueue) xQueueReset(seekCommandQueue);
@@ -3413,8 +3418,6 @@ bool MediaPlayerPoC::serviceStopCleanup()
   terminalEventPending = false;
   seekResumePaused = false;
   startStage = StartStage::Idle;
-  startBitClockPin = -1;
-  startWordSelectPin = -1;
   startDataOutPin = -1;
   startRouteCallback = nullptr;
   startRouteContext = nullptr;
@@ -3499,7 +3502,7 @@ bool MediaPlayerPoC::beginExternalHold(uint32_t timeoutMs)
 
   // Include the quiesce handshake itself in the expected-control window. The
   // output task may already be inside a bounded DMA write when the bit is set.
-  suppressI2sTimeoutsUntil = millis() + timeoutMs + 250U;
+  suppressSpdifTimeoutsUntil = millis() + timeoutMs + 250U;
   xEventGroupClearBits(mediaControlEvents, kOutputQuiescentBit);
   xEventGroupSetBits(mediaControlEvents, kExternalHoldBit);
   EventBits_t bits = xEventGroupWaitBits(
@@ -3507,7 +3510,7 @@ bool MediaPlayerPoC::beginExternalHold(uint32_t timeoutMs)
       pdMS_TO_TICKS(timeoutMs));
   if ((bits & kOutputQuiescentBit) == 0) {
     xEventGroupClearBits(mediaControlEvents, kExternalHoldBit);
-    suppressI2sTimeoutsUntil = millis() + 100U;
+    suppressSpdifTimeoutsUntil = millis() + 100U;
     Serial.printf("MEDIA HOLD: quiesce timeout after %lu ms\n",
                   (unsigned long)timeoutMs);
     return false;
@@ -3523,7 +3526,7 @@ void MediaPlayerPoC::endExternalHold()
   // A DSPi control transaction can release immediately before the current
   // 25-ms DMA write returns. Keep a short grace window so that final expected
   // timeout is reported as transaction telemetry, not as an audio fault.
-  suppressI2sTimeoutsUntil = millis() + 300U;
+  suppressSpdifTimeoutsUntil = millis() + 300U;
   xEventGroupClearBits(mediaControlEvents, kExternalHoldBit);
   EventBits_t bits = xEventGroupGetBits(mediaControlEvents);
   if ((bits & kSeekActiveBit) == 0) {
@@ -3531,7 +3534,7 @@ void MediaPlayerPoC::endExternalHold()
   }
   uint32_t expected =
       __atomic_exchange_n(&expectedHoldTimeouts, 0U, __ATOMIC_ACQ_REL);
-  Serial.printf("MEDIA HOLD: released expected_i2s_timeouts=%lu\n",
+  Serial.printf("MEDIA HOLD: released expected_spdif_timeouts=%lu\n",
                 (unsigned long)expected);
 }
 
@@ -3571,7 +3574,7 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
       "MEDIA STATUS: state=%s format=%s rate=%lu depth=%u channels=%u "
       "decoded=%llu output=%llu ring=%u/%u underrun=%lu events=%lu "
       "longest_underrun=%lu last_underrun_ms=%lu lowwater=%lu "
-      "i2s_timeout=%lu i2s_error=%lu highwater=%lu "
+      "spdif_timeout=%lu spdif_error=%lu highwater=%lu "
       "dec_stack_free=%lu out_stack_free=%lu seek=%lu/%lu/%lu "
       "seek_ms=%lu sd_cb=%lu sd_slices=%lu sd_slow=%lu sd_err=%lu "
       "sd_yield=%lu cb_max_ms=%lu slice_max_ms=%lu "
@@ -3587,8 +3590,8 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
       (unsigned long)snapshot.longestUnderrunFrames,
       (unsigned long)snapshot.lastUnderrunAtMs,
       (unsigned long)snapshot.ringLowWaterFrames,
-      (unsigned long)snapshot.i2sTimeouts,
-      (unsigned long)snapshot.i2sErrors,
+      (unsigned long)snapshot.spdifTimeouts,
+      (unsigned long)snapshot.spdifErrors,
       (unsigned long)snapshot.ringHighWaterFrames,
       (unsigned long)snapshot.decoderStackMinFree,
       (unsigned long)snapshot.outputStackMinFree,
@@ -3655,10 +3658,10 @@ MediaPlaybackStats MediaPlayerPoC::playbackStats() const
       __atomic_load_n(&stats.longestUnderrunFrames, __ATOMIC_ACQUIRE);
   snapshot.lastUnderrunAtMs =
       __atomic_load_n(&stats.lastUnderrunAtMs, __ATOMIC_ACQUIRE);
-  snapshot.i2sTimeouts =
-      __atomic_load_n(&stats.i2sTimeouts, __ATOMIC_ACQUIRE);
-  snapshot.i2sErrors =
-      __atomic_load_n(&stats.i2sErrors, __ATOMIC_ACQUIRE);
+  snapshot.spdifTimeouts =
+      __atomic_load_n(&stats.spdifTimeouts, __ATOMIC_ACQUIRE);
+  snapshot.spdifErrors =
+      __atomic_load_n(&stats.spdifErrors, __ATOMIC_ACQUIRE);
   snapshot.ringHighWaterFrames =
       __atomic_load_n(&stats.ringHighWaterFrames, __ATOMIC_ACQUIRE);
   snapshot.ringLowWaterFrames =
@@ -3781,11 +3784,31 @@ void MediaPlayerPoC::decoderTask()
 void MediaPlayerPoC::outputTask()
 {
   int32_t output[kOutputChunkFrames * 2] = {};
-  i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(i2sTxChannel);
+  i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(spdifTxChannel);
+  constexpr size_t encodedWordCapacity =
+      kOutputChunkFrames * SpdifBlockEncoder::kWordsPerStereoFrame;
+  uint32_t *encoded = static_cast<uint32_t *>(heap_caps_malloc(
+      encodedWordCapacity * sizeof(uint32_t),
+      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  SpdifBlockEncoder encoder;
+  encoder.reset();
+
+  if (!encoded) {
+    setError("S/PDIF DMA staging allocation failed");
+    outputTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+    return;
+  }
 
   auto sendFrames = [&](const int32_t *samples, size_t frames) -> bool {
-    const uint8_t *next = reinterpret_cast<const uint8_t *>(samples);
-    size_t remaining = frames * 2 * sizeof(int32_t);
+    if (!encoder.encode(samples, frames, encoded, encodedWordCapacity)) {
+      __atomic_add_fetch(&stats.spdifErrors, 1U, __ATOMIC_RELAXED);
+      setError("S/PDIF block encode failed");
+      return false;
+    }
+    const uint8_t *next = reinterpret_cast<const uint8_t *>(encoded);
+    size_t remaining = frames * SpdifBlockEncoder::kWordsPerStereoFrame *
+                       sizeof(uint32_t);
     while (remaining && !stopRequested) {
       size_t written = 0;
       esp_err_t result = i2s_channel_write(tx, next, remaining, &written, 25);
@@ -3798,17 +3821,17 @@ void MediaPlayerPoC::outputTask()
             ? xEventGroupGetBits(mediaControlEvents) : 0;
         const bool expectedControlTimeout =
             (bits & kExternalHoldBit) ||
-            (int32_t)(millis() - suppressI2sTimeoutsUntil) < 0;
+            (int32_t)(millis() - suppressSpdifTimeoutsUntil) < 0;
         if (expectedControlTimeout) {
           __atomic_add_fetch(&expectedHoldTimeouts, 1U, __ATOMIC_RELAXED);
         } else {
-          __atomic_add_fetch(&stats.i2sTimeouts, 1U, __ATOMIC_RELAXED);
+          __atomic_add_fetch(&stats.spdifTimeouts, 1U, __ATOMIC_RELAXED);
         }
         continue;
       }
       if (result != ESP_OK) {
-        __atomic_add_fetch(&stats.i2sErrors, 1U, __ATOMIC_RELAXED);
-        setError("I2S DMA write failed");
+        __atomic_add_fetch(&stats.spdifErrors, 1U, __ATOMIC_RELAXED);
+        setError("S/PDIF DMA write failed");
         return false;
       }
     }
@@ -3819,13 +3842,23 @@ void MediaPlayerPoC::outputTask()
   bool underrunActive = false;
   uint32_t underrunRunFrames = 0;
   updateTaskStackWatermark(false);
+
+  // DSPi is switched to S/PDIF before this task starts. Give its receiver a
+  // continuous quarter-second consumer-PCM silence stream to acquire lock
+  // before consuming the first buffered music frame.
+  size_t leadInFrames = currentFile.sampleRate / 4u;
+  while (leadInFrames && !stopRequested) {
+    const size_t frames = std::min(leadInFrames, kOutputChunkFrames);
+    if (!sendFrames(nullptr, frames)) break;
+    leadInFrames -= frames;
+  }
+
   while (!stopRequested) {
     EventBits_t control = mediaControlEvents
         ? xEventGroupGetBits(mediaControlEvents) : 0;
     if (control & (kSeekActiveBit | kExternalHoldBit)) {
       xEventGroupSetBits(mediaControlEvents, kOutputQuiescentBit);
-      memset(output, 0, sizeof(output));
-      if (!sendFrames(output, kOutputChunkFrames)) break;
+      if (!sendFrames(nullptr, kOutputChunkFrames)) break;
       updateTaskStackWatermark(false);
       continue;
     }
@@ -3838,8 +3871,7 @@ void MediaPlayerPoC::outputTask()
 
     if (state == MediaPlaybackState::Paused ||
         state == MediaPlaybackState::Seeking) {
-      memset(output, 0, sizeof(output));
-      if (!sendFrames(output, kOutputChunkFrames)) break;
+      if (!sendFrames(nullptr, kOutputChunkFrames)) break;
       updateTaskStackWatermark(false);
       continue;
     }
@@ -3850,7 +3882,6 @@ void MediaPlayerPoC::outputTask()
         naturalEnd = true;
         break;
       }
-      memset(output, 0, sizeof(output));
       if (!underrunActive) {
         underrunActive = true;
         underrunRunFrames = 0;
@@ -3863,7 +3894,7 @@ void MediaPlayerPoC::outputTask()
       __atomic_store_n(&stats.lastUnderrunAtMs, millis(), __ATOMIC_RELAXED);
       updateAtomicMaximum(&stats.longestUnderrunFrames,
                           underrunRunFrames);
-      if (!sendFrames(output, kOutputChunkFrames)) break;
+      if (!sendFrames(nullptr, kOutputChunkFrames)) break;
       updateTaskStackWatermark(false);
       continue;
     }
@@ -3883,11 +3914,10 @@ void MediaPlayerPoC::outputTask()
   if (naturalEnd && !stopRequested &&
       state != MediaPlaybackState::Error) {
     state = MediaPlaybackState::Draining;
-    memset(output, 0, sizeof(output));
     size_t remaining = kTailSilenceFrames;
     while (remaining && !stopRequested) {
       size_t frames = std::min(remaining, kOutputChunkFrames);
-      if (!sendFrames(output, frames)) break;
+      if (!sendFrames(nullptr, frames)) break;
       remaining -= frames;
     }
     if (!stopRequested && state != MediaPlaybackState::Error) {
@@ -3899,6 +3929,7 @@ void MediaPlayerPoC::outputTask()
   if (mediaControlEvents) {
     xEventGroupClearBits(mediaControlEvents, kOutputQuiescentBit);
   }
+  free(encoded);
   outputTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }

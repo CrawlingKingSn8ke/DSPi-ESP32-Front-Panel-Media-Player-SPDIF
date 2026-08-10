@@ -47,8 +47,8 @@ struct MediaPlaybackStats {
   uint32_t underrunEvents = 0;
   uint32_t longestUnderrunFrames = 0;
   uint32_t lastUnderrunAtMs = 0;
-  uint32_t i2sTimeouts = 0;
-  uint32_t i2sErrors = 0;
+  uint32_t spdifTimeouts = 0;
+  uint32_t spdifErrors = 0;
   uint32_t ringHighWaterFrames = 0;
   uint32_t ringLowWaterFrames = 0;
   uint32_t decoderStackMinFree = 0;
@@ -187,13 +187,13 @@ public:
   static const char *artworkSourceName(MediaArtworkSource source);
   static void freeArtworkJpeg(uint8_t *data);
 
-  bool beginPlay(const char *path, int8_t bitClockPin, int8_t wordSelectPin,
-                 int8_t dataOutPin, MediaRouteCallback routeCallback,
+  bool beginPlay(const char *path, int8_t dataOutPin,
+                 MediaRouteCallback routeCallback,
                  void *routeContext, Stream &out);
   MediaStartStatus servicePlayStart(Stream &out,
                                     size_t decodeChunkBudget = 2);
-  bool play(const char *path, int8_t bitClockPin, int8_t wordSelectPin,
-            int8_t dataOutPin, MediaRouteCallback routeCallback,
+  bool play(const char *path, int8_t dataOutPin,
+            MediaRouteCallback routeCallback,
             void *routeContext, Stream &out);
   void requestStop();
   void stop();
@@ -269,9 +269,8 @@ private:
   size_t ringWritable() const;
   size_t writeRing(const int32_t *stereoInput, size_t frames);
   size_t readRing(int32_t *stereoOutput, size_t frames);
-  bool startI2s(int8_t bitClockPin, int8_t wordSelectPin,
-                int8_t dataOutPin);
-  void stopI2s();
+  bool startSpdif(int8_t dataOutPin);
+  void stopSpdif();
   void setError(const char *message);
   void reportStorageReadFault(const char *stage);
 
@@ -290,7 +289,7 @@ private:
   int8_t mediaMisoPin = -1;
   int8_t mediaMosiPin = -1;
   volatile uint32_t expectedHoldTimeouts = 0;
-  volatile uint32_t suppressI2sTimeoutsUntil = 0;
+  volatile uint32_t suppressSpdifTimeoutsUntil = 0;
 
   // Main-loop-only browser scan scratch. MediaFsFile carries 512-byte path and
   // name buffers, so keeping these objects in the long-lived player instance
@@ -301,7 +300,7 @@ private:
 
   DecoderState *decoder = nullptr;
   int32_t *pcmRing = nullptr;
-  void *i2sTxChannel = nullptr;
+  void *spdifTxChannel = nullptr;
   TaskHandle_t decoderTaskHandle = nullptr;
   TaskHandle_t outputTaskHandle = nullptr;
   QueueHandle_t seekCommandQueue = nullptr;
@@ -311,8 +310,6 @@ private:
   volatile uint32_t ringWriteCount = 0;
   size_t ringFrameCapacity = 0;
   StartStage startStage = StartStage::Idle;
-  int8_t startBitClockPin = -1;
-  int8_t startWordSelectPin = -1;
   int8_t startDataOutPin = -1;
   MediaRouteCallback startRouteCallback = nullptr;
   void *startRouteContext = nullptr;

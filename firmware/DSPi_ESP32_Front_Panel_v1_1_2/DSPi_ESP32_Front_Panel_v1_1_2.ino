@@ -116,12 +116,11 @@
 #define MEDIA_SD_MOSI LCD_MOSI
 #define MEDIA_SD_MISO LCD_MISO
 
-// Local-player I2S link. DSPi is the clock master; the ESP32-S3 only drives
-// standard Philips stereo data with 32-bit slots (24 significant MSBs).
-#define MEDIA_I2S_DATA_OUT_PIN 13
-#define MEDIA_I2S_BCLK_PIN     14
-#define MEDIA_I2S_LRCLK_PIN    15
-#define MEDIA_PICO_RX_PIN       1
+// Local-player consumer S/PDIF link. GPIO13 carries a self-clocking 24-bit
+// BMC stream directly to DSPi S/PDIF input 1 (default Pico GPIO5). No external
+// BCLK/LRCLK wires are used by this local test build.
+#define MEDIA_SPDIF_DATA_OUT_PIN 13
+#define MEDIA_PICO_SPDIF_RX_PIN   5
 // The browser keeps one sorted page instead of one entry for every folder.
 // Crossing a page boundary rescans the directory using a stable cursor, so the
 // number of folders in a directory is no longer limited by ESP32 RAM. Album
@@ -5567,7 +5566,7 @@ struct MediaDspiRouteSnapshot {
   uint32_t selectedRate = 48000;
   uint32_t activeRate = 0;
   uint8_t clockMode = 0;
-  uint8_t rxPin = MEDIA_PICO_RX_PIN;
+  uint8_t rxPin = MEDIA_PICO_SPDIF_RX_PIN;
 };
 
 MediaDspiRouteSnapshot mediaRoute;
@@ -8425,38 +8424,25 @@ bool restoreDspiMediaRoute()
   bool ok = false;
   for (uint8_t attempt = 0; attempt < 4 && dspi.connected; attempt++) {
     if (attempt) delay(80);
-
-    bool commandsOk = setDspiInputRate(mediaRoute.selectedRate) &&
-                      dspiSetByte(REQ_SET_I2S_CLOCK_MODE,
-                                  mediaRoute.clockMode);
-
     uint8_t liveSource = 0xFF;
     bool sourceRead = getExactByte(REQ_GET_INPUT_SOURCE, liveSource) &&
                       liveSource <= SRC_MAX;
+    bool commandsOk = true;
     if (!sourceRead || liveSource != mediaRoute.source) {
-      commandsOk = setInputSource(mediaRoute.source, false) && commandsOk;
+      commandsOk = setInputSource(mediaRoute.source, false);
     } else {
       dspi.source = (InputSource)liveSource;
     }
 
-    uint32_t currentRate = 0;
-    uint32_t selectedRate = 0;
-    uint8_t verifiedMode = 0xFF;
     uint8_t verifiedSource = 0xFF;
     ok = commandsOk &&
-         getDspiInputRates(currentRate, selectedRate) &&
-         getExactByte(REQ_GET_I2S_CLOCK_MODE, verifiedMode) &&
          getExactByte(REQ_GET_INPUT_SOURCE, verifiedSource) &&
-         selectedRate == mediaRoute.selectedRate &&
-         verifiedMode == mediaRoute.clockMode &&
          verifiedSource == mediaRoute.source;
     if (ok) break;
   }
 
-  Serial.printf("MEDIA ROUTE: restore source=%u rate=%lu mode=%u result=%s\n",
-                (unsigned)mediaRoute.source,
-                (unsigned long)mediaRoute.selectedRate,
-                mediaRoute.clockMode, ok ? "OK" : "FAILED");
+  Serial.printf("MEDIA ROUTE: restore source=%u result=%s\n",
+                (unsigned)mediaRoute.source, ok ? "OK" : "FAILED");
   if (ok) {
     mediaRoute = MediaDspiRouteSnapshot{};
     mediaRouteRestorePending = false;
@@ -8527,95 +8513,54 @@ bool activateDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
     return false;
   }
 
-  // Consecutive tracks at the same native rate keep the proven I2S route.
-  // Avoid a full UART capture/configure/verify cycle between album tracks;
-  // that work previously caused multi-second main-loop stalls.
+  uint8_t spdifConfig[2 + PANEL_MAX_SPDIF_INPUTS] = {0};
+  uint16_t spdifLength = 0;
+  if (!dspiGet(REQ_GET_SPDIF_INPUT_CONFIG, 0, sizeof(spdifConfig),
+               spdifConfig, sizeof(spdifConfig), spdifLength) ||
+      spdifLength < 3 || spdifConfig[0] < 1 ||
+      (spdifConfig[1] & 0x01u) == 0) {
+    Serial.println("MEDIA ROUTE: failed to read DSPi S/PDIF input 1");
+    return false;
+  }
+
+  const uint8_t rxPin = spdifConfig[2];
+  if (rxPin != MEDIA_PICO_SPDIF_RX_PIN) {
+    Serial.printf(
+        "MEDIA ROUTE: DSPi S/PDIF input 1 is GPIO%u; test wire expects GPIO%u\n",
+        rxPin, MEDIA_PICO_SPDIF_RX_PIN);
+    return false;
+  }
+
   if (mediaRoute.active && mediaRoute.activeRate == sampleRate &&
-      dspi.source == SRC_I2S) {
-    Serial.printf("MEDIA ROUTE: reused active %lu Hz route\n",
+      dspi.source == SRC_OPTICAL) {
+    Serial.printf("MEDIA ROUTE: reused active S/PDIF %lu Hz route\n",
                   (unsigned long)sampleRate);
     return true;
   }
 
-  uint32_t currentRate = 0;
-  uint32_t selectedRate = 0;
-  uint8_t clockMode = 0xFF;
-  uint8_t rxPin = 0xFF;
-  if (!getDspiInputRates(currentRate, selectedRate) ||
-      !getExactByte(REQ_GET_I2S_CLOCK_MODE, clockMode) ||
-      !getExactByte(REQ_GET_I2S_RX_PIN, rxPin, 0)) {
-    Serial.println("MEDIA ROUTE: failed to capture DSPi I2S configuration");
-    return false;
-  }
-
-  if (rxPin != MEDIA_PICO_RX_PIN) {
-    Serial.printf(
-        "MEDIA ROUTE: Pico pair-0 RX is GPIO%u; this checkpoint is wired to GPIO%u\n",
-        rxPin, MEDIA_PICO_RX_PIN);
-    return false;
-  }
-
   mediaRoute.active = false;
-
-  bool configured = true;
-  if (clockMode != 0) {
-    configured = dspiSetByte(REQ_SET_I2S_CLOCK_MODE, 0);
-  }
-  if (configured && selectedRate != sampleRate) {
-    configured = setDspiInputRate(sampleRate);
-  }
-
-  // The rate is a dormant store while another source is selected, so verify
-  // the selected half before asking DSPi to start the I2S input.
-  bool selectedVerified = false;
-  for (uint8_t attempt = 0; configured && attempt < 8; attempt++) {
-    delay(attempt == 0 ? 20 : 45);
-    if (getDspiInputRates(currentRate, selectedRate) &&
-        selectedRate == sampleRate) {
-      selectedVerified = true;
-      break;
-    }
-  }
   uint8_t liveSource = 0xFF;
   bool sourceKnown = getExactByte(REQ_GET_INPUT_SOURCE, liveSource) &&
                      liveSource <= SRC_MAX;
-  if (!selectedVerified ||
-      ((!sourceKnown || liveSource != SRC_I2S) &&
-       !setInputSource(SRC_I2S, userInitiated))) {
-    Serial.println("MEDIA ROUTE: failed before I2S source lock");
-    return false;
-  }
-  dspi.source = SRC_I2S;
-
-  bool liveVerified = false;
-  for (uint8_t attempt = 0; attempt < 20; attempt++) {
-    delay(attempt == 0 ? 25 : 55);
-    uint8_t liveMode = 0xFF;
-    if (getExactByte(REQ_GET_I2S_CLOCK_MODE, liveMode) &&
-        getDspiInputRates(currentRate, selectedRate) &&
-        liveMode == 0 && currentRate == sampleRate &&
-        selectedRate == sampleRate) {
-      liveVerified = true;
-      break;
-    }
-  }
-  if (!liveVerified) {
-    Serial.printf(
-        "MEDIA ROUTE: live verify failed current=%lu selected=%lu\n",
-        (unsigned long)currentRate, (unsigned long)selectedRate);
+  if ((!sourceKnown || liveSource != SRC_OPTICAL) &&
+      !setInputSource(SRC_OPTICAL, userInitiated)) {
+    Serial.println("MEDIA ROUTE: failed to select DSPi S/PDIF input 1");
     return false;
   }
 
-  // Publish the verified live I2S rate immediately.  Home therefore reports
-  // PCM 44.1/48 using the normal DSPi metadata path from the first track.
+  // The transmitter starts immediately after this callback. DSPi remains in
+  // ACQUIRING until the output task's valid quarter-second silence lead-in is
+  // present, then its ordinary S/PDIF status polling publishes confirmed lock.
+  dspi.source = SRC_OPTICAL;
+  dspi.spdifState = 1;
+  dspi.spdifNonAudio = false;
   dspi.sampleRate = sampleRate;
   mediaRoute.active = true;
   mediaRoute.activeRate = sampleRate;
   Serial.printf(
-      "MEDIA ROUTE: verified source=I2S rate=%lu mode=master rx=GPIO%u "
-      "BCLK=GPIO%u LRCLK=GPIO%u\n",
-      (unsigned long)sampleRate, rxPin, MEDIA_I2S_BCLK_PIN,
-      MEDIA_I2S_LRCLK_PIN);
+      "MEDIA ROUTE: selected source=S/PDIF1 expected-rate=%lu rx=GPIO%u "
+      "tx=GPIO%u awaiting wire lock\n",
+      (unsigned long)sampleRate, rxPin, MEDIA_SPDIF_DATA_OUT_PIN);
   return true;
 }
 
@@ -8627,11 +8572,9 @@ bool prepareDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
     uint32_t currentRate = 0;
     uint32_t selectedRate = 0;
     uint8_t clockMode = 0xFF;
-    uint8_t rxPin = 0xFF;
     uint8_t source = 0xFF;
     if (!getDspiInputRates(currentRate, selectedRate) ||
         !getExactByte(REQ_GET_I2S_CLOCK_MODE, clockMode) ||
-        !getExactByte(REQ_GET_I2S_RX_PIN, rxPin, 0) ||
         !getExactByte(REQ_GET_INPUT_SOURCE, source) ||
         source > SRC_MAX) {
       Serial.println("MEDIA ROUTE: failed to capture DSPi configuration");
@@ -8643,7 +8586,7 @@ bool prepareDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
     mediaRoute.source = (InputSource)source;
     mediaRoute.selectedRate = selectedRate;
     mediaRoute.clockMode = clockMode;
-    mediaRoute.rxPin = rxPin;
+    mediaRoute.rxPin = MEDIA_PICO_SPDIF_RX_PIN;
   }
 
   if (activateDspiMediaRoute(sampleRate, userInitiated)) return true;
@@ -9063,8 +9006,7 @@ bool startMediaPlaybackPrepared(const char *path,
   mediaRouteRestoreRetryAt = 0;
 
   bool started = mediaPlayerPoc.play(
-      path, MEDIA_I2S_BCLK_PIN, MEDIA_I2S_LRCLK_PIN,
-      MEDIA_I2S_DATA_OUT_PIN, mediaRouteCallback, nullptr, Serial);
+      path, MEDIA_SPDIF_DATA_OUT_PIN, mediaRouteCallback, nullptr, Serial);
   if (started) {
     strlcpy(mediaCurrentPath, path, sizeof(mediaCurrentPath));
     mediaPlaybackSuspended = false;
@@ -9286,8 +9228,7 @@ void serviceMediaTrackTransition()
     mediaRouteRestorePending = false;
     mediaRouteRestoreRetryAt = 0;
     bool prepared = mediaPlayerPoc.beginPlay(
-        mediaQueuePaths[candidate], MEDIA_I2S_BCLK_PIN,
-        MEDIA_I2S_LRCLK_PIN, MEDIA_I2S_DATA_OUT_PIN,
+        mediaQueuePaths[candidate], MEDIA_SPDIF_DATA_OUT_PIN,
         mediaRouteCallback, nullptr, Serial);
     if (!prepared) {
       handleRejected(candidate);
@@ -10184,7 +10125,7 @@ bool loadPreset(uint8_t slot, bool announce)
     dspi.source = (InputSource)restoredSource;
     dspi.activePreset = slot;
     if (!activateDspiMediaRoute(mediaRate, false)) {
-      failAfterPossibleAcceptance("media I2S route reassert");
+      failAfterPossibleAcceptance("media S/PDIF route reassert");
       mediaPlayerPoc.stop();
       mediaCurrentPath[0] = '\0';
       mediaPlaybackSuspended = false;
@@ -18200,11 +18141,11 @@ void loop()
       const bool externalSourceChanged =
           dspi.source != sourceBeforeRuntimePoll;
 
-      // A Console source selection away from I2S takes ownership immediately.
+      // A Console source selection away from the media S/PDIF input takes
+      // ownership immediately.
       // Point the pending restore at that already-selected source so stopping
-      // music restores only the saved I2S rate/clock and never overrides the
-      // Console's choice.
-      if (externalSourceChanged && dspi.source != SRC_I2S &&
+      // music never overrides the Console's choice when playback stops.
+      if (externalSourceChanged && dspi.source != SRC_OPTICAL &&
           mediaPlayerPoc.active()) {
         const InputSource externalSource = dspi.source;
         if (mediaRoute.captured) mediaRoute.source = externalSource;
