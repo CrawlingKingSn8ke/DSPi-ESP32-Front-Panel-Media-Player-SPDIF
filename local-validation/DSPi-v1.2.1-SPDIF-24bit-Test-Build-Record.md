@@ -1,7 +1,7 @@
 # DSPi ESP32 Front Panel v1.2.1 S/PDIF 24-bit Test
 
 - Baseline: public v1.2.1 commit `aa9c30f8772fd043ebdc7c47a153d31d5b500f22`
-- Local source commit: `58b40be` (`local/v1.2.1-spdif-output-test`)
+- Local source commit: `0c53fc6` (`local/v1.2.1-spdif-output-test`)
 - Remote push: none
 - Flash performed: none
 - Supported media rates: 44.1 kHz and 48 kHz only
@@ -29,9 +29,9 @@ This is a direct 3.3 V logic-level test link, not a consumer coaxial S/PDIF elec
 
 - Arduino ESP32-S3 compile: passed
 - Existing regression contracts: 118 passed
-- Focused S/PDIF contracts: 8 passed
-- Total: 126 passed
-- Program storage reported by Arduino: 1,895,405 bytes of 3,145,728 (60%)
+- Focused S/PDIF contracts: 11 passed
+- Total: 129 passed
+- Program storage reported by Arduino: 1,896,017 bytes of 3,145,728 (60%)
 - Globals reported by Arduino: 76,596 bytes of 327,680 (23%)
 - The exact 256-entry 24-bit BMC lookup table was compared with the tested MIT-licensed `sle118/squeezelite-esp32` implementation.
 - Route contracts verify that the experiment selects DSPi S/PDIF input 1, validates Pico GPIO5, and does not alter DSPi I2S rate or clock-mode settings.
@@ -41,15 +41,15 @@ This is a direct 3.3 V logic-level test link, not a consumer coaxial S/PDIF elec
 ### Application-only image
 
 - File: `DSPi-ESP32-Front-Panel-v1.2.1-SPDIF-24bit-Test-Application.bin`
-- Size: 1,895,552 bytes
-- SHA-256: `0F989B7EA3A85E29E7DBD945486CBBAD6E56E74B234E7F034E44C17C06A6615D`
+- Size: 1,896,160 bytes
+- SHA-256: `F8B07C6F2B7CB837B467BA98FC9EBB075EB7DF9C5131033A7C25CE9963F86ABB`
 - Flash offset: `0x10000` (preserves the settings partitions)
 
 ### Full 16 MB image
 
 - File: `DSPi-ESP32-Front-Panel-v1.2.1-SPDIF-24bit-Test-Full.bin`
 - Size: 16,777,216 bytes
-- SHA-256: `55F8E5503F99993D94A38D2B1BC83498D157EC8BCE19C04DC874CE80366C9FA4`
+- SHA-256: `C0F84A7781C1E2CD71EE48FBABE35ABAB3C268D1EDF1D0B535072EA5C7CB6C6C`
 - Flash offset: `0x0` (full-flash test image; overwrites settings)
 
 ## Implementation notes
