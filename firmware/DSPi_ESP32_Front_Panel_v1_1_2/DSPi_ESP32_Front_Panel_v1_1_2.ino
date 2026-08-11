@@ -8005,6 +8005,9 @@ bool pollExternalRuntimeState()
   uint8_t observedCrossfeed = dspi.crossfeedEnabled ? 1 : 0;
   uint8_t observedLeveller = dspi.levellerEnabled ? 1 : 0;
   uint8_t observedPsybass = dspi.psybassEnabled ? 1 : 0;
+  uint8_t observedSpdifState = dspi.spdifState;
+  uint32_t observedSampleRate = dspi.sampleRate;
+  bool observedSpdifNonAudio = dspi.spdifNonAudio;
 
   // Publish every exact read independently. One unsupported or temporarily
   // busy GET must not freeze unrelated Console state such as volume, preset,
@@ -8031,6 +8034,41 @@ bool pollExternalRuntimeState()
       getExactByte(REQ_GET_PSYBASS, observedPsybass, 0, false) &&
       observedPsybass <= 1;
 
+  // The normal runtime watcher is also used while the SD decoder is active.
+  // Keep S/PDIF lock metadata in that lightweight path: activateMediaRoute()
+  // publishes ACQUIRING before the first encoded silence reaches the Pico,
+  // and without this exact read Home would retain PCM NO LOCK until a full
+  // sweep (for example, entering the VU screen) happened by coincidence.
+  const InputSource observedInput = sourceValid
+      ? (InputSource)observedSource : dspi.source;
+  bool spdifStatusValid = false;
+  if (isSpdifSource(observedInput)) {
+    uint8_t statusPayload[16] = {0};
+    spdifStatusValid =
+        getExact(REQ_GET_SPDIF_RX_STATUS, 0, 16, statusPayload,
+                 sizeof(statusPayload), false) &&
+        statusPayload[0] <= 3 && statusPayload[1] == (uint8_t)observedInput;
+    if (spdifStatusValid) {
+      observedSpdifState = statusPayload[0];
+      observedSampleRate = readLe32(statusPayload + 4);
+      if (observedSpdifState == 2) {
+        uint8_t channelStatus[24] = {0};
+        const bool channelStatusValid = getExact(
+            REQ_GET_SPDIF_RX_CH_STATUS, 0, 24, channelStatus,
+            sizeof(channelStatus), false);
+        if (channelStatusValid) {
+          observedSpdifNonAudio = (channelStatus[0] & 0x02u) != 0;
+        }
+      } else {
+        observedSpdifNonAudio = false;
+      }
+    }
+  } else if (sourceValid) {
+    spdifStatusValid = true;
+    observedSpdifState = 0;
+    observedSpdifNonAudio = false;
+  }
+
   const bool volumeChanged = volumeValid &&
       fabsf(observedVolume - dspi.volumeDb) > 0.01f;
   const bool presetChanged = presetValid &&
@@ -8045,9 +8083,14 @@ bool pollExternalRuntimeState()
       (observedLeveller != 0) != dspi.levellerEnabled;
   const bool psybassChanged = psybassValid &&
       (observedPsybass != 0) != dspi.psybassEnabled;
+  const bool spdifStatusChanged = spdifStatusValid &&
+      (observedSpdifState != dspi.spdifState ||
+       observedSpdifNonAudio != dspi.spdifNonAudio ||
+       (isSpdifSource(observedInput) &&
+        observedSampleRate != dspi.sampleRate));
   const bool anyChanged = volumeChanged || presetChanged || sourceChanged ||
       loudnessChanged || crossfeedChanged || levellerChanged ||
-      psybassChanged;
+      psybassChanged || spdifStatusChanged;
 
   if (volumeValid) dspi.volumeDb = observedVolume;
   if (presetValid) dspi.activePreset = observedPreset;
@@ -8056,7 +8099,19 @@ bool pollExternalRuntimeState()
   if (crossfeedValid) dspi.crossfeedEnabled = observedCrossfeed != 0;
   if (levellerValid) dspi.levellerEnabled = observedLeveller != 0;
   if (psybassValid) dspi.psybassEnabled = observedPsybass != 0;
+  if (spdifStatusValid) {
+    dspi.spdifState = observedSpdifState;
+    dspi.spdifNonAudio = observedSpdifNonAudio;
+    if (isSpdifSource(observedInput)) dspi.sampleRate = observedSampleRate;
+  }
   if (presetChanged) applyPresetPanelSettings(dspi.activePreset);
+
+  if (spdifStatusChanged) {
+    resetMetersForStateChange(observedSpdifState == 2 &&
+                              !observedSpdifNonAudio
+                                  ? "S/PDIF signal locked"
+                                  : "S/PDIF signal state changed");
+  }
 
   const bool notificationsAllowed = externalRuntimeStateReady;
   externalRuntimeStateReady = true;
@@ -12201,11 +12256,27 @@ void drawChangeOverlay()
   } else {
     drawFontCentredGlowColour(FontSmall, 24, "Input", uiAccent());
     String source = inputSourceDisplayText(changeOverlaySource);
-    if (fontTextWidth(FontLarge, source) <= UI_W - 20) {
-      drawFontCentredGlowColour(FontLarge, 91, source, uiMainText());
-    } else {
-      drawFontCentredGlowColour(FontMedium, 119, source, uiMainText());
-    }
+    // Keep every input announcement in FontLarge. Previously S/PDIF 2/3/4
+    // crossed a width threshold and abruptly fell back to the much smaller
+    // FontMedium. Scale the same large glyphs only as much as required.
+    const int16_t maximumWidth = UI_W - 20;
+    const int16_t sourceWidth = fontTextWidthKerned(FontLarge, source);
+    const uint8_t sourceScale = sourceWidth > maximumWidth
+        ? (uint8_t)std::max<int16_t>(68,
+            (maximumWidth * 100L) / sourceWidth)
+        : 100;
+    const int16_t scaledWidth =
+        fontTextWidthScaledKerned(FontLarge, source, sourceScale);
+    const int16_t sourceX = std::max<int16_t>(0,
+        (UI_W - scaledWidth) / 2);
+    const int16_t sourceY = sourceScale == 100 ? 91 : 99;
+    const uint16_t sourceGlow = blend565(C_BLACK, uiMainText(), 82);
+    drawFontTextScaledKerned(FontLarge, sourceX + 1, sourceY, source,
+                             sourceGlow, sourceScale);
+    drawFontTextScaledKerned(FontLarge, sourceX, sourceY + 1, source,
+                             sourceGlow, sourceScale);
+    drawFontTextScaledKerned(FontLarge, sourceX, sourceY, source,
+                             uiMainText(), sourceScale);
   }
   flushCanvasLocked();
 }
@@ -12500,6 +12571,12 @@ void transitionToHome()
       (mediaArtworkJobSubmitted ||
        __atomic_load_n(&mediaArtworkWorkerBusy, __ATOMIC_ACQUIRE))) {
     cancelMediaArtworkRequest(false);
+  }
+  // Home depends on confirmed S/PDIF receiver metadata for both its PCM label
+  // and meter admission. Ask the lightweight watcher for an immediate exact
+  // status read instead of waiting for its ordinary 1.2-second cadence.
+  if (mediaPlayerPoc.active() && isSpdifSource(dspi.source)) {
+    externalRuntimeRefreshRequested = true;
   }
   fadeUiOut();
   drawHome();

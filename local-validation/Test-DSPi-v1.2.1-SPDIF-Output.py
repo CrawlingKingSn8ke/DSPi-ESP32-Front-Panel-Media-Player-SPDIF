@@ -98,6 +98,28 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertNotIn("MEDIA_I2S_BCLK_PIN", INO)
         self.assertNotIn("MEDIA_I2S_LRCLK_PIN", INO)
 
+    def test_lightweight_runtime_watcher_confirms_spdif_lock_and_rate(self):
+        body = function_body(INO, "bool pollExternalRuntimeState()")
+        self.assertIn("REQ_GET_SPDIF_RX_STATUS", body)
+        self.assertIn("REQ_GET_SPDIF_RX_CH_STATUS", body)
+        self.assertIn("dspi.spdifState = observedSpdifState", body)
+        self.assertIn("dspi.sampleRate = observedSampleRate", body)
+        self.assertIn("spdifStatusChanged", body)
+
+    def test_returning_home_requests_immediate_spdif_status(self):
+        body = function_body(INO, "\nvoid transitionToHome()\n")
+        self.assertIn("mediaPlayerPoc.active()", body)
+        self.assertIn("isSpdifSource(dspi.source)", body)
+        self.assertIn("externalRuntimeRefreshRequested = true", body)
+
+    def test_long_spdif_overlay_keeps_large_scaled_glyphs(self):
+        body = function_body(INO, "void drawChangeOverlay()")
+        self.assertIn("fontTextWidthScaledKerned(FontLarge, source", body)
+        self.assertIn("drawFontTextScaledKerned(FontLarge", body)
+        self.assertNotIn(
+            "drawFontCentredGlowColour(FontMedium, 119, source", body
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
