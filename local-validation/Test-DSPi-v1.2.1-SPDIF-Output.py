@@ -120,6 +120,37 @@ class SpdifOutputContracts(unittest.TestCase):
             "drawFontCentredGlowColour(FontMedium, 119, source", body
         )
 
+    def test_volume_limit_stops_media_before_dspi_flash(self):
+        body = function_body(INO, "void applyEdit()")
+        stop = body.index('stopMediaPlayback("volume limit flash guard")')
+        persist = body.index("persistIndependentMasterVolumeVerified()")
+        self.assertLess(stop, persist)
+        self.assertIn("!mediaPlayerPoc.active()", body)
+        self.assertIn("!mediaTrackTransitionActive()", body)
+        self.assertIn("!mediaRouteRestorePending", body)
+        self.assertNotIn("beginExternalHold", body)
+        self.assertNotIn("endExternalHold", body)
+
+    def test_all_real_local_input_changes_stop_music(self):
+        apply_body = function_body(INO, "void applyEdit()")
+        shortcut_body = function_body(INO, "void changeInput(int direction)")
+        self.assertIn(
+            "mediaSessionPresent && selectedSource != dspi.source",
+            apply_body,
+        )
+        self.assertIn(
+            "mediaSessionPresent && target != baseSource", shortcut_body
+        )
+        for body in (apply_body, shortcut_body):
+            self.assertIn("mediaPlaybackSuspended", body)
+            self.assertIn("mediaCurrentPath[0]", body)
+            self.assertIn("mediaTrackTransitionActive()", body)
+        self.assertNotIn("target != SRC_I2S", shortcut_body)
+
+    def test_console_input_change_still_stops_music(self):
+        loop_body = function_body(INO, "void loop()")
+        self.assertIn('stopMediaPlayback("external input change")', loop_body)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

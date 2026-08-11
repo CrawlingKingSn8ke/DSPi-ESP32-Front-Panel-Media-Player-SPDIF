@@ -13674,9 +13674,13 @@ void applyEdit()
   String failureText = "DSPi error";
   if (menuPage == PAGE_INPUT) {
     InputSource selectedSource = (InputSource)editInt;
-    // Merely selecting I2S never starts or interrupts music.  Selecting any
-    // other DSPi source owns the route and stops the ESP32 player first.
-    if (mediaPlayerPoc.active() && selectedSource != SRC_I2S) {
+    // Any genuine input change takes ownership from the ESP S/PDIF player.
+    // Clear even a parked/paused queue so a later Play cannot unexpectedly
+    // reclaim S/PDIF after the listener deliberately selected another input.
+    const bool mediaSessionPresent = mediaPlayerPoc.active() ||
+        mediaPlaybackSuspended || mediaCurrentPath[0] ||
+        mediaTrackTransitionActive();
+    if (mediaSessionPresent && selectedSource != dspi.source) {
       stopMediaPlayback("input menu");
     }
     if (mediaRouteRestorePending && mediaRoute.captured &&
@@ -13715,14 +13719,27 @@ void applyEdit()
   } else if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
     const bool originalMute = dspi.muted;
     const float originalMaster = dspi.masterVolumeDb;
-    const bool hold = mediaPlayerPoc.beginExternalHold(800);
-    bool releaseSafe = false;
+    const bool mediaSessionPresent = mediaPlayerPoc.active() ||
+        mediaPlaybackSuspended || mediaCurrentPath[0] ||
+        mediaTrackTransitionActive();
     bool limitPersisted = false;
 
-    if (!hold) {
+    // DSPi persists the independent ceiling in flash. Use the same proven
+    // boundary as preset saving: completely stop the transmitter, restore the
+    // prior physical route, and verify cleanup before starting the flash
+    // transaction. A quiescent-but-live S/PDIF task can otherwise outlive an
+    // ambiguous DSPi blackout and remain held until a power cycle.
+    if (mediaSessionPresent) {
+      stopMediaPlayback("volume limit flash guard");
+    }
+    const bool mediaStopped = !mediaPlayerPoc.active() &&
+        !mediaTrackTransitionActive() && !mediaRouteRestorePending;
+
+    if (!mediaStopped) {
       ok = false;
-      failureText = "Limit busy - try again";
-      Serial.println("VOLUME LIMIT TX: refused; Media output could not become quiescent");
+      failureText = "Music stop failed";
+      Serial.println(
+          "VOLUME LIMIT TX: refused; Media stop/route cleanup incomplete");
     } else {
       const bool muted = setUserMuteVerified(true);
       const bool independent = muted && ensureIndependentMasterVolumeModeVerified();
@@ -13732,38 +13749,33 @@ void applyEdit()
 
       if (ok) {
         const bool muteRestored = setUserMuteVerified(originalMute);
-        if (muteRestored) {
-          releaseSafe = true;
-        } else {
+        if (!muteRestored) {
           // The new limit is durable, but the former mute state could not be
-          // proven. Keep DSPi muted; release I2S only after that safe fallback
-          // is verified.
+          // proven. Keep DSPi in an explicitly verified safe-muted state; the
+          // Media task is already fully stopped and can be started normally.
           const bool safeMute = setUserMuteVerified(true);
-          releaseSafe = safeMute;
           ok = false;
           failureText = safeMute ? "Limit saved - muted"
-                                 : "Limit saved - output held";
+                                 : "Limit saved - mute error";
         }
       } else {
         // Do not leave a partially changed live limit. Restore the original
-        // ceiling where possible and independently verify mute before releasing
-        // Media. No DSP command is issued at all when hold acquisition failed.
+        // ceiling where possible and independently verify a safe mute. There
+        // is no retained ESP hold, so a later playback attempt cannot inherit
+        // a latched output-task state from this failure path.
         const bool masterRestored = setMasterVolumeVerified(originalMaster);
         const bool safeMute = setUserMuteVerified(true);
-        releaseSafe = masterRestored && safeMute;
-        failureText = releaseSafe ? "Limit failed - muted"
-                                  : "Limit failed - output held";
-      }
-
-      if (releaseSafe) {
-        mediaPlayerPoc.endExternalHold();
-      } else {
-        Serial.printf("VOLUME LIMIT TX: SAFETY HOLD RETAINED persisted=%s; "
-                      "power cycle required\n",
-                      limitPersisted ? "yes" : "no");
+        Serial.printf("VOLUME LIMIT TX: recovery persisted=%s "
+                      "master_restore=%s mute_guard=%s\n",
+                      limitPersisted ? "yes" : "no",
+                      masterRestored ? "OK" : "FAILED",
+                      safeMute ? "OK" : "FAILED");
+        failureText = masterRestored && safeMute
+            ? "Limit failed - muted" : "Limit recovery error";
       }
     }
-    successText = "Global limit saved";
+    successText = mediaSessionPresent ? "Limit saved - music stopped"
+                                      : "Global limit saved";
   } else if (menuPage == PAGE_MEDIA_SETTINGS) {
     mediaSeekStepIndex = (uint8_t)constrain(editInt, 0, 2);
     markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
@@ -14033,7 +14045,10 @@ void changeInput(int direction)
     return;
   }
   InputSource target = nextInputSourceChoice(baseSource, direction);
-  if (mediaPlayerPoc.active() && target != SRC_I2S) {
+  const bool mediaSessionPresent = mediaPlayerPoc.active() ||
+      mediaPlaybackSuspended || mediaCurrentPath[0] ||
+      mediaTrackTransitionActive();
+  if (mediaSessionPresent && target != baseSource) {
     stopMediaPlayback("input change");
   }
   if (target == baseSource || !setInputSource(target, true)) {
