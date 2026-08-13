@@ -9628,7 +9628,7 @@ uint8_t mediaBrowserActionOffset()
   if (!mediaBrowserShowsActions()) return 0;
   uint8_t count = mediaCurrentPath[0] ? 1 : 0;
   if (mediaPlayerPoc.mounted()) count++;
-  return count + 1;  // Wi-Fi Transfer is always the final root action.
+  return count;
 }
 
 bool mediaBrowserItemIsNowPlaying(uint8_t itemIndex)
@@ -9642,20 +9642,11 @@ bool mediaBrowserItemIsSettings(uint8_t itemIndex)
           itemIndex == (mediaCurrentPath[0] ? 1 : 0);
 }
 
-bool mediaBrowserItemIsWifiTransfer(uint8_t itemIndex)
-{
-  if (!mediaBrowserShowsActions()) return false;
-  uint8_t wifiIndex = mediaCurrentPath[0] ? 1 : 0;
-  if (mediaPlayerPoc.mounted()) wifiIndex++;
-  return itemIndex == wifiIndex;
-}
-
-
 uint8_t mediaBrowserItemCount()
 {
   uint8_t count = mediaBrowserEntryCount + mediaBrowserActionOffset();
   // Preserve the normal read-only SD probe action when the card has not yet
-  // mounted; Wi-Fi Transfer is a separate item and must not replace it.
+  // mounted.
   if (!mediaPlayerPoc.mounted() && mediaBrowserShowsActions()) count++;
   return count ? count : 1;
 }
@@ -9965,11 +9956,6 @@ void selectMediaMenuItem()
     enterPage(PAGE_MEDIA_SETTINGS);
     return;
   }
-  if (mediaBrowserItemIsWifiTransfer(menuIndex)) {
-    beginWifiTransferConfirmation();
-    return;
-  }
-
   if (!mediaPlayerPoc.mounted()) {
     showToast("Checking SD card...", 900);
     drawMenu();
@@ -10484,7 +10470,6 @@ String mediaBrowserItemName(uint8_t index)
 {
   if (mediaBrowserItemIsNowPlaying(index)) return "Now Playing";
   if (mediaBrowserItemIsSettings(index)) return "Playback Settings";
-  if (mediaBrowserItemIsWifiTransfer(index)) return "Wi-Fi Transfer";
   if (!mediaPlayerPoc.mounted()) return "Check SD card";
   int16_t entryIndex = mediaBrowserEntryIndex(index);
   if (entryIndex < 0) {
@@ -10505,7 +10490,6 @@ String mediaBrowserItemTag(uint8_t index)
     return mediaPlaybackSuspended ? "PAUSED" : "READY";
   }
   if (mediaBrowserItemIsSettings(index)) return "SET";
-  if (mediaBrowserItemIsWifiTransfer(index)) return "TRANSFER";
   if (!mediaPlayerPoc.mounted()) return "INSERT CARD";
   int16_t entryIndex = mediaBrowserEntryIndex(index);
   if (entryIndex < 0) return "";
@@ -10734,7 +10718,7 @@ uint8_t menuItemCount(MenuPage page)
     case PAGE_LEVELLER: return 6;
     case PAGE_PSYBASS: return 6;
     case PAGE_BLUETOOTH: return bleMenuItemCount();
-    case PAGE_SYSTEM: return 3;
+    case PAGE_SYSTEM: return 4;
     case PAGE_MEDIA_SETTINGS: return 1;
     case PAGE_SCREEN_SETTINGS: return 4;
     case PAGE_IDLE_SCREEN:
@@ -10775,8 +10759,10 @@ String menuItemName(MenuPage page, uint8_t index)
     return bleMenuItemName(index);
   }
   if (page == PAGE_SYSTEM) {
-    const char *items[] = {"Status", "Screen Settings", "Volume Limit"};
-    return items[std::min<uint8_t>(index, 2)];
+    const char *items[] = {
+      "Status", "Screen Settings", "Volume Limit", "WiFi Transfer/Update"
+    };
+    return items[std::min<uint8_t>(index, 3)];
   }
   if (page == PAGE_MEDIA_SETTINGS) return "Seek Step";
   if (page == PAGE_SCREEN_SETTINGS) {
@@ -10937,7 +10923,8 @@ String menuItemValue(MenuPage page, uint8_t index)
   if (page == PAGE_SYSTEM) {
     if (index == 0) return dspi.connected ? "Ready" : "Fault";
     if (index == 1) return "Open";
-    return String(dspi.masterVolumeDb, 1) + " dB";
+    if (index == 2) return String(dspi.masterVolumeDb, 1) + " dB";
+    return "";
   }
   if (page == PAGE_MEDIA_SETTINGS) {
     return mediaSeekStepText(mediaSeekStepIndex);
@@ -12601,15 +12588,6 @@ void drawMediaBrowserIcon(uint8_t itemIndex, int16_t x, int16_t y,
     canvas->fillCircle(x + 8, y + 14, 2, colour);
     return;
   }
-  if (mediaBrowserItemIsWifiTransfer(itemIndex)) {
-    canvas->drawCircle(x + 9, y + 14, 2, colour);
-    canvas->drawCircle(x + 9, y + 14, 6, colour);
-    canvas->drawCircle(x + 9, y + 14, 10, colour);
-    canvas->fillRect(x - 2, y + 14, 23, 8, C_BLACK);
-    canvas->fillCircle(x + 9, y + 14, 2, colour);
-    return;
-  }
-
   int16_t entryIndex = mediaBrowserEntryIndex(itemIndex);
   if (entryIndex >= 0 && mediaBrowserEntries[entryIndex].directory) {
     canvas->drawRect(x + 1, y + 5, 17, 11, colour);
@@ -13911,6 +13889,11 @@ void selectMenuItem()
     return;
   }
 
+  if (menuPage == PAGE_SYSTEM && menuIndex == 3) {
+    beginWifiTransferConfirmation();
+    return;
+  }
+
   if (menuPage == PAGE_SCREEN_SETTINGS) {
     if (menuIndex == 2) {
       enterPage(PAGE_IDLE_SCREEN);
@@ -14180,11 +14163,11 @@ void dispatchUiAction(UiAction action)
       drawWifiTransferConfirmation();
     } else if (action == ACT_SELECT) {
       if (wifiTransferConfirmStart) requestWifiTransferEntry();
-      else enterPage(PAGE_MEDIA);
+      else enterPage(PAGE_SYSTEM);
     } else if (action == ACT_HOME) {
       transitionToHome();
     } else if (action == ACT_BACK || action == ACT_MENU_TOGGLE) {
-      enterPage(PAGE_MEDIA);
+      enterPage(PAGE_SYSTEM);
     }
     return;
   }
@@ -14197,7 +14180,7 @@ void dispatchUiAction(UiAction action)
     if (action == ACT_HOME) transitionToHome();
     else if (action == ACT_SELECT || action == ACT_BACK ||
              action == ACT_MENU_TOGGLE) {
-      enterPage(PAGE_MEDIA);
+      enterPage(PAGE_SYSTEM);
     }
     return;
   }
@@ -17062,7 +17045,7 @@ void finishWifiTransferLifecycle()
   }
 
   showToast("Transfer complete", 1800);
-  enterPage(PAGE_MEDIA);
+  enterPage(PAGE_SYSTEM);
 }
 
 void serviceWifiTransferUiRedraw()
