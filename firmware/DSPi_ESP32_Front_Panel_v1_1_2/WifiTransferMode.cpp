@@ -5,6 +5,10 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
+#include <Update.h>
+#include <esp_app_format.h>
+#include <esp_chip_info.h>
+#include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <esp_timer.h>
@@ -56,6 +60,13 @@ constexpr char kWifiSsidKey[] = "sta_ssid";
 constexpr char kWifiPasswordKey[] = "sta_pass";
 constexpr char kMdnsHost[] = "dspi-transfer";
 constexpr uint32_t kStationConnectTimeoutMs = 15000U;
+constexpr uint32_t kFirmwareResponseDrainMs = 1800U;
+constexpr uint64_t kMinimumFirmwareImageBytes = 256U * 1024U;
+
+static_assert(
+    sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) +
+            sizeof(esp_app_desc_t) == 288U,
+    "OTA validation prefix must match ESP-IDF image layout");
 
 enum class UploadWriterCommandType : uint8_t {
   Write = 0,
@@ -553,6 +564,10 @@ bool WifiTransferModeController::start(MediaFsStorage &storage,
                                        const char *transferRoot) {
   if (active()) return false;
 
+  // A previous failed/abandoned web update must not leak state into a new
+  // transfer-mode session. This does not touch NVS or either valid app slot.
+  resetFirmwareUpdateState();
+
   bool prepared = false;
   portENTER_CRITICAL(&stateMux_);
   prepared = storagePreflightValid_ && storage_ == &storage;
@@ -704,6 +719,17 @@ void WifiTransferModeController::transferTask() {
   }
 
   for (;;) {
+    uint32_t firmwareRebootAt = 0;
+    portENTER_CRITICAL(&stateMux_);
+    firmwareRebootAt = firmwareRebootAt_;
+    portEXIT_CRITICAL(&stateMux_);
+    if (firmwareRebootAt &&
+        static_cast<int32_t>(millis() - firmwareRebootAt) >= 0) {
+      Serial.println("WIFI OTA: response drained; restarting into update");
+      delay(20);
+      ESP.restart();
+    }
+
     serviceStationConnection();
     serviceControlRequests();
 
@@ -765,7 +791,8 @@ void WifiTransferModeController::transferTask() {
     // uploads retain the normal one-tick idle delay.
     bool writerActive = false;
     portENTER_CRITICAL(&stateMux_);
-    writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+    writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+                   firmwareUpdateActive_;
     portEXIT_CRITICAL(&stateMux_);
     if (writerActive) {
       taskYIELD();
@@ -779,7 +806,8 @@ bool WifiTransferModeController::requestStartupAbort() {
   bool allowed = false;
   portENTER_CRITICAL(&stateMux_);
   const bool writerActive =
-      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+      firmwareUpdateActive_;
   allowed = taskHandle_ != nullptr && !writerActive && !handlingRequest_ &&
             (state_ == WifiTransferServiceState::Starting ||
              state_ == WifiTransferServiceState::Serving ||
@@ -893,7 +921,8 @@ void WifiTransferModeController::serviceStationConnection() {
       portENTER_CRITICAL(&stateMux_);
       // Keep the screen's primary address at 192.168.4.1. It always belongs
       // to the direct AP; the LAN address is shown in status and on the page.
-      if (!WifiTransferPolicy::uploadWriterIsActive(uploadPhase_)) {
+      if (!WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+          !firmwareUpdateActive_) {
         copyText(message_, sizeof(message_), readyMessage);
       }
       portEXIT_CRITICAL(&stateMux_);
@@ -913,7 +942,8 @@ void WifiTransferModeController::serviceStationConnection() {
     stationIp_[0] = '\0';
     stopMdns();
     portENTER_CRITICAL(&stateMux_);
-    if (!WifiTransferPolicy::uploadWriterIsActive(uploadPhase_)) {
+    if (!WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+        !firmwareUpdateActive_) {
       copyText(message_, sizeof(message_),
                "Home Wi-Fi lost; direct access point remains ready");
     }
@@ -926,7 +956,8 @@ void WifiTransferModeController::serviceStationConnection() {
     stationConnectPending_ = false;
     WiFi.disconnect(false, false);
     portENTER_CRITICAL(&stateMux_);
-    if (!WifiTransferPolicy::uploadWriterIsActive(uploadPhase_)) {
+    if (!WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+        !firmwareUpdateActive_) {
       copyText(message_, sizeof(message_),
                "Direct access point ready; saved Wi-Fi unavailable");
     }
@@ -1079,6 +1110,14 @@ void WifiTransferModeController::configureRoutes() {
       [this, wrapped]() {
         wrapped(&WifiTransferModeController::handleUploadRaw);
       });
+  server->on(
+      WifiTransferWeb::kRouteFirmware, HTTP_PUT,
+      [this, wrapped]() {
+        wrapped(&WifiTransferModeController::handleFirmwareFinished);
+      },
+      [this, wrapped]() {
+        wrapped(&WifiTransferModeController::handleFirmwareRaw);
+      });
   server->on(WifiTransferWeb::kRouteCancel, HTTP_POST,
              [this, wrapped]() { wrapped(&WifiTransferModeController::handleCancel); });
   server->on(WifiTransferWeb::kRouteIncomplete, HTTP_DELETE,
@@ -1114,7 +1153,8 @@ void WifiTransferModeController::serviceControlRequests() {
       filesystemSyncRequested_ && !filesystemSyncComplete_;
   abortRequested = abortWriterRequested_;
   writerActive =
-      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+      firmwareUpdateActive_;
   accepting = accepting_;
   handling = handlingRequest_;
   closeHttpRequested = closeHttpRequested_;
@@ -1164,6 +1204,7 @@ void WifiTransferModeController::serviceControlRequests() {
     portENTER_CRITICAL(&stateMux_);
     if (accepting_ &&
         !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+        !firmwareUpdateActive_ &&
         !handlingRequest_) {
       accepting_ = false;
       finishRequested_ = true;
@@ -1185,7 +1226,8 @@ void WifiTransferModeController::closeHttpListenerIfRequested() {
   portENTER_CRITICAL(&stateMux_);
   shouldClose = closeHttpRequested_ && !httpListenerClosed_ &&
                 !handlingRequest_ &&
-                !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+                !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+                !firmwareUpdateActive_;
   portEXIT_CRITICAL(&stateMux_);
   if (!shouldClose || !workspace_ || !server_) return;
 
@@ -1645,7 +1687,8 @@ bool WifiTransferModeController::planUploadFromHeaders(
   bool busy = false;
   portENTER_CRITICAL(&stateMux_);
   accepting = accepting_;
-  busy = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+  busy = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+         firmwareUpdateActive_;
   portEXIT_CRITICAL(&stateMux_);
   if (!accepting) {
     reason = "not_accepting";
@@ -1958,6 +2001,243 @@ bool WifiTransferModeController::ensureUploadParentDirectories() {
     vTaskDelay(1);
   }
   return true;
+}
+
+void WifiTransferModeController::resetFirmwareUpdateState() {
+  if (Update.isRunning()) Update.abort();
+  firmwareUpdateActive_ = false;
+  firmwareUpdateResponseReady_ = false;
+  firmwareUpdateSucceeded_ = false;
+  firmwareHeaderValidated_ = false;
+  firmwareUpdateResponseCode_ = 500;
+  firmwareHeaderUsed_ = 0;
+  firmwareDeclaredBytes_ = 0;
+  firmwareReceivedBytes_ = 0;
+  firmwareStartedMs_ = 0;
+  firmwareRebootAt_ = 0;
+  memset(firmwareHeader_, 0, sizeof(firmwareHeader_));
+  firmwareResponseReason_[0] = '\0';
+  firmwareResponseMessage_[0] = '\0';
+  firmwareVersion_[0] = '\0';
+}
+
+void WifiTransferModeController::failFirmwareUpdate(
+    int code, const char *reason, const char *message, bool stopClient) {
+  if (Update.isRunning()) Update.abort();
+  portENTER_CRITICAL(&stateMux_);
+  firmwareUpdateActive_ = false;
+  firmwareUpdateSucceeded_ = false;
+  firmwareUpdateResponseReady_ = true;
+  firmwareUpdateResponseCode_ = code;
+  accepting_ = state_ == WifiTransferServiceState::Serving &&
+               !finishRequested_ && !closeHttpRequested_;
+  copyText(firmwareResponseReason_, sizeof(firmwareResponseReason_),
+           reason ? reason : "firmware_update_failed");
+  copyText(firmwareResponseMessage_, sizeof(firmwareResponseMessage_),
+           message ? message : "Firmware update failed.");
+  copyText(message_, sizeof(message_), firmwareResponseMessage_);
+  portEXIT_CRITICAL(&stateMux_);
+  Serial.printf("WIFI OTA: failed reason=%s received=%" PRIu64
+                " declared=%" PRIu64 " update_error=%u\n",
+                firmwareResponseReason_, firmwareReceivedBytes_,
+                firmwareDeclaredBytes_, Update.getError());
+  if (stopClient && server_) server_->client().stop();
+}
+
+bool WifiTransferModeController::validateFirmwareHeader() {
+  if (firmwareHeaderUsed_ < sizeof(firmwareHeader_)) return false;
+  esp_image_header_t imageHeader = {};
+  memcpy(&imageHeader, firmwareHeader_, sizeof(imageHeader));
+  if (imageHeader.magic != ESP_IMAGE_HEADER_MAGIC ||
+      imageHeader.segment_count == 0 ||
+      imageHeader.chip_id != ESP_CHIP_ID_ESP32S3) {
+    return false;
+  }
+
+  esp_app_desc_t app = {};
+  constexpr size_t appOffset =
+      sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+  memcpy(&app, firmwareHeader_ + appOffset, sizeof(app));
+  if (app.magic_word != ESP_APP_DESC_MAGIC_WORD) return false;
+  copyText(firmwareVersion_, sizeof(firmwareVersion_), app.version);
+  firmwareHeaderValidated_ = true;
+  return true;
+}
+
+void WifiTransferModeController::handleFirmwareRaw() {
+  if (!server_) return;
+  HTTPRaw &raw = server_->raw();
+
+  if (raw.status == RAW_START) {
+    resetFirmwareUpdateState();
+    const int contentLength = server_->clientContentLength();
+    uint64_t declared = 0;
+    const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+    bool accepting = false;
+    bool sdWriterActive = false;
+    portENTER_CRITICAL(&stateMux_);
+    accepting = accepting_;
+    sdWriterActive =
+        WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+    portEXIT_CRITICAL(&stateMux_);
+
+    const String sizeHeader = server_->header(kHeaderDeclaredSize);
+    if (!accepting || sdWriterActive || contentLength <= 0 || !next ||
+        sizeHeader.length() > 10U ||
+        !parseUnsignedDecimal(sizeHeader, 0xFFFFFFFFULL, declared) ||
+        declared != static_cast<uint64_t>(contentLength) ||
+        declared < kMinimumFirmwareImageBytes || declared > next->size) {
+      failFirmwareUpdate(
+          !accepting ? 503 : (sdWriterActive ? 409 : 400),
+          "firmware_preflight_rejected",
+          "Select a valid application-only firmware .bin that fits the OTA slot.",
+          true);
+      return;
+    }
+
+    // Music/BLE are already stopped by entry into transfer mode. Flush the SD
+    // metadata once before internal-flash writing; no SD operation is admitted
+    // while firmwareUpdateActive_ is true.
+    bool sdSynced = false;
+    if (storage_ &&
+        storage_->accessMode() == MediaFsAccessMode::TransferReadWrite) {
+      SharedSpiGuard guard;
+      sdSynced = storage_->syncTransferDevice();
+    }
+    if (!sdSynced || !Update.begin(static_cast<size_t>(declared), U_FLASH)) {
+      failFirmwareUpdate(500, "firmware_begin_failed",
+                         sdSynced ? Update.errorString()
+                                  : "SD metadata could not be synchronized.",
+                         true);
+      return;
+    }
+
+    portENTER_CRITICAL(&stateMux_);
+    firmwareUpdateActive_ = true;
+    firmwareDeclaredBytes_ = declared;
+    firmwareStartedMs_ = millis();
+    accepting_ = false;
+    writtenBytes_ = 0;
+    declaredBytes_ = declared;
+    uploadStartedMs_ = firmwareStartedMs_;
+    copyText(currentFile_, sizeof(currentFile_), "Firmware application");
+    copyText(message_, sizeof(message_), "Receiving firmware update");
+    portEXIT_CRITICAL(&stateMux_);
+    Serial.printf("WIFI OTA: begin bytes=%" PRIu64
+                  " target=%s offset=0x%08lX slot_bytes=%lu\n",
+                  declared, next->label,
+                  static_cast<unsigned long>(next->address),
+                  static_cast<unsigned long>(next->size));
+    return;
+  }
+
+  if (raw.status == RAW_WRITE) {
+    if (!firmwareUpdateActive_) return;
+    if (firmwareReceivedBytes_ + raw.currentSize > firmwareDeclaredBytes_) {
+      failFirmwareUpdate(400, "firmware_size_overrun",
+                         "Firmware body exceeded its declared size.", true);
+      return;
+    }
+
+    size_t sourceOffset = 0;
+    if (!firmwareHeaderValidated_) {
+      const size_t needed = sizeof(firmwareHeader_) - firmwareHeaderUsed_;
+      const size_t copied = std::min(needed, raw.currentSize);
+      memcpy(firmwareHeader_ + firmwareHeaderUsed_, raw.buf, copied);
+      firmwareHeaderUsed_ += copied;
+      sourceOffset += copied;
+      if (firmwareHeaderUsed_ == sizeof(firmwareHeader_)) {
+        if (!validateFirmwareHeader() ||
+            Update.write(firmwareHeader_, sizeof(firmwareHeader_)) !=
+                sizeof(firmwareHeader_)) {
+          failFirmwareUpdate(400, "invalid_application_image",
+                             "The selected file is not an ESP32-S3 application image.",
+                             true);
+          return;
+        }
+      }
+    }
+
+    if (sourceOffset < raw.currentSize) {
+      const size_t remaining = raw.currentSize - sourceOffset;
+      if (!firmwareHeaderValidated_ ||
+          Update.write(raw.buf + sourceOffset, remaining) != remaining) {
+        failFirmwareUpdate(500, "firmware_write_failed",
+                           Update.errorString(), true);
+        return;
+      }
+    }
+
+    firmwareReceivedBytes_ += raw.currentSize;
+    portENTER_CRITICAL(&stateMux_);
+    writtenBytes_ = firmwareReceivedBytes_;
+    uploadElapsedMs_ = elapsedSince(firmwareStartedMs_, millis());
+    portEXIT_CRITICAL(&stateMux_);
+    noteWebActivity();
+    return;
+  }
+
+  if (raw.status == RAW_END) {
+    if (!firmwareUpdateActive_) return;
+    if (!firmwareHeaderValidated_ ||
+        firmwareReceivedBytes_ != firmwareDeclaredBytes_ ||
+        !Update.end(false) || !Update.isFinished()) {
+      failFirmwareUpdate(400, "firmware_verification_failed",
+                         Update.errorString(), false);
+      return;
+    }
+    portENTER_CRITICAL(&stateMux_);
+    firmwareUpdateActive_ = false;
+    firmwareUpdateSucceeded_ = true;
+    firmwareUpdateResponseReady_ = true;
+    firmwareUpdateResponseCode_ = 200;
+    uploadElapsedMs_ = elapsedSince(firmwareStartedMs_, millis());
+    copyText(firmwareResponseReason_, sizeof(firmwareResponseReason_), "ok");
+    copyText(firmwareResponseMessage_, sizeof(firmwareResponseMessage_),
+             "Firmware verified. DSPi is restarting.");
+    copyText(message_, sizeof(message_), firmwareResponseMessage_);
+    portEXIT_CRITICAL(&stateMux_);
+    Serial.printf("WIFI OTA: verified bytes=%" PRIu64 " version=%s\n",
+                  firmwareReceivedBytes_,
+                  firmwareVersion_[0] ? firmwareVersion_ : "unknown");
+    return;
+  }
+
+  if (raw.status == RAW_ABORTED && firmwareUpdateActive_) {
+    failFirmwareUpdate(499, "firmware_upload_aborted",
+                       "Firmware upload was cancelled or disconnected.",
+                       false);
+  }
+}
+
+void WifiTransferModeController::handleFirmwareFinished() {
+  if (!firmwareUpdateResponseReady_) {
+    sendJsonError(500, "missing_firmware_result",
+                  "Firmware upload did not produce a terminal result.");
+    return;
+  }
+  if (!firmwareUpdateSucceeded_) {
+    sendJsonError(firmwareUpdateResponseCode_, firmwareResponseReason_,
+                  firmwareResponseMessage_);
+    return;
+  }
+
+  beginChunkedJson();
+  WebServer &server = *server_;
+  char fields[192] = {0};
+  server.sendContent("{\"ok\":true,\"message\":");
+  sendJsonString(firmwareResponseMessage_);
+  snprintf(fields, sizeof(fields),
+           ",\"bytes\":\"%" PRIu64 "\",\"version\":",
+           firmwareReceivedBytes_);
+  server.sendContent(fields);
+  sendJsonString(firmwareVersion_[0] ? firmwareVersion_ : "unknown");
+  server.sendContent("}");
+  endChunkedJson();
+
+  portENTER_CRITICAL(&stateMux_);
+  firmwareRebootAt_ = millis() + kFirmwareResponseDrainMs;
+  portEXIT_CRITICAL(&stateMux_);
 }
 
 void WifiTransferModeController::handleUploadRaw() {
@@ -2972,7 +3252,8 @@ void WifiTransferModeController::handleCancel() {
   bool writerActive = false;
   portENTER_CRITICAL(&stateMux_);
   writerActive =
-      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+      firmwareUpdateActive_;
   if (writerActive) abortWriterRequested_ = true;
   portEXIT_CRITICAL(&stateMux_);
   sendJsonOk(writerActive ? "\"cancelling\":true"
@@ -2983,7 +3264,8 @@ void WifiTransferModeController::handleFinish() {
   bool writerActive = false;
   portENTER_CRITICAL(&stateMux_);
   writerActive =
-      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+      firmwareUpdateActive_;
   if (!writerActive) {
     accepting_ = false;
     finishRequested_ = true;
@@ -3150,7 +3432,8 @@ void WifiTransferModeController::handleDeletePath(bool expectDirectory) {
   bool writerActive = false;
   portENTER_CRITICAL(&stateMux_);
   accepting = accepting_;
-  writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+  writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+                 firmwareUpdateActive_;
   portEXIT_CRITICAL(&stateMux_);
   if (!accepting || !workspace_ || !storage_) {
     sendJsonError(503, "not_accepting",
@@ -3477,7 +3760,8 @@ void WifiTransferModeController::handleNetworkScan() {
   bool writerActive = false;
   portENTER_CRITICAL(&stateMux_);
   accepting = accepting_;
-  writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+  writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+                 firmwareUpdateActive_;
   portEXIT_CRITICAL(&stateMux_);
 
   if (!accepting || !workspace_) {
@@ -3598,7 +3882,8 @@ void WifiTransferModeController::handleNetworkSave() {
   bool writerActive = false;
   portENTER_CRITICAL(&stateMux_);
   accepting = accepting_;
-  writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+  writerActive = WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+                 firmwareUpdateActive_;
   portEXIT_CRITICAL(&stateMux_);
   if (!accepting) {
     sendJsonError(503, "not_accepting",
@@ -3674,7 +3959,8 @@ void WifiTransferModeController::snapshot(
   result.accepting = accepting_;
   result.handlingRequest = handlingRequest_;
   result.writerActive =
-      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+      WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) ||
+      firmwareUpdateActive_;
   result.httpListenerClosed = httpListenerClosed_;
   result.quiescent =
       httpListenerClosed_ && !handlingRequest_ &&
@@ -3714,7 +4000,8 @@ bool WifiTransferModeController::discardPreparedState() {
   allowed =
       taskHandle_ == nullptr && networkStopped_ &&
       !handlingRequest_ &&
-      !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+      !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+      !firmwareUpdateActive_;
   if (allowed) {
     storagePreflightValid_ = false;
     storage_ = nullptr;
@@ -3762,7 +4049,8 @@ bool WifiTransferModeController::quiescent() const {
   portENTER_CRITICAL(&stateMux_);
   const bool result =
       httpListenerClosed_ && !accepting_ && !handlingRequest_ &&
-      !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_);
+      !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+      !firmwareUpdateActive_;
   portEXIT_CRITICAL(&stateMux_);
   return result;
 }
@@ -3781,6 +4069,7 @@ bool WifiTransferModeController::requestFilesystemSync() {
   allowed =
       httpListenerClosed_ && !accepting_ && !handlingRequest_ &&
       !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+      !firmwareUpdateActive_ &&
       storage_ &&
       storage_->accessMode() == MediaFsAccessMode::TransferReadWrite;
   if (allowed) {
@@ -3798,6 +4087,7 @@ bool WifiTransferModeController::stopNetworkAfterStorageRelease() {
   allowed =
       httpListenerClosed_ && !accepting_ && !handlingRequest_ &&
       !WifiTransferPolicy::uploadWriterIsActive(uploadPhase_) &&
+      !firmwareUpdateActive_ &&
       storage_ &&
       storage_->accessMode() != MediaFsAccessMode::TransferReadWrite &&
       taskHandle_ != nullptr;

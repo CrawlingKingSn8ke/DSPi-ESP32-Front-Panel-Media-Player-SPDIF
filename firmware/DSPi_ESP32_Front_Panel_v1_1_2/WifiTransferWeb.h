@@ -48,6 +48,11 @@
 //     background STA connection while the direct AP remains available.
 //   POST /api/finish
 //     The server must reject this while a writer is active.
+//   PUT  /api/firmware
+//     Content-Type: application/octet-stream
+//     X-DSPi-Declared-Size: <application-image bytes>
+//     Streams one ESP32 application-only .bin to the inactive OTA slot.
+//     Full/merged flash images and images larger than the OTA slot are rejected.
 //
 // Error responses use an HTTP error status and:
 //   {ok:false,error:<stable-reason>,message:<safe-user-text>}
@@ -69,6 +74,7 @@ static constexpr char kRouteDelete[] = "/api/delete";
 static constexpr char kRouteFinish[] = "/api/finish";
 static constexpr char kRouteNetwork[] = "/api/network";
 static constexpr char kRouteNetworkScan[] = "/api/network/scan";
+static constexpr char kRouteFirmware[] = "/api/firmware";
 
 static const char kIndexHtml[] PROGMEM = R"DSPITRANSFER(
 <!doctype html>
@@ -195,6 +201,19 @@ progress{width:100%;height:14px;accent-color:var(--accent)}.meterlabel{display:f
   </section>
 
   <section class="card">
+    <h2>Local firmware update</h2>
+    <p class="muted">Install an <strong>application-only .bin</strong> from this device. The file stays on your local Wi-Fi connection, settings are preserved, and DSPi restarts only after verification. Do not select a 16 MB Full image.</p>
+    <div class="row">
+      <label id="firmwarePicker" class="button" for="firmwareFile">Choose application .bin</label>
+      <input id="firmwareFile" type="file" accept=".bin,application/octet-stream">
+      <button id="installFirmware" class="safe" type="button" disabled>Install firmware</button>
+    </div>
+    <p id="firmwareSelection" class="muted">No firmware selected.</p>
+    <div class="meterlabel"><span id="firmwareProgressText">No update running</span><span id="firmwareRate">--</span></div>
+    <progress id="firmwareProgress" max="1" value="0"></progress>
+  </section>
+
+  <section class="card">
     <h2>Incomplete uploads</h2>
     <p class="muted">Only temporary files ending in <code>.uploading</code> can be deleted here.</p>
     <div id="incomplete" class="table"></div>
@@ -216,7 +235,7 @@ const API=Object.freeze({
   status:"/api/status",list:"/api/list",mkdir:"/api/mkdir",
   preflight:"/api/preflight",upload:"/api/upload",cancel:"/api/cancel",
   incomplete:"/api/incomplete",folder:"/api/folder",delete:"/api/delete",finish:"/api/finish",network:"/api/network",
-  networkScan:"/api/network/scan"
+  networkScan:"/api/network/scan",firmware:"/api/firmware"
 });
 const PAGE_SIZE=96;
 const ALLOWED=/\.(flac|wav|mp3|jpe?g)$/i;
@@ -226,6 +245,7 @@ let currentPath="",queueBasePath="",page=0,incompletePage=0,hasMore=false,incomp
 let queue=[],running=false,cancelRequested=false,controller=null;
 let serverWriterActive=false,serverAccepting=false,statusBusy=false,finishBusy=false;
 let finishingClient=false,statusTimer=0,networkTimer=0,scanningNetwork=false;
+let firmwareFile=null,firmwareRunning=false,firmwareStarted=0;
 let scannedNetworks=[];
 let totalBytes=0,completedBytes=0,batchStarted=0,currentStarted=0,currentIndex=-1;
 
@@ -295,22 +315,26 @@ function transferHeaders(base,path,size){
   return headers;
 }
 function updateControls(){
-  $("startUpload").disabled=finishingClient||running||deleting||!serverAccepting||queue.length===0;
-  $("clearQueue").disabled=finishingClient||running||deleting||queue.length===0;
-  $("cancelUpload").disabled=finishingClient||deleting||(!running&&!serverWriterActive);
+  const locked=finishingClient||firmwareRunning;
+  $("startUpload").disabled=locked||running||deleting||!serverAccepting||queue.length===0;
+  $("clearQueue").disabled=locked||running||deleting||queue.length===0;
+  $("cancelUpload").disabled=locked||deleting||(!running&&!serverWriterActive);
   // The server also enforces this. The browser never offers Finish while a
   // local queue, request, or authoritative server writer is active.
-  $("finish").disabled=finishingClient||finishBusy||running||deleting||serverWriterActive||queue.length>0||!serverAccepting;
-  $("saveNetwork").disabled=finishingClient||running||deleting||serverWriterActive||!serverAccepting||scanningNetwork;
-  $("scanNetwork").disabled=finishingClient||running||deleting||serverWriterActive||!serverAccepting||scanningNetwork;
-  $("wifiFilter").disabled=finishingClient||running||deleting||serverWriterActive||scanningNetwork;
-  $("wifiNetworkSelect").disabled=finishingClient||running||deleting||serverWriterActive||scanningNetwork||scannedNetworks.length===0;
+  $("finish").disabled=locked||finishBusy||running||deleting||serverWriterActive||queue.length>0||!serverAccepting;
+  $("saveNetwork").disabled=locked||running||deleting||serverWriterActive||!serverAccepting||scanningNetwork;
+  $("scanNetwork").disabled=locked||running||deleting||serverWriterActive||!serverAccepting||scanningNetwork;
+  $("wifiFilter").disabled=locked||running||deleting||serverWriterActive||scanningNetwork;
+  $("wifiNetworkSelect").disabled=locked||running||deleting||serverWriterActive||scanningNetwork||scannedNetworks.length===0;
+  $("firmwareFile").disabled=locked||running||deleting||serverWriterActive||!serverAccepting;
+  $("firmwarePicker").classList.toggle("disabled",$("firmwareFile").disabled);
+  $("installFirmware").disabled=locked||running||deleting||serverWriterActive||!serverAccepting||!firmwareFile;
   document.querySelectorAll("button.deleteEntry").forEach(button=>{
-    button.disabled=finishingClient||running||deleting||serverWriterActive||!serverAccepting;
+    button.disabled=locked||running||deleting||serverWriterActive||!serverAccepting;
   });
 }
 async function refreshStatus(showErrors=false){
-  if(statusBusy||finishingClient||deleting||(running&&!showErrors))return null;
+  if(statusBusy||finishingClient||firmwareRunning||deleting||(running&&!showErrors))return null;
   statusBusy=true;
   try{
     const data=await requestJson(API.status);
@@ -340,7 +364,7 @@ function startPolling(){
   networkTimer=setInterval(()=>refreshNetwork(false),5000);
 }
 async function refreshNetwork(showErrors=false){
-  if(finishingClient||running||deleting)return null;
+  if(finishingClient||firmwareRunning||running||deleting)return null;
   try{
     const data=await requestJson(API.network);
     let text="Direct access: http://"+(data.apIp||"192.168.4.1");
@@ -427,7 +451,7 @@ async function scanNetworks(showErrors=true){
 
 async function saveNetwork(event){
   event.preventDefault();
-  if(finishingClient||running||deleting||serverWriterActive)return;
+  if(finishingClient||firmwareRunning||running||deleting||serverWriterActive)return;
   const ssid=$("wifiSsid").value;
   const password=$("wifiPassword").value;
   if(!ssid){setNotice("Enter the home Wi-Fi network name.","bad");return;}
@@ -533,7 +557,7 @@ function renderListing(entries){
   updateControls();
 }
 async function browse(path,newPage=0){
-  if(running||deleting)return;
+  if(firmwareRunning||running||deleting)return;
   try{
     const data=await requestJson(query(API.list,{path:path,page:newPage,limit:PAGE_SIZE}));
     currentPath=String(data.path||"").replace(/^\/+|\/+$/g,"");
@@ -623,7 +647,7 @@ function validateClientPath(path){
   return !parts.some(part=>!part||part==="."||part==="..");
 }
 function selectFiles(fileList,folderSelection){
-  if(running||deleting)return;
+  if(firmwareRunning||running||deleting)return;
   const accepted=[],rejected=[];
   Array.from(fileList).forEach(file=>{
     const relativePath=pickerPath(file,folderSelection);
@@ -789,8 +813,66 @@ async function cancelCurrent(){
   await waitForWriterIdle();
   updateControls();
 }
+function selectFirmware(fileList){
+  if(firmwareRunning)return;
+  const selected=fileList&&fileList.length?fileList[0]:null;
+  if(!selected){firmwareFile=null;$("firmwareSelection").textContent="No firmware selected.";updateControls();return;}
+  if(!/\.bin$/i.test(selected.name)){
+    firmwareFile=null;
+    $("firmwareSelection").textContent="Choose an application-only file ending in .bin.";
+    setNotice("Firmware selection rejected: only an application .bin is accepted.","bad");
+  }else{
+    firmwareFile=selected;
+    $("firmwareSelection").textContent=selected.name+" - "+formatBytes(selected.size);
+    setNotice("Firmware selected. Confirm it is an application-only image, then choose Install firmware.");
+  }
+  updateControls();
+}
+async function installFirmware(){
+  if(!firmwareFile||firmwareRunning||running||deleting||serverWriterActive||!serverAccepting)return;
+  const selected=firmwareFile;
+  const warning="Install "+selected.name+" ("+formatBytes(selected.size)+")?\n\nUse only an application-only .bin, never a 16 MB Full image. Settings will be preserved. Keep power connected until DSPi restarts.";
+  if(!window.confirm(warning))return;
+  firmwareRunning=true;firmwareStarted=performance.now();stopPolling();updateControls();
+  $("firmwareProgress").value=0;
+  $("firmwareProgressText").textContent="Starting local firmware upload...";
+  $("firmwareRate").textContent="--";
+  setNotice("Uploading and verifying firmware. Keep this page open and do not remove power.");
+  try{
+    const data=await new Promise((resolve,reject)=>{
+      const xhr=new XMLHttpRequest();
+      xhr.open("PUT",API.firmware,true);
+      xhr.setRequestHeader("Content-Type","application/octet-stream");
+      xhr.setRequestHeader("X-DSPi-Declared-Size",String(selected.size));
+      xhr.upload.onprogress=event=>{
+        const loaded=numberValue(event.loaded),elapsed=Math.max((performance.now()-firmwareStarted)/1000,.001);
+        $("firmwareProgress").value=selected.size?Math.min(loaded/selected.size,1):0;
+        $("firmwareProgressText").textContent=formatBytes(loaded)+" / "+formatBytes(selected.size);
+        $("firmwareRate").textContent=(loaded/elapsed/1000000).toFixed(2)+" MB/s";
+      };
+      xhr.onload=()=>{
+        let body={};try{body=JSON.parse(xhr.responseText||"{}");}catch(_){}
+        if(xhr.status>=200&&xhr.status<300&&body.ok!==false)resolve(body);
+        else reject(new Error(body.message||body.error||("Firmware update failed ("+xhr.status+")")));
+      };
+      xhr.onerror=()=>reject(new Error("Local connection was lost during firmware upload."));
+      xhr.onabort=()=>reject(new Error("Firmware upload was cancelled."));
+      xhr.send(selected);
+    });
+    $("firmwareProgress").value=1;
+    $("firmwareProgressText").textContent="Verified "+formatBytes(selected.size);
+    $("firmwareRate").textContent="Restarting";
+    finishingClient=true;
+    setNotice((data.message||"Firmware verified. DSPi is restarting.")+" The local page will disconnect; this is expected.","good");
+  }catch(error){
+    firmwareRunning=false;
+    setNotice("Firmware was not installed: "+safeMessage(error,"request failed"),"bad");
+    $("firmwareProgressText").textContent="Update failed; the current firmware remains bootable.";
+    await refreshStatus(false);startPolling();updateControls();
+  }
+}
 async function finishSafely(){
-  if(finishBusy||running||deleting||serverWriterActive||queue.length)return;
+  if(firmwareRunning||finishBusy||running||deleting||serverWriterActive||queue.length)return;
   finishBusy=true;updateControls();
   try{
     // Re-read authoritative state immediately before requesting shutdown.
@@ -843,8 +925,10 @@ $("wifiNetworkSelect").addEventListener("change",event=>{
 });
 $("wifiSsid").addEventListener("input",renderNetworkChoices);
 $("networkForm").addEventListener("submit",saveNetwork);
+$("firmwareFile").addEventListener("change",event=>{selectFirmware(event.target.files);event.target.value="";});
+$("installFirmware").addEventListener("click",installFirmware);
 window.addEventListener("beforeunload",event=>{
-  if(running||serverWriterActive){event.preventDefault();event.returnValue="";}
+  if(firmwareRunning||running||serverWriterActive){event.preventDefault();event.returnValue="";}
 });
 
 (async()=>{

@@ -183,6 +183,8 @@ private:
   void handlePreflight();
   void handleUploadRaw();
   void handleUploadFinished();
+  void handleFirmwareRaw();
+  void handleFirmwareFinished();
   void handleCancel();
   void handleDeleteIncomplete();
   void handleDeleteFolder();
@@ -221,6 +223,10 @@ private:
   void closeIncompleteWriter(const char *reason);
   bool flushUploadBuffer(bool syncAfterWrite);
   bool finalizeUpload();
+  void resetFirmwareUpdateState();
+  void failFirmwareUpdate(int code, const char *reason,
+                          const char *message, bool stopClient);
+  bool validateFirmwareHeader();
 
   void sendJsonError(int code, const char *reason, const char *message);
   void sendJsonOk(const char *extraFields = nullptr);
@@ -284,6 +290,26 @@ private:
   char numericIp_[16] = {0};
   char currentFile_[160] = {0};
   char message_[128] = {0};
+
+  // Local Web OTA always writes the inactive app partition. The fixed prefix
+  // contains the ESP image/first-segment headers and esp_app_desc_t; it is
+  // held until validated so a filesystem/full-flash image is never passed to
+  // Update as an application image.
+  static constexpr size_t kFirmwareHeaderCapacity = 288U;
+  bool firmwareUpdateActive_ = false;
+  bool firmwareUpdateResponseReady_ = false;
+  bool firmwareUpdateSucceeded_ = false;
+  bool firmwareHeaderValidated_ = false;
+  int firmwareUpdateResponseCode_ = 500;
+  size_t firmwareHeaderUsed_ = 0;
+  uint64_t firmwareDeclaredBytes_ = 0;
+  uint64_t firmwareReceivedBytes_ = 0;
+  uint32_t firmwareStartedMs_ = 0;
+  uint32_t firmwareRebootAt_ = 0;
+  uint8_t firmwareHeader_[kFirmwareHeaderCapacity] = {0};
+  char firmwareResponseReason_[48] = {0};
+  char firmwareResponseMessage_[128] = {0};
+  char firmwareVersion_[33] = {0};
 };
 
 extern WifiTransferModeController wifiTransferMode;
