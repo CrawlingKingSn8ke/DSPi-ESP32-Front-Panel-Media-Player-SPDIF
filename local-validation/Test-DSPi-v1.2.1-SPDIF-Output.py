@@ -78,13 +78,13 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("i2s_channel_write(tx, next, remaining", body)
         self.assertGreaterEqual(body.count("sendFrames(nullptr"), 4)
 
-    def test_route_validates_spdif2_gpio20_and_selects_optical2(self):
+    def test_route_validates_spdif1_gpio5_and_selects_optical1(self):
         body = function_body(INO, "bool activateDspiMediaRoute")
         self.assertIn("REQ_GET_SPDIF_INPUT_CONFIG", body)
         self.assertIn("MEDIA_PICO_SPDIF_RX_PIN", body)
         self.assertIn("MEDIA_DSPI_SPDIF_SOURCE", body)
         self.assertIn("MEDIA_DSPI_SPDIF_INPUT_INDEX", body)
-        self.assertIn("S/PDIF input 2", body)
+        self.assertIn("S/PDIF input 1", body)
         self.assertNotIn("setDspiInputRate", body)
         self.assertNotIn("REQ_SET_I2S_CLOCK_MODE", body)
 
@@ -96,10 +96,11 @@ class SpdifOutputContracts(unittest.TestCase):
 
     def test_test_wiring_constants_are_single_wire(self):
         self.assertIn("#define MEDIA_SPDIF_DATA_OUT_PIN 13", INO)
-        self.assertIn("#define MEDIA_PICO_SPDIF_RX_PIN   20", INO)
+        self.assertIn("#define MEDIA_PICO_SPDIF_RX_PIN   5", INO)
         self.assertIn(
-            "MEDIA_DSPI_SPDIF_SOURCE = SRC_OPTICAL_2", INO
+            "MEDIA_DSPI_SPDIF_SOURCE = SRC_OPTICAL", INO
         )
+        self.assertIn("MEDIA_DSPI_SPDIF_INPUT_INDEX = 0", INO)
         self.assertNotIn("MEDIA_I2S_BCLK_PIN", INO)
         self.assertNotIn("MEDIA_I2S_LRCLK_PIN", INO)
 

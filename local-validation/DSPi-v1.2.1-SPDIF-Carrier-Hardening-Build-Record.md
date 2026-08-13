@@ -1,4 +1,4 @@
-# DSPi ESP32 Front Panel v1.2.1 — S/PDIF2 isolation test build
+# DSPi ESP32 Front Panel v1.2.1 — S/PDIF transmitter hardening test build
 
 Date: 2026-08-13
 
@@ -6,13 +6,13 @@ Branch: `local/v1.2.1-spdif-output-test`
 
 ## Purpose
 
-Isolate the ESP music-player S/PDIF link from the DSPi primary S/PDIF input and optical-output pin neighbourhood, and prevent a brief ESP output-task delay from replacing the valid biphase-mark carrier with raw zero DMA words.
+Prevent a brief ESP output-task delay from replacing the valid biphase-mark carrier with raw zero DMA words while retaining the user's established DSPi input wiring.
 
 ## Functional changes
 
 - ESP S/PDIF data remains on ESP32-S3 GPIO13.
-- The DSPi receiver route is now S/PDIF input 2 on Pico GPIO20.
-- Route activation validates the configured S/PDIF2 pin before starting playback.
+- The DSPi receiver route is S/PDIF input 1 on Pico GPIO5.
+- Route activation validates the configured S/PDIF1 pin before starting playback.
 - I2S DMA auto-clear is disabled because raw zero words are not valid S/PDIF silence.
 - All DMA descriptors are primed with six complete 192-frame blocks of encoded digital silence.
 - When playback stops, GPIO13 is explicitly driven low.
@@ -33,7 +33,7 @@ Isolate the ESP music-player S/PDIF link from the DSPi primary S/PDIF input and 
 - Wi-Fi System-menu contracts: 5 passed.
 - Total focused contracts: 33 passed.
 - Pinned ESP32 Arduino core 3.3.11 build: passed.
-- Program use: 1,909,789 bytes (60% of 3,145,728 bytes).
+- Program use: 1,909,785 bytes (60% of 3,145,728 bytes).
 - Global variables: 77,332 bytes (23% of 327,680 bytes).
 - Nothing was flashed and no serial port was opened.
 
@@ -43,14 +43,14 @@ Isolate the ESP music-player S/PDIF link from the DSPi primary S/PDIF input and 
 
 - File: `release/DSPi-ESP32-Front-Panel-v1.2.1.bin`
 - Size: 1,909,936 bytes
-- SHA-256: `20CB016DDE80FCE878075A29CF58BAB42A90BD0FF4895AC9D853912B8277F530`
+- SHA-256: `4F4B2357300622FFF9248A1D620EE0CB656B82E40585FB744C450AE03D2558D6`
 
 ### Full USB image
 
 - File: `release/DSPi-ESP32-Front-Panel-v1.2.1-Full.bin`
 - Size: 16,777,216 bytes
-- SHA-256: `2428DA0393FD7109A81E66F9F7FE45B80CD89F42DA59A61DC306DF74D9AD74D5`
+- SHA-256: `8BEBC061566881A8F319A626C827ABAC01EAC4F9C718446C6D72C3AB2B456A44`
 
 ## Required test wiring
 
-Move only the Pico end of the ESP S/PDIF data connection from GPIO5 to GPIO20. Keep the ESP end on GPIO13. DSPi Console must have S/PDIF input 2 enabled and assigned to GPIO20. A 47–100 ohm series resistor placed near the ESP output is recommended.
+Keep the existing ESP GPIO13 to Pico GPIO5 connection. DSPi Console must have S/PDIF input 1 assigned to GPIO5. The user's S/PDIF input 2 remains on GPIO4, DSPi S/PDIF output remains on GPIO6, and GPIO20 remains unused. No series resistor is required for this test because the DSPi developer has approved the direct short 3.3 V logic connection.
