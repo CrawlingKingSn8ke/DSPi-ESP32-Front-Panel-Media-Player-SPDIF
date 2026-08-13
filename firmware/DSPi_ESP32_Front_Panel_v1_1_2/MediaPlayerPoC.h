@@ -301,6 +301,7 @@ private:
   DecoderState *decoder = nullptr;
   int32_t *pcmRing = nullptr;
   void *spdifTxChannel = nullptr;
+  int8_t spdifDataOutPin = -1;
   TaskHandle_t decoderTaskHandle = nullptr;
   TaskHandle_t outputTaskHandle = nullptr;
   QueueHandle_t seekCommandQueue = nullptr;

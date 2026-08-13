@@ -3059,11 +3059,17 @@ size_t MediaPlayerPoC::readRing(int32_t *stereoOutput, size_t frames)
 bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
 {
   stopSpdif();
+  pinMode(dataOutPin, OUTPUT);
+  digitalWrite(dataOutPin, LOW);
+  spdifDataOutPin = dataOutPin;
   i2s_chan_config_t channelConfig =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
   channelConfig.dma_desc_num = 8;
   channelConfig.dma_frame_num = kOutputChunkFrames;
-  channelConfig.auto_clear_after_cb = true;
+  // Raw zero DMA words are not S/PDIF silence: they remove the biphase
+  // carrier and force the downstream receiver to relock. Retain previously
+  // encoded descriptor contents if the producer is ever briefly late.
+  channelConfig.auto_clear_after_cb = false;
 
   i2s_chan_handle_t tx = nullptr;
   if (i2s_new_channel(&channelConfig, &tx, nullptr) != ESP_OK) return false;
@@ -3094,7 +3100,35 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
     i2s_del_channel(tx);
     return false;
   }
+
+  // Prime every DMA descriptor with complete, valid S/PDIF silence before
+  // route selection or task creation. Six 192-frame blocks preserve the
+  // channel-status block boundary when outputTask's encoder starts at frame 0.
+  uint32_t encodedSilence[192 * SpdifBlockEncoder::kWordsPerStereoFrame] = {};
+  SpdifBlockEncoder silenceEncoder;
+  silenceEncoder.reset();
+  for (uint8_t block = 0; block < 6 && result == ESP_OK; ++block) {
+    if (!silenceEncoder.encode(nullptr, 192, encodedSilence,
+                               sizeof(encodedSilence) / sizeof(uint32_t))) {
+      result = ESP_FAIL;
+      break;
+    }
+    size_t written = 0;
+    result = i2s_channel_write(tx, encodedSilence, sizeof(encodedSilence),
+                               &written, 100);
+    if (result == ESP_OK && written != sizeof(encodedSilence)) {
+      result = ESP_FAIL;
+    }
+  }
+  if (result != ESP_OK) {
+    i2s_channel_disable(tx);
+    i2s_del_channel(tx);
+    pinMode(dataOutPin, OUTPUT);
+    digitalWrite(dataOutPin, LOW);
+    return false;
+  }
   spdifTxChannel = tx;
+  spdifDataOutPin = dataOutPin;
   Serial.printf(
       "MEDIA SPDIF TX: enabled rate=%lu Hz carrier=%lu Hz data=GPIO%d "
       "depth=24-bit block-DMA\n",
@@ -3105,11 +3139,19 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
 
 void MediaPlayerPoC::stopSpdif()
 {
-  if (!spdifTxChannel) return;
-  i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(spdifTxChannel);
-  i2s_channel_disable(tx);
-  i2s_del_channel(tx);
-  spdifTxChannel = nullptr;
+  if (spdifTxChannel) {
+    i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(spdifTxChannel);
+    i2s_channel_disable(tx);
+    i2s_del_channel(tx);
+    spdifTxChannel = nullptr;
+  }
+  // Do not leave an inactive high-speed link floating or matrix-owned. A
+  // defined low level prevents idle coupling into the DSPi output wiring.
+  if (spdifDataOutPin >= 0) {
+    pinMode(spdifDataOutPin, OUTPUT);
+    digitalWrite(spdifDataOutPin, LOW);
+    spdifDataOutPin = -1;
+  }
 }
 
 void MediaPlayerPoC::setError(const char *message)

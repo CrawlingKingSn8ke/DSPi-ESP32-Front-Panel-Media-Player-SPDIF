@@ -117,10 +117,11 @@
 #define MEDIA_SD_MISO LCD_MISO
 
 // Local-player consumer S/PDIF link. GPIO13 carries a self-clocking 24-bit
-// BMC stream directly to DSPi S/PDIF input 1 (default Pico GPIO5). No external
-// BCLK/LRCLK wires are used by this local test build.
+// BMC stream directly to DSPi S/PDIF input 2 (default Pico GPIO20). Keeping
+// this away from the GPIO5/GPIO6 input/output neighborhood reduces coupling
+// into the primary optical output. No BCLK/LRCLK wires are used.
 #define MEDIA_SPDIF_DATA_OUT_PIN 13
-#define MEDIA_PICO_SPDIF_RX_PIN   5
+#define MEDIA_PICO_SPDIF_RX_PIN   20
 // The browser keeps one sorted page instead of one entry for every folder.
 // Crossing a page boundary rescans the directory using a stable cursor, so the
 // number of folders in a directory is no longer limited by ESP32 RAM. Album
@@ -5433,6 +5434,9 @@ enum InputSource : uint8_t {
   SRC_OPTICAL_4 = 6
 };
 
+static const InputSource MEDIA_DSPI_SPDIF_SOURCE = SRC_OPTICAL_2;
+static const uint8_t MEDIA_DSPI_SPDIF_INPUT_INDEX = 1;
+
 // Highest source this panel understands, and the count derived from it. Every
 // readback bound check uses these, so adding a source is a one-line change.
 static const uint8_t SRC_MAX = SRC_OPTICAL_4;
@@ -8572,22 +8576,23 @@ bool activateDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
   uint16_t spdifLength = 0;
   if (!dspiGet(REQ_GET_SPDIF_INPUT_CONFIG, 0, sizeof(spdifConfig),
                spdifConfig, sizeof(spdifConfig), spdifLength) ||
-      spdifLength < 3 || spdifConfig[0] < 1 ||
-      (spdifConfig[1] & 0x01u) == 0) {
-    Serial.println("MEDIA ROUTE: failed to read DSPi S/PDIF input 1");
+      spdifLength < 4 || spdifConfig[0] <= MEDIA_DSPI_SPDIF_INPUT_INDEX ||
+      (spdifConfig[1] &
+       (1u << (MEDIA_DSPI_SPDIF_INPUT_INDEX - 1u))) == 0) {
+    Serial.println("MEDIA ROUTE: DSPi S/PDIF input 2 is unavailable");
     return false;
   }
 
-  const uint8_t rxPin = spdifConfig[2];
+  const uint8_t rxPin = spdifConfig[2 + MEDIA_DSPI_SPDIF_INPUT_INDEX];
   if (rxPin != MEDIA_PICO_SPDIF_RX_PIN) {
     Serial.printf(
-        "MEDIA ROUTE: DSPi S/PDIF input 1 is GPIO%u; test wire expects GPIO%u\n",
+        "MEDIA ROUTE: DSPi S/PDIF input 2 is GPIO%u; wire expects GPIO%u\n",
         rxPin, MEDIA_PICO_SPDIF_RX_PIN);
     return false;
   }
 
   if (mediaRoute.active && mediaRoute.activeRate == sampleRate &&
-      dspi.source == SRC_OPTICAL) {
+      dspi.source == MEDIA_DSPI_SPDIF_SOURCE) {
     Serial.printf("MEDIA ROUTE: reused active S/PDIF %lu Hz route\n",
                   (unsigned long)sampleRate);
     return true;
@@ -8597,23 +8602,23 @@ bool activateDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
   uint8_t liveSource = 0xFF;
   bool sourceKnown = getExactByte(REQ_GET_INPUT_SOURCE, liveSource) &&
                      liveSource <= SRC_MAX;
-  if ((!sourceKnown || liveSource != SRC_OPTICAL) &&
-      !setInputSource(SRC_OPTICAL, userInitiated)) {
-    Serial.println("MEDIA ROUTE: failed to select DSPi S/PDIF input 1");
+  if ((!sourceKnown || liveSource != MEDIA_DSPI_SPDIF_SOURCE) &&
+      !setInputSource(MEDIA_DSPI_SPDIF_SOURCE, userInitiated)) {
+    Serial.println("MEDIA ROUTE: failed to select DSPi S/PDIF input 2");
     return false;
   }
 
   // The transmitter starts immediately after this callback. DSPi remains in
   // ACQUIRING until the output task's valid quarter-second silence lead-in is
   // present, then its ordinary S/PDIF status polling publishes confirmed lock.
-  dspi.source = SRC_OPTICAL;
+  dspi.source = MEDIA_DSPI_SPDIF_SOURCE;
   dspi.spdifState = 1;
   dspi.spdifNonAudio = false;
   dspi.sampleRate = sampleRate;
   mediaRoute.active = true;
   mediaRoute.activeRate = sampleRate;
   Serial.printf(
-      "MEDIA ROUTE: selected source=S/PDIF1 expected-rate=%lu rx=GPIO%u "
+      "MEDIA ROUTE: selected source=S/PDIF2 expected-rate=%lu rx=GPIO%u "
       "tx=GPIO%u awaiting wire lock\n",
       (unsigned long)sampleRate, rxPin, MEDIA_SPDIF_DATA_OUT_PIN);
   return true;
@@ -18220,7 +18225,8 @@ void loop()
       // ownership immediately.
       // Point the pending restore at that already-selected source so stopping
       // music never overrides the Console's choice when playback stops.
-      if (externalSourceChanged && dspi.source != SRC_OPTICAL &&
+      if (externalSourceChanged &&
+          dspi.source != MEDIA_DSPI_SPDIF_SOURCE &&
           mediaPlayerPoc.active()) {
         const InputSource externalSource = dspi.source;
         if (mediaRoute.captured) mediaRoute.source = externalSource;

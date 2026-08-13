@@ -78,11 +78,13 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("i2s_channel_write(tx, next, remaining", body)
         self.assertGreaterEqual(body.count("sendFrames(nullptr"), 4)
 
-    def test_route_validates_spdif1_gpio5_and_selects_optical(self):
+    def test_route_validates_spdif2_gpio20_and_selects_optical2(self):
         body = function_body(INO, "bool activateDspiMediaRoute")
         self.assertIn("REQ_GET_SPDIF_INPUT_CONFIG", body)
         self.assertIn("MEDIA_PICO_SPDIF_RX_PIN", body)
-        self.assertIn("SRC_OPTICAL", body)
+        self.assertIn("MEDIA_DSPI_SPDIF_SOURCE", body)
+        self.assertIn("MEDIA_DSPI_SPDIF_INPUT_INDEX", body)
+        self.assertIn("S/PDIF input 2", body)
         self.assertNotIn("setDspiInputRate", body)
         self.assertNotIn("REQ_SET_I2S_CLOCK_MODE", body)
 
@@ -94,9 +96,25 @@ class SpdifOutputContracts(unittest.TestCase):
 
     def test_test_wiring_constants_are_single_wire(self):
         self.assertIn("#define MEDIA_SPDIF_DATA_OUT_PIN 13", INO)
-        self.assertIn("#define MEDIA_PICO_SPDIF_RX_PIN   5", INO)
+        self.assertIn("#define MEDIA_PICO_SPDIF_RX_PIN   20", INO)
+        self.assertIn(
+            "MEDIA_DSPI_SPDIF_SOURCE = SRC_OPTICAL_2", INO
+        )
         self.assertNotIn("MEDIA_I2S_BCLK_PIN", INO)
         self.assertNotIn("MEDIA_I2S_LRCLK_PIN", INO)
+
+    def test_spdif_dma_never_auto_clears_to_invalid_raw_zero_carrier(self):
+        start = function_body(PLAYER, "bool MediaPlayerPoC::startSpdif")
+        self.assertIn("channelConfig.auto_clear_after_cb = false", start)
+        self.assertIn("encodedSilence", start)
+        self.assertIn("silenceEncoder.encode(nullptr, 192", start)
+        self.assertIn("i2s_channel_write(tx, encodedSilence", start)
+
+    def test_stopped_transmitter_is_explicitly_held_low(self):
+        stop = function_body(PLAYER, "void MediaPlayerPoC::stopSpdif")
+        self.assertIn("pinMode(spdifDataOutPin, OUTPUT)", stop)
+        self.assertIn("digitalWrite(spdifDataOutPin, LOW)", stop)
+        self.assertIn("spdifDataOutPin = -1", stop)
 
     def test_lightweight_runtime_watcher_confirms_spdif_lock_and_rate(self):
         body = function_body(INO, "bool pollExternalRuntimeState()")
