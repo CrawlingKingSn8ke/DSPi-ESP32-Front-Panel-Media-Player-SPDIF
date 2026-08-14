@@ -1,6 +1,11 @@
-# DSPi ESP32 Front Panel
+# DSPi ESP32 Media Player — S/PDIF Test Firmware
 
-ESP32-S3 front panel for WeebLabs DSPi with rotary encoder control, BLE remote learning, source and DSP feature menus, stereo bar meters, analogue VU display, SD-card music playback and Wi-Fi Music Transfer.
+Experimental fork of the DSPi ESP32 Front Panel that sends the integrated SD-card music player to a WeebLabs DSPi over a single-wire, 24-bit, 44.1/48 kHz logic-level S/PDIF connection.
+
+> [!IMPORTANT]
+> This repository is an isolated test build, not the stable release of the main front-panel project. S/PDIF stability is improved substantially but occasional output dropouts remain in one tested DSPi hardware configuration. See [EXPERIMENTAL-SPDIF.md](EXPERIMENTAL-SPDIF.md) before flashing or wiring it.
+
+The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 
 ## Version 1.2.1
 
@@ -45,19 +50,14 @@ See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the v1.2.1 maintenance summar
 
 The UART runs at 115200 baud. Enable the DSPi UART interface with TX GPIO16 and RX GPIO17.
 
-### ESP32 music-player I2S to DSPi
+### ESP32 music-player S/PDIF to DSPi
 
 | ESP32-S3-LCD-2 | DSPi Pico / Pico 2 | Function |
 |---|---|---|
-| GPIO13 | GPIO1 | I2S serial audio data from the ESP32 to the DSPi RX input |
-| GPIO14 | GPIO14 | I2S bit clock (BCLK) |
-| GPIO15 | GPIO15 | I2S word clock (LRCLK) |
+| GPIO13 | GPIO5 | Logic-level S/PDIF data to DSPi S/PDIF input 1 |
 | GND | GND | Common ground |
 
-GPIO1 is the tested DSPi I2S RX data setting and the current DSPi default. The
-Pico data GPIO is configurable in DSPi Console; if it is changed, move the data
-wire to the selected GPIO. The ESP32 queries the active DSPi RX pin before
-starting playback. All I2S signals use 3.3 V logic.
+Configure DSPi S/PDIF input 1 on Pico GPIO5. The firmware validates this setting before starting playback. The test connection is short, direct 3.3 V logic with a common ground; no coaxial or optical line driver is implied. Do not connect this GPIO-level signal to consumer coaxial S/PDIF equipment.
 
 ### Rotary encoder
 
@@ -171,6 +171,6 @@ Wi-Fi transfer restrictions:
 
 ## Notes
 
-- The ESP32 front panel controls DSPi over UART and is not in the audio signal path.
+- DSPi control uses UART. Local SD-card music is also encoded by the ESP32 and sent to DSPi over the dedicated GPIO13 S/PDIF link.
 - Input choices and DSP features depend on the connected DSPi firmware and configuration.
 - The VU meters show DSPi output telemetry, not the volume-control position.
