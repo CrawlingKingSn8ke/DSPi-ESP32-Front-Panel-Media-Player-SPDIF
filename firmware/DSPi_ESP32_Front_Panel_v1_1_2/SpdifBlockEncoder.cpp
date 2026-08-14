@@ -45,9 +45,23 @@ static const uint16_t kBmcLookup[256] PROGMEM = {
 constexpr uint8_t kPreambleB = 0xE8u;
 constexpr uint8_t kPreambleM = 0xE2u;
 constexpr uint8_t kPreambleW = 0xE4u;
-constexpr uint8_t kVucpByPhase[2] = {0xCCu, 0x32u};
+constexpr uint8_t kConsumerChannelStatus44100[5] = {
+  0x04u, 0x00u, 0x00u, 0x00u, 0x0Bu
+};
+constexpr uint8_t kConsumerChannelStatus48000[5] = {
+  0x04u, 0x00u, 0x00u, 0x02u, 0x0Bu
+};
+// Biphase-coded V/U/C/P bytes indexed by the audio field's ending phase and
+// the channel-status bit. V and U remain zero. P changes with C so every
+// subframe retains even parity. The C=0 column is byte-for-byte identical to
+// the original encoder.
+constexpr uint8_t kVucpByPhaseAndChannelStatus[2][2] = {
+  {0xCCu, 0xCAu},
+  {0x32u, 0x34u},
+};
 
-void encodeChannel24(int32_t sample, uint8_t preamble, uint8_t &vucp,
+void encodeChannel24(int32_t sample, uint8_t preamble,
+                     uint8_t channelStatusBit, uint8_t &vucp,
                      uint32_t *destination)
 {
   uint16_t high = pgm_read_word(&kBmcLookup[
@@ -64,15 +78,32 @@ void encodeChannel24(int32_t sample, uint8_t preamble, uint8_t &vucp,
                    (static_cast<uint32_t>(preamble) << 16) |
                    auxiliary;
   destination[1] = (static_cast<uint32_t>(low) << 16) | high;
-  vucp = kVucpByPhase[high & 1u];
+  vucp = kVucpByPhaseAndChannelStatus[high & 1u][channelStatusBit & 1u];
 }
 
 }  // namespace
 
+bool SpdifBlockEncoder::setSampleRate(uint32_t sampleRate)
+{
+  const uint8_t *status = nullptr;
+  if (sampleRate == 44100u) {
+    status = kConsumerChannelStatus44100;
+  } else if (sampleRate == 48000u) {
+    status = kConsumerChannelStatus48000;
+  } else {
+    return false;
+  }
+
+  for (size_t index = 0; index < sizeof(channelStatus_); ++index) {
+    channelStatus_[index] = status[index];
+  }
+  return true;
+}
+
 void SpdifBlockEncoder::reset()
 {
   frameNumber_ = 0;
-  vucp_ = kVucpByPhase[0];
+  vucp_ = kVucpByPhaseAndChannelStatus[0][0];
 }
 
 bool SpdifBlockEncoder::encode(const int32_t *stereoPcm, size_t frames,
@@ -87,10 +118,15 @@ bool SpdifBlockEncoder::encode(const int32_t *stereoPcm, size_t frames,
     const int32_t left = stereoPcm ? stereoPcm[frame * 2] : 0;
     const int32_t right = stereoPcm ? stereoPcm[frame * 2 + 1] : 0;
     uint32_t *destination = encodedWords + frame * kWordsPerStereoFrame;
+    const uint8_t channelStatusBit = frameNumber_ < 40u
+        ? static_cast<uint8_t>((channelStatus_[frameNumber_ / 8u] >>
+                                (frameNumber_ % 8u)) & 1u)
+        : 0u;
 
     encodeChannel24(left, frameNumber_ == 0 ? kPreambleB : kPreambleM,
-                    vucp_, destination);
-    encodeChannel24(right, kPreambleW, vucp_, destination + 2);
+                    channelStatusBit, vucp_, destination);
+    encodeChannel24(right, kPreambleW, channelStatusBit, vucp_,
+                    destination + 2);
 
     frameNumber_++;
     if (frameNumber_ >= 192) frameNumber_ = 0;

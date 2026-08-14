@@ -12,6 +12,9 @@ class SpdifBlockEncoder {
 public:
   static constexpr size_t kWordsPerStereoFrame = 4;
 
+  // Selects the IEC 60958 consumer-PCM channel-status sample-rate code.
+  // Only the two native rates supported by this media player are accepted.
+  bool setSampleRate(uint32_t sampleRate);
   void reset();
 
   // Encodes the most-significant 24 bits of signed, MSB-aligned stereo PCM.
@@ -21,6 +24,7 @@ public:
               uint32_t *encodedWords, size_t encodedWordCapacity);
 
 private:
+  uint8_t channelStatus_[5] = {0x04, 0x00, 0x00, 0x00, 0x0B};
   uint8_t frameNumber_ = 0;
   uint8_t vucp_ = 0xCC;
 };

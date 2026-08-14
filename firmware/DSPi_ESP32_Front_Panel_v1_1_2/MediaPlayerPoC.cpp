@@ -3111,19 +3111,18 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   standardConfig.gpio_cfg.invert_flags.ws_inv = false;
 
   esp_err_t result = i2s_channel_init_std_mode(tx, &standardConfig);
-  if (result == ESP_OK) result = i2s_channel_enable(tx);
-  if (result != ESP_OK) {
-    i2s_del_channel(tx);
-    return false;
-  }
 
-  // Prime every DMA descriptor with complete, valid S/PDIF silence before
-  // route selection or task creation. One 192-frame block maps exactly to one
-  // descriptor, and the whole ring ends back at encoder frame 0 before the
-  // output task starts producing its own block-aligned stream.
+  // While the channel is still READY, preload every DMA descriptor with
+  // complete, valid S/PDIF silence. One 192-frame block maps exactly to one
+  // descriptor, and all 16 blocks total 49,152 bytes. Enabling only after the
+  // ring is full prevents an initial raw-zero/partial carrier transmission.
   uint32_t encodedSilence[192 * SpdifBlockEncoder::kWordsPerStereoFrame] = {};
   SpdifBlockEncoder silenceEncoder;
+  if (!silenceEncoder.setSampleRate(currentFile.sampleRate)) {
+    result = ESP_ERR_INVALID_ARG;
+  }
   silenceEncoder.reset();
+  size_t preloadedBytes = 0;
   for (uint32_t block = 0;
        block < kSpdifDmaDescriptorCount && result == ESP_OK; ++block) {
     if (!silenceEncoder.encode(nullptr, 192, encodedSilence,
@@ -3131,15 +3130,23 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
       result = ESP_FAIL;
       break;
     }
-    size_t written = 0;
-    result = i2s_channel_write(tx, encodedSilence, sizeof(encodedSilence),
-                               &written, 100);
-    if (result == ESP_OK && written != sizeof(encodedSilence)) {
+    size_t loaded = 0;
+    result = i2s_channel_preload_data(tx, encodedSilence,
+                                     sizeof(encodedSilence), &loaded);
+    if (result == ESP_OK && loaded != sizeof(encodedSilence)) {
       result = ESP_FAIL;
+    } else if (result == ESP_OK) {
+      preloadedBytes += loaded;
     }
   }
+  constexpr size_t kExpectedPreloadBytes =
+      kSpdifDmaDescriptorCount * 192u *
+      SpdifBlockEncoder::kWordsPerStereoFrame * sizeof(uint32_t);
+  if (result == ESP_OK && preloadedBytes != kExpectedPreloadBytes) {
+    result = ESP_FAIL;
+  }
+  if (result == ESP_OK) result = i2s_channel_enable(tx);
   if (result != ESP_OK) {
-    i2s_channel_disable(tx);
     i2s_del_channel(tx);
     pinMode(dataOutPin, OUTPUT);
     digitalWrite(dataOutPin, LOW);
@@ -3851,14 +3858,20 @@ void MediaPlayerPoC::outputTask()
       encodedWordCapacity * sizeof(uint32_t),
       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   SpdifBlockEncoder encoder;
-  encoder.reset();
-
   if (!encoded) {
     setError("S/PDIF DMA staging allocation failed");
     outputTaskHandle = nullptr;
     vTaskDelete(nullptr);
     return;
   }
+  if (!encoder.setSampleRate(currentFile.sampleRate)) {
+    heap_caps_free(encoded);
+    setError("Unsupported S/PDIF channel-status rate");
+    outputTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+    return;
+  }
+  encoder.reset();
 
   auto sendFrames = [&](const int32_t *samples, size_t frames) -> bool {
     if (!encoder.encode(samples, frames, encoded, encodedWordCapacity)) {

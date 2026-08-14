@@ -16,6 +16,10 @@ This fork replaces the earlier three-wire ESP-to-DSPi I2S media link with a sing
 - Sixteen DMA descriptors are retained instead of eight.
 - Each descriptor contains exactly one complete 192-frame S/PDIF block.
 - Every descriptor is primed with valid encoded silence before route activation.
+- All 49,152 bytes are preloaded while the I2S channel is still stopped; the
+  transmitter is enabled only after the complete DMA ring is valid.
+- IEC 60958 consumer-PCM channel status identifies 24-bit 44.1/48 kHz audio,
+  with the same status and correct parity on the left and right subframes.
 - DMA reserve is approximately 64 ms at 48 kHz and 70 ms at 44.1 kHz.
 - The output task and I2S interrupt have elevated, deterministic priorities.
 - GPIO13 is explicitly driven low after playback stops.
@@ -28,6 +32,12 @@ Two DSPi systems have behaved differently:
 2. A second system uses a TV S/PDIF input, a DSPi S/PDIF output feeding an external DAC, and a PCM5102 on a DSPi I2S output. USB input and TV S/PDIF input are stable through the DSPi S/PDIF output. With the ESP as the S/PDIF source, the external DAC on the DSPi S/PDIF output can drop out while the simultaneous PCM5102/I2S output remains stable. Moving the ESP source between DSPi S/PDIF GPIO4 and GPIO5 did not remove the behaviour. DMA/carrier hardening reduced but did not eliminate it.
 
 This evidence suggests a source-dependent interaction affecting the DSPi S/PDIF output path rather than a general failure of the ESP decoder, SD pipeline, DSP processing, or one DSPi receiver GPIO. The exact cause is not yet proven.
+
+For a hardware signal-integrity diagnostic, fit a 68-100 ohm series resistor
+at the ESP GPIO13 source end of the S/PDIF wire. Both ends being 3.3 V logic
+compatible does not provide edge damping; the resistor is for ringing and
+reflections, not voltage conversion. Keep the connection and ground return
+short. This is a recommended test, not a claim that hardware is the cause.
 
 ## Verified OTA application
 

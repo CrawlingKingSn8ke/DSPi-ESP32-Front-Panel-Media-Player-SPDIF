@@ -8,6 +8,7 @@ FIRMWARE = ROOT / "firmware" / "DSPi_ESP32_Front_Panel_v1_1_2"
 INO = (FIRMWARE / "DSPi_ESP32_Front_Panel_v1_1_2.ino").read_text()
 PLAYER = (FIRMWARE / "MediaPlayerPoC.cpp").read_text()
 ENCODER = (FIRMWARE / "SpdifBlockEncoder.cpp").read_text()
+ENCODER_HEADER = (FIRMWARE / "SpdifBlockEncoder.h").read_text()
 REFERENCE = (
     ROOT.parent
     / "squeezelite-spdif-reference"
@@ -38,6 +39,26 @@ def lookup_values(source: str, declaration: str):
     return [int(value, 16) for value in re.findall(r"0x[0-9a-fA-F]+", source[brace:end])]
 
 
+def decode_bmc_byte(encoded: int, previous_level: int):
+    """Decode four MSB-first BMC pairs and return bits plus final level."""
+    wire = [(encoded >> shift) & 1 for shift in range(7, -1, -1)]
+    decoded = []
+    for offset in range(0, 8, 2):
+        first, second = wire[offset : offset + 2]
+        if first == previous_level:
+            raise AssertionError("missing mandatory BMC boundary transition")
+        decoded.append(first ^ second)
+        previous_level = second
+    return decoded, previous_level
+
+
+def channel_status_bits(status):
+    return [
+        (status[frame // 8] >> (frame % 8)) & 1 if frame < 40 else 0
+        for frame in range(192)
+    ]
+
+
 class SpdifOutputContracts(unittest.TestCase):
     def test_encoder_table_exactly_matches_proven_reference(self):
         ours = lookup_values(ENCODER, "kBmcLookup[256]")
@@ -54,6 +75,57 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("kPreambleW", ENCODER)
         self.assertIn("frameNumber_ >= 192", ENCODER)
         self.assertIn("stereoPcm ? stereoPcm[frame * 2] : 0", ENCODER)
+
+    def test_channel_status_matches_dspi_for_both_native_rates(self):
+        status_44100 = lookup_values(
+            ENCODER, "kConsumerChannelStatus44100[5]"
+        )
+        status_48000 = lookup_values(
+            ENCODER, "kConsumerChannelStatus48000[5]"
+        )
+        self.assertEqual([0x04, 0x00, 0x00, 0x00, 0x0B], status_44100)
+        self.assertEqual([0x04, 0x00, 0x00, 0x02, 0x0B], status_48000)
+        for status in (status_44100, status_48000):
+            bits = channel_status_bits(status)
+            self.assertEqual(192, len(bits))
+            self.assertTrue(all(bit == 0 for bit in bits[40:]))
+            self.assertEqual(
+                status,
+                [sum(bits[byte * 8 + bit] << bit for bit in range(8))
+                 for byte in range(5)],
+            )
+
+    def test_channel_status_is_identical_on_left_and_right_subframes(self):
+        body = function_body(ENCODER, "bool SpdifBlockEncoder::encode")
+        calls = re.findall(
+            r"encodeChannel24\((.*?)\);", body, flags=re.DOTALL
+        )
+        self.assertEqual(2, len(calls))
+        self.assertIn("channelStatusBit", calls[0])
+        self.assertIn("channelStatusBit", calls[1])
+
+    def test_vucp_bmc_coding_preserves_valid_user_and_even_parity(self):
+        values = lookup_values(
+            ENCODER, "kVucpByPhaseAndChannelStatus[2][2]"
+        )
+        self.assertEqual(4, len(values))
+        for audio_phase in (0, 1):
+            for status_bit in (0, 1):
+                encoded = values[audio_phase * 2 + status_bit]
+                bits, final_level = decode_bmc_byte(encoded, audio_phase)
+                valid, user, channel_status, parity = bits
+                self.assertEqual(0, valid)
+                self.assertEqual(0, user)
+                self.assertEqual(status_bit, channel_status)
+                self.assertEqual(audio_phase ^ status_bit, parity)
+                self.assertEqual(0, final_level)
+
+    def test_encoder_rejects_unsupported_channel_status_rates(self):
+        body = function_body(ENCODER, "bool SpdifBlockEncoder::setSampleRate")
+        self.assertIn("sampleRate == 44100u", body)
+        self.assertIn("sampleRate == 48000u", body)
+        self.assertIn("return false", body)
+        self.assertIn("bool setSampleRate(uint32_t sampleRate)", ENCODER_HEADER)
 
     def test_media_accepts_only_requested_rates(self):
         body = function_body(PLAYER, "bool nativeRateSupported")
@@ -109,7 +181,35 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("channelConfig.auto_clear_after_cb = false", start)
         self.assertIn("encodedSilence", start)
         self.assertIn("silenceEncoder.encode(nullptr, 192", start)
-        self.assertIn("i2s_channel_write(tx, encodedSilence", start)
+        self.assertIn("i2s_channel_preload_data(tx, encodedSilence", start)
+
+    def test_complete_dma_ring_is_preloaded_before_transmitter_enable(self):
+        start = function_body(PLAYER, "bool MediaPlayerPoC::startSpdif")
+        preload = start.index("i2s_channel_preload_data")
+        enable = start.index("i2s_channel_enable")
+        self.assertLess(preload, enable)
+        self.assertNotIn("i2s_channel_write", start)
+        self.assertIn("kExpectedPreloadBytes", start)
+        self.assertIn("preloadedBytes != kExpectedPreloadBytes", start)
+        self.assertIn("loaded != sizeof(encodedSilence)", start)
+        self.assertIn("silenceEncoder.setSampleRate(currentFile.sampleRate)", start)
+
+    def test_preload_size_is_exactly_all_sixteen_descriptors(self):
+        descriptor_bytes = 192 * 4 * 4
+        self.assertEqual(3072, descriptor_bytes)
+        self.assertEqual(49152, 16 * descriptor_bytes)
+        start = function_body(PLAYER, "bool MediaPlayerPoC::startSpdif")
+        self.assertIn("kSpdifDmaDescriptorCount * 192u", start)
+        self.assertIn("SpdifBlockEncoder::kWordsPerStereoFrame", start)
+        self.assertIn("sizeof(uint32_t)", start)
+
+    def test_live_encoder_sets_rate_once_and_keeps_phase_across_writes(self):
+        output = function_body(PLAYER, "void MediaPlayerPoC::outputTask()")
+        self.assertIn("encoder.setSampleRate(currentFile.sampleRate)", output)
+        self.assertLess(output.index("SpdifBlockEncoder encoder"),
+                        output.index("auto sendFrames"))
+        send = function_body(output, "auto sendFrames")
+        self.assertNotIn("SpdifBlockEncoder encoder", send)
 
     def test_dma_ring_is_deep_and_exactly_spdif_block_aligned(self):
         self.assertIn("kSpdifDmaFramesPerDescriptor = 384", PLAYER)
