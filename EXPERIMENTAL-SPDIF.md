@@ -39,19 +39,6 @@ compatible does not provide edge damping; the resistor is for ringing and
 reflections, not voltage conversion. Keep the connection and ground return
 short. This is a recommended test, not a claim that hardware is the cause.
 
-## RAM diagnostic build
-
-The Wi-Fi transfer/update page includes an **S/PDIF playback diagnostics**
-panel. During playback a fixed 128-entry RAM ring records ten-second timing
-heartbeats, unusual output-task scheduling gaps, DMA errors/timeouts, PCM
-underruns, transmitter starts/stops, and observed DSPi receiver lock/rate
-changes. It performs no SD, NVS, flash, Serial, or network I/O while music is
-playing.
-
-After hearing a dropout, stop playback normally, enter WiFi Transfer/Update,
-open the page, and use **Copy log**. Copy it before restarting or power-cycling
-the ESP because the log is deliberately volatile.
-
 ## Verified OTA application
 
 - File: `DSPi-ESP32-Front-Panel-v1.2.1.bin`
