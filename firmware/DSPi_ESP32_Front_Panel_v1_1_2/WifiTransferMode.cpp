@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "MediaPlayerPoC.h"
+#include "SpdifDiagnostics.h"
 #include "WifiTransferWeb.h"
 
 namespace {
@@ -1072,6 +1073,10 @@ void WifiTransferModeController::configureRoutes() {
              [this, wrapped]() { wrapped(&WifiTransferModeController::handleIndex); });
   server->on(WifiTransferWeb::kRouteStatus, HTTP_GET,
              [this, wrapped]() { wrapped(&WifiTransferModeController::handleStatus); });
+  server->on(WifiTransferWeb::kRouteSpdifDiagnostics, HTTP_GET,
+             [this, wrapped]() {
+               wrapped(&WifiTransferModeController::handleSpdifDiagnostics);
+             });
   server->on(WifiTransferWeb::kRouteNetwork, HTTP_GET,
              [this, wrapped]() {
                wrapped(&WifiTransferModeController::handleNetworkStatus);
@@ -1523,6 +1528,31 @@ void WifiTransferModeController::handleStatus() {
   sendJsonString(current.message);
   server.sendContent("}");
   endChunkedJson();
+}
+
+void WifiTransferModeController::handleSpdifDiagnostics() {
+  if (!server_) return;
+  WebServer &server = *server_;
+  server.sendHeader("Cache-Control", "no-store");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/plain; charset=utf-8", "");
+
+  const size_t count = spdifDiagnosticCount();
+  if (count == 0) {
+    server.sendContent("No S/PDIF diagnostic events recorded since boot.\n");
+  } else {
+    char line[176] = {0};
+    for (size_t index = 0; index < count; ++index) {
+      SpdifDiagnosticEntry entry;
+      if (!spdifDiagnosticRead(index, entry)) continue;
+      snprintf(line, sizeof(line), "#%lu  %lu.%03lu s  %s\n",
+               (unsigned long)entry.sequence,
+               (unsigned long)(entry.uptimeMs / 1000u),
+               (unsigned long)(entry.uptimeMs % 1000u), entry.message);
+      server.sendContent(line);
+    }
+  }
+  server.sendContent("");
 }
 
 bool WifiTransferModeController::parseUnsignedDecimal(

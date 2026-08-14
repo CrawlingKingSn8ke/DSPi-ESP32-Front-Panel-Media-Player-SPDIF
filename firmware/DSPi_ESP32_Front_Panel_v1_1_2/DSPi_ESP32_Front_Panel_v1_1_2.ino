@@ -92,6 +92,7 @@
 #include <esp_system.h>
 #include <jpeg_decoder.h>
 #include "MediaPlayerPoC.h"
+#include "SpdifDiagnostics.h"
 #include "Mp3ArtworkPolicy.h"
 #include "WifiTransferMode.h"
 
@@ -8094,6 +8095,28 @@ bool pollExternalRuntimeState()
   const bool anyChanged = volumeChanged || presetChanged || sourceChanged ||
       loudnessChanged || crossfeedChanged || levellerChanged ||
       psybassChanged || spdifStatusChanged;
+
+  static bool spdifStatusReadFailed = false;
+  if (isSpdifSource(observedInput) && !spdifStatusValid &&
+      !spdifStatusReadFailed) {
+    spdifDiagnosticLog("DSPi RX status read failed source=%u",
+                       (unsigned)observedInput);
+    spdifStatusReadFailed = true;
+  } else if (spdifStatusValid && spdifStatusReadFailed) {
+    spdifDiagnosticLog("DSPi RX status read recovered source=%u state=%u rate=%lu",
+                       (unsigned)observedInput,
+                       (unsigned)observedSpdifState,
+                       (unsigned long)observedSampleRate);
+    spdifStatusReadFailed = false;
+  }
+  if (spdifStatusChanged) {
+    spdifDiagnosticLog(
+        "DSPi RX changed source=%u state=%u->%u rate=%lu->%lu nonaudio=%u->%u",
+        (unsigned)observedInput, (unsigned)dspi.spdifState,
+        (unsigned)observedSpdifState, (unsigned long)dspi.sampleRate,
+        (unsigned long)observedSampleRate, dspi.spdifNonAudio ? 1u : 0u,
+        observedSpdifNonAudio ? 1u : 0u);
+  }
 
   if (volumeValid) dspi.volumeDb = observedVolume;
   if (presetValid) dspi.activePreset = observedPreset;

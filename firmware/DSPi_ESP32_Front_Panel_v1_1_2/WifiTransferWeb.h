@@ -8,6 +8,8 @@
 //   GET  /api/status
 //     -> {ok,mode,accepting,writerActive,currentFile,writtenBytes,
 //         declaredBytes,freeBytes,totalBytes,message}
+//   GET  /api/spdif-diagnostics
+//     -> RAM-only rolling S/PDIF event log as UTF-8 text.
 //   GET  /api/list?path=<dir>&page=<n>&limit=96
 //     -> {ok,path,page,pageSize,hasMore,entries:[{name,path,type,size}]}
 //   POST /api/mkdir
@@ -63,6 +65,7 @@ static constexpr uint16_t kDirectoryPageSize = 96U;
 
 static constexpr char kRouteIndex[] = "/";
 static constexpr char kRouteStatus[] = "/api/status";
+static constexpr char kRouteSpdifDiagnostics[] = "/api/spdif-diagnostics";
 static constexpr char kRouteList[] = "/api/list";
 static constexpr char kRouteMkdir[] = "/api/mkdir";
 static constexpr char kRoutePreflight[] = "/api/preflight";
@@ -201,6 +204,16 @@ progress{width:100%;height:14px;accent-color:var(--accent)}.meterlabel{display:f
   </section>
 
   <section class="card">
+    <h2>S/PDIF playback diagnostics</h2>
+    <p class="muted">RAM-only events retained since boot. After hearing a dropout, stop playback, open this page, then copy this log before restarting the ESP.</p>
+    <div class="row">
+      <button id="refreshSpdifDiagnostics" type="button">Refresh log</button>
+      <button id="copySpdifDiagnostics" type="button">Copy log</button>
+    </div>
+    <pre id="spdifDiagnostics" class="diagnostics">Loading S/PDIF diagnostics...</pre>
+  </section>
+
+  <section class="card">
     <h2>Local firmware update</h2>
     <p class="muted">Install an <strong>application-only .bin</strong> from this device. The file stays on your local Wi-Fi connection, settings are preserved, and DSPi restarts only after verification. Do not select a 16 MB Full image.</p>
     <div class="row">
@@ -235,7 +248,8 @@ const API=Object.freeze({
   status:"/api/status",list:"/api/list",mkdir:"/api/mkdir",
   preflight:"/api/preflight",upload:"/api/upload",cancel:"/api/cancel",
   incomplete:"/api/incomplete",folder:"/api/folder",delete:"/api/delete",finish:"/api/finish",network:"/api/network",
-  networkScan:"/api/network/scan",firmware:"/api/firmware"
+  networkScan:"/api/network/scan",firmware:"/api/firmware",
+  spdifDiagnostics:"/api/spdif-diagnostics"
 });
 const PAGE_SIZE=96;
 const ALLOWED=/\.(flac|wav|mp3|jpe?g)$/i;
@@ -352,6 +366,24 @@ async function refreshStatus(showErrors=false){
     updateControls();
     return null;
   }finally{statusBusy=false;}
+}
+async function refreshSpdifDiagnostics(){
+  const node=$("spdifDiagnostics");
+  try{
+    const response=await fetch(API.spdifDiagnostics,{cache:"no-store"});
+    if(!response.ok)throw new Error("request failed ("+response.status+")");
+    node.textContent=await response.text();
+  }catch(error){
+    node.textContent="Could not load diagnostics: "+safeMessage(error,"connection lost");
+  }
+}
+async function copySpdifDiagnostics(){
+  try{
+    await navigator.clipboard.writeText($("spdifDiagnostics").textContent||"");
+    setNotice("S/PDIF diagnostic log copied.","good");
+  }catch(_){
+    setNotice("Browser clipboard access failed. Select and copy the log manually.","bad");
+  }
 }
 function stopPolling(){
   if(statusTimer){clearInterval(statusTimer);statusTimer=0;}
@@ -927,6 +959,8 @@ $("wifiSsid").addEventListener("input",renderNetworkChoices);
 $("networkForm").addEventListener("submit",saveNetwork);
 $("firmwareFile").addEventListener("change",event=>{selectFirmware(event.target.files);event.target.value="";});
 $("installFirmware").addEventListener("click",installFirmware);
+$("refreshSpdifDiagnostics").addEventListener("click",refreshSpdifDiagnostics);
+$("copySpdifDiagnostics").addEventListener("click",copySpdifDiagnostics);
 window.addEventListener("beforeunload",event=>{
   if(firmwareRunning||running||serverWriterActive){event.preventDefault();event.returnValue="";}
 });
@@ -935,6 +969,7 @@ window.addEventListener("beforeunload",event=>{
   renderBreadcrumb();renderQueue();renderProgress(0);
   const status=await refreshStatus(true);
   const network=await refreshNetwork(true);
+  await refreshSpdifDiagnostics();
   // Do not interrupt an already-saved station join with an automatic active
   // scan.  New installations still get an immediate list; existing users can
   // rescan explicitly with the button whenever they need to change network.

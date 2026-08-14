@@ -2,6 +2,7 @@
 #include "Mp3SeekPolicy.h"
 #include "Mp3ArtworkPolicy.h"
 #include "SpdifBlockEncoder.h"
+#include "SpdifDiagnostics.h"
 
 #define DR_WAV_NO_STDIO
 #define DR_WAV_IMPLEMENTATION
@@ -20,6 +21,7 @@
 #include <esp_err.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <freertos/semphr.h>
 #include <new>
 #include <soc/soc_caps.h>
@@ -3147,6 +3149,9 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   }
   if (result == ESP_OK) result = i2s_channel_enable(tx);
   if (result != ESP_OK) {
+    spdifDiagnosticLog("TX setup failed rate=%lu gpio=%d error=%d preload=%u",
+                       (unsigned long)currentFile.sampleRate, dataOutPin,
+                       (int)result, (unsigned)preloadedBytes);
     i2s_del_channel(tx);
     pinMode(dataOutPin, OUTPUT);
     digitalWrite(dataOutPin, LOW);
@@ -3154,6 +3159,10 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   }
   spdifTxChannel = tx;
   spdifDataOutPin = dataOutPin;
+  spdifDiagnosticLog("TX enabled rate=%lu gpio=%d preload=%u descriptors=%u",
+                     (unsigned long)currentFile.sampleRate, dataOutPin,
+                     (unsigned)preloadedBytes,
+                     (unsigned)kSpdifDmaDescriptorCount);
   Serial.printf(
       "MEDIA SPDIF TX: enabled rate=%lu Hz carrier=%lu Hz data=GPIO%d "
       "depth=24-bit block-DMA\n",
@@ -3165,6 +3174,11 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
 void MediaPlayerPoC::stopSpdif()
 {
   if (spdifTxChannel) {
+    spdifDiagnosticLog("TX stopping state=%s output=%llu path=%s",
+                       stateName(state),
+                       (unsigned long long)__atomic_load_n(
+                           &stats.outputFrames, __ATOMIC_ACQUIRE),
+                       currentPath[0] ? currentPath : "(none)");
     i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(spdifTxChannel);
     i2s_channel_disable(tx);
     i2s_del_channel(tx);
@@ -3873,9 +3887,26 @@ void MediaPlayerPoC::outputTask()
   }
   encoder.reset();
 
+  int64_t previousSendCompletedUs = 0;
+  int64_t heartbeatStartedUs = esp_timer_get_time();
+  uint32_t maximumWriteUs = 0;
+  uint32_t maximumProducerGapUs = 0;
+
   auto sendFrames = [&](const int32_t *samples, size_t frames) -> bool {
+    const int64_t sendStartedUs = esp_timer_get_time();
+    if (previousSendCompletedUs != 0) {
+      const uint32_t gapUs = static_cast<uint32_t>(std::min<int64_t>(
+          sendStartedUs - previousSendCompletedUs, UINT32_MAX));
+      maximumProducerGapUs = std::max(maximumProducerGapUs, gapUs);
+      if (gapUs >= 25000u) {
+        spdifDiagnosticLog("producer gap=%lu us ring=%u state=%s",
+                           (unsigned long)gapUs, (unsigned)ringAvailable(),
+                           stateName(state));
+      }
+    }
     if (!encoder.encode(samples, frames, encoded, encodedWordCapacity)) {
       __atomic_add_fetch(&stats.spdifErrors, 1U, __ATOMIC_RELAXED);
+      spdifDiagnosticLog("encode failed frames=%u", (unsigned)frames);
       setError("S/PDIF block encode failed");
       return false;
     }
@@ -3899,14 +3930,41 @@ void MediaPlayerPoC::outputTask()
           __atomic_add_fetch(&expectedHoldTimeouts, 1U, __ATOMIC_RELAXED);
         } else {
           __atomic_add_fetch(&stats.spdifTimeouts, 1U, __ATOMIC_RELAXED);
+          spdifDiagnosticLog("DMA write timeout remaining=%u ring=%u",
+                             (unsigned)remaining,
+                             (unsigned)ringAvailable());
         }
         continue;
       }
       if (result != ESP_OK) {
         __atomic_add_fetch(&stats.spdifErrors, 1U, __ATOMIC_RELAXED);
+        spdifDiagnosticLog("DMA write error=%d remaining=%u",
+                           (int)result, (unsigned)remaining);
         setError("S/PDIF DMA write failed");
         return false;
       }
+    }
+    const int64_t completedUs = esp_timer_get_time();
+    const uint32_t writeUs = static_cast<uint32_t>(std::min<int64_t>(
+        completedUs - sendStartedUs, UINT32_MAX));
+    maximumWriteUs = std::max(maximumWriteUs, writeUs);
+    previousSendCompletedUs = completedUs;
+    if (completedUs - heartbeatStartedUs >= 10000000LL) {
+      spdifDiagnosticLog(
+          "heartbeat rate=%lu ring=%u write_max=%lu us gap_max=%lu us "
+          "underruns=%lu timeouts=%lu errors=%lu",
+          (unsigned long)currentFile.sampleRate, (unsigned)ringAvailable(),
+          (unsigned long)maximumWriteUs,
+          (unsigned long)maximumProducerGapUs,
+          (unsigned long)__atomic_load_n(&stats.underrunEvents,
+                                         __ATOMIC_ACQUIRE),
+          (unsigned long)__atomic_load_n(&stats.spdifTimeouts,
+                                         __ATOMIC_ACQUIRE),
+          (unsigned long)__atomic_load_n(&stats.spdifErrors,
+                                         __ATOMIC_ACQUIRE));
+      heartbeatStartedUs = completedUs;
+      maximumWriteUs = 0;
+      maximumProducerGapUs = 0;
     }
     return !stopRequested;
   };
@@ -3915,6 +3973,10 @@ void MediaPlayerPoC::outputTask()
   bool underrunActive = false;
   uint32_t underrunRunFrames = 0;
   updateTaskStackWatermark(false);
+  spdifDiagnosticLog("output task started rate=%lu ring=%u path=%s",
+                     (unsigned long)currentFile.sampleRate,
+                     (unsigned)ringAvailable(),
+                     currentPath[0] ? currentPath : "(none)");
 
   // DSPi is switched to S/PDIF before this task starts. Give its receiver a
   // continuous quarter-second consumer-PCM silence stream to acquire lock
@@ -3959,6 +4021,11 @@ void MediaPlayerPoC::outputTask()
         underrunActive = true;
         underrunRunFrames = 0;
         __atomic_add_fetch(&stats.underrunEvents, 1U, __ATOMIC_RELAXED);
+        spdifDiagnosticLog("PCM underrun started ring=0 decoded=%llu output=%llu",
+                           (unsigned long long)__atomic_load_n(
+                               &stats.decodedFrames, __ATOMIC_ACQUIRE),
+                           (unsigned long long)__atomic_load_n(
+                               &stats.outputFrames, __ATOMIC_ACQUIRE));
       }
       underrunRunFrames += (uint32_t)kOutputChunkFrames;
       __atomic_add_fetch(&stats.underrunFrames,
@@ -3972,6 +4039,11 @@ void MediaPlayerPoC::outputTask()
       continue;
     }
 
+    if (underrunActive) {
+      spdifDiagnosticLog("PCM underrun recovered frames=%lu ring=%u",
+                         (unsigned long)underrunRunFrames,
+                         (unsigned)ringAvailable());
+    }
     underrunActive = false;
     underrunRunFrames = 0;
     if (!decoderComplete) {
@@ -4002,6 +4074,10 @@ void MediaPlayerPoC::outputTask()
   if (mediaControlEvents) {
     xEventGroupClearBits(mediaControlEvents, kOutputQuiescentBit);
   }
+  spdifDiagnosticLog("output task ended natural=%s state=%s output=%llu",
+                     naturalEnd ? "yes" : "no", stateName(state),
+                     (unsigned long long)__atomic_load_n(
+                         &stats.outputFrames, __ATOMIC_ACQUIRE));
   free(encoded);
   outputTaskHandle = nullptr;
   vTaskDelete(nullptr);

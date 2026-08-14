@@ -185,6 +185,7 @@ private:
   void handleUploadFinished();
   void handleFirmwareRaw();
   void handleFirmwareFinished();
+  void handleSpdifDiagnostics();
   void handleCancel();
   void handleDeleteIncomplete();
   void handleDeleteFolder();
