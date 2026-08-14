@@ -111,6 +111,25 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("silenceEncoder.encode(nullptr, 192", start)
         self.assertIn("i2s_channel_write(tx, encodedSilence", start)
 
+    def test_dma_ring_is_deep_and_exactly_spdif_block_aligned(self):
+        self.assertIn("kSpdifDmaFramesPerDescriptor = 384", PLAYER)
+        self.assertIn("kSpdifDmaDescriptorCount = 16", PLAYER)
+        self.assertIn("kSpdifInterruptPriority = 2", PLAYER)
+        self.assertIn("kOutputTaskPriority = 6", PLAYER)
+        self.assertIn(
+            "kSpdifDmaFramesPerDescriptor == 192u * 2u", PLAYER
+        )
+        start = function_body(PLAYER, "bool MediaPlayerPoC::startSpdif")
+        self.assertIn(
+            "channelConfig.dma_desc_num = kSpdifDmaDescriptorCount", start
+        )
+        self.assertIn(
+            "channelConfig.dma_frame_num = kSpdifDmaFramesPerDescriptor", start
+        )
+        self.assertIn(
+            "block < kSpdifDmaDescriptorCount", start
+        )
+
     def test_stopped_transmitter_is_explicitly_held_low(self):
         stop = function_body(PLAYER, "void MediaPlayerPoC::stopSpdif")
         self.assertIn("pinMode(spdifDataOutPin, OUTPUT)", stop)

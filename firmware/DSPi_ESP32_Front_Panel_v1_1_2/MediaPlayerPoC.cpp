@@ -41,12 +41,20 @@ constexpr size_t kFallbackRingFrames = 131072;
 constexpr size_t kEmergencyRingFrames = 65536;
 constexpr size_t kDecodeChunkFrames = 512;
 constexpr size_t kOutputChunkFrames = 256;
+// The I2S peripheral runs at 2x the source sample rate and emits two 32-bit
+// slots per I2S frame. Therefore 384 I2S frames carry exactly one complete
+// 192-frame stereo S/PDIF channel-status block. Keeping each retained DMA
+// descriptor block-aligned means a late writer repeats valid framed data
+// instead of an arbitrary fragment with malformed B-preamble cadence.
+constexpr uint32_t kSpdifDmaFramesPerDescriptor = 384;
+constexpr uint32_t kSpdifDmaDescriptorCount = 16;
+constexpr int kSpdifInterruptPriority = 2;
 constexpr uint64_t kMp3SeekYieldFrames = 1152ULL * 4ULL;
 constexpr size_t kStartPrefillFrames = 16384;
 constexpr size_t kSeekPrefillFrames = 8192;
 constexpr uint32_t kMinimumPsramBandwidthTenthsMiB = 40;  // 4.0 MiB/s.
 constexpr UBaseType_t kDecoderTaskPriority = 3;
-constexpr UBaseType_t kOutputTaskPriority = 4;
+constexpr UBaseType_t kOutputTaskPriority = 6;
 // Keep the time-critical S/PDIF writer isolated on CPU1. Let decode/SD work use
 // whichever CPU is available: output always preempts it on CPU1, while an idle
 // CPU0 can absorb it between Bluetooth controller work. Automatic BLE scans
@@ -82,6 +90,10 @@ static_assert((kEmergencyRingFrames & (kEmergencyRingFrames - 1)) == 0,
               "Emergency PCM ring frame count must be a power of two");
 static_assert(kOutputTaskPriority > kDecoderTaskPriority,
               "S/PDIF output must always preempt media decoding");
+static_assert(kSpdifDmaFramesPerDescriptor == 192u * 2u,
+              "Each S/PDIF DMA descriptor must hold one complete block");
+static_assert(kSpdifDmaFramesPerDescriptor * 2u * sizeof(uint32_t) <= 4092u,
+              "ESP-IDF limits each I2S DMA descriptor to 4092 bytes");
 
 SemaphoreHandle_t sharedSpiMutex()
 {
@@ -3064,8 +3076,12 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   spdifDataOutPin = dataOutPin;
   i2s_chan_config_t channelConfig =
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
-  channelConfig.dma_desc_num = 8;
-  channelConfig.dma_frame_num = kOutputChunkFrames;
+  channelConfig.dma_desc_num = kSpdifDmaDescriptorCount;
+  channelConfig.dma_frame_num = kSpdifDmaFramesPerDescriptor;
+  // Use a deterministic level-2 interrupt rather than the driver's lowest
+  // available default. The output task remains blocking/cooperative, so this
+  // only protects descriptor service from display and filesystem activity.
+  channelConfig.intr_priority = kSpdifInterruptPriority;
   // Raw zero DMA words are not S/PDIF silence: they remove the biphase
   // carrier and force the downstream receiver to relock. Retain previously
   // encoded descriptor contents if the producer is ever briefly late.
@@ -3102,12 +3118,14 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   }
 
   // Prime every DMA descriptor with complete, valid S/PDIF silence before
-  // route selection or task creation. Six 192-frame blocks preserve the
-  // channel-status block boundary when outputTask's encoder starts at frame 0.
+  // route selection or task creation. One 192-frame block maps exactly to one
+  // descriptor, and the whole ring ends back at encoder frame 0 before the
+  // output task starts producing its own block-aligned stream.
   uint32_t encodedSilence[192 * SpdifBlockEncoder::kWordsPerStereoFrame] = {};
   SpdifBlockEncoder silenceEncoder;
   silenceEncoder.reset();
-  for (uint8_t block = 0; block < 6 && result == ESP_OK; ++block) {
+  for (uint32_t block = 0;
+       block < kSpdifDmaDescriptorCount && result == ESP_OK; ++block) {
     if (!silenceEncoder.encode(nullptr, 192, encodedSilence,
                                sizeof(encodedSilence) / sizeof(uint32_t))) {
       result = ESP_FAIL;
