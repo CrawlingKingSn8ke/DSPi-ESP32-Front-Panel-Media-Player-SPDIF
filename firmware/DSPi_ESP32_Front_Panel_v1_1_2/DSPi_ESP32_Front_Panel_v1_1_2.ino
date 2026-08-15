@@ -10502,6 +10502,26 @@ String mediaBrowserItemTag(uint8_t index)
          String(MediaPlayerPoC::formatName(entry.format));
 }
 
+bool mediaBrowserItemIsPlaying(uint8_t itemIndex)
+{
+  if (!mediaCurrentPath[0]) return false;
+  int16_t entryIndex = mediaBrowserEntryIndex(itemIndex);
+  if (entryIndex < 0) return false;
+
+  const MediaBrowserEntry &entry = mediaBrowserEntries[entryIndex];
+  if (!entry.directory) {
+    return strcmp(entry.path, mediaCurrentPath) == 0;
+  }
+
+  // A directory is on the playing track's path only when its complete path
+  // is followed by a separator. This prevents similarly named siblings such
+  // as "Album" and "Album 2" from both receiving the accent highlight.
+  const size_t directoryLength = strlen(entry.path);
+  return directoryLength > 0 &&
+         strncmp(entry.path, mediaCurrentPath, directoryLength) == 0 &&
+         mediaCurrentPath[directoryLength] == '/';
+}
+
 String sourceText()
 {
   // Music is the ESP32's I2S programme, not a separate DSPi input or Home
@@ -12622,22 +12642,24 @@ void drawMediaBrowserRow(uint8_t itemIndex, uint8_t visibleRow,
   int16_t tagX = UI_W - tagWidth - 12;
   int16_t textX = 34;
   int16_t textWidth = std::max<int16_t>(62, tagX - textX - 10);
+  const uint16_t rowColour = mediaBrowserItemIsPlaying(itemIndex)
+      ? uiAccent() : uiMainText();
 
-  drawMediaBrowserIcon(itemIndex, 10, rowY + 7, uiMainText());
+  drawMediaBrowserIcon(itemIndex, 10, rowY + 7, rowColour);
 
   int16_t titleWidth = fontTextWidth(FontMedium, title);
   if (selected && titleWidth > textWidth) {
     drawFontTextClipped(FontMedium, textX - mediaMarqueeOffset, rowY + 2,
-                        title, uiMainText(), textX, rowY, textWidth, rowH);
+                        title, rowColour, textX, rowY, textWidth, rowH);
   } else {
     String shown = selected ? title :
                    ellipsizeFontText(FontMedium, title, textWidth);
-    drawFontTextClipped(FontMedium, textX, rowY + 2, shown, uiMainText(),
+    drawFontTextClipped(FontMedium, textX, rowY + 2, shown, rowColour,
                         textX, rowY, textWidth, rowH);
   }
 
   if (tag.length()) {
-    drawFontText(FontSmall, tagX, rowY + 6, tag, uiMainText());
+    drawFontText(FontSmall, tagX, rowY + 6, tag, rowColour);
   }
 }
 
