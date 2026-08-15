@@ -5575,6 +5575,10 @@ struct MediaDspiRouteSnapshot {
 MediaDspiRouteSnapshot mediaRoute;
 bool mediaRouteRestorePending = false;
 unsigned long mediaRouteRestoreRetryAt = 0;
+// DSPi deliberately treats a SET to its already-selected input as a no-op.
+// Track whether a real source transition has run since link-up so a cold boot
+// directly into the media S/PDIF input can be re-armed exactly once.
+bool mediaDspiSourcePrimed = false;
 bool mediaPresetRefreshPending = false;
 unsigned long mediaPresetRefreshAt = 0;
 uint8_t mediaPresetRefreshAttempts = 0;
@@ -7443,6 +7447,7 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
     dspiFailureCount++;
     if (dspiFailureCount >= 4 && dspi.connected) {
       dspi.connected = false;
+      mediaDspiSourcePrimed = false;
       resetMetersForStateChange("DSPi link lost");
     }
   }
@@ -7955,6 +7960,7 @@ bool syncCurrentState(bool includePresetNames)
                          "DSPi link restored";
     resetMetersForStateChange(reason);
   }
+  if (oldConnected && sourceChanged) mediaDspiSourcePrimed = true;
 
   // Publish only verified DSPi state. A preset load can also restore its saved
   // source; in that case the preset identity is the more useful distance view.
@@ -8115,6 +8121,7 @@ bool pollExternalRuntimeState()
                                   ? "S/PDIF signal locked"
                                   : "S/PDIF signal state changed");
   }
+  if (sourceChanged) mediaDspiSourcePrimed = true;
 
   const bool notificationsAllowed = externalRuntimeStateReady;
   externalRuntimeStateReady = true;
@@ -8435,6 +8442,7 @@ bool setInputSource(InputSource source, bool userInitiated)
   InputSource oldSource = dspi.source;
   dspi.source = (InputSource)readback;
   if (oldSource != dspi.source) {
+    mediaDspiSourcePrimed = true;
     Serial.printf("DSPi source change: old=%u new=%u reason=local SET\n",
                   (unsigned)oldSource, (unsigned)dspi.source);
   }
@@ -8601,8 +8609,22 @@ bool activateDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
   uint8_t liveSource = 0xFF;
   bool sourceKnown = getExactByte(REQ_GET_INPUT_SOURCE, liveSource) &&
                      liveSource <= SRC_MAX;
-  if ((!sourceKnown || liveSource != MEDIA_DSPI_SPDIF_SOURCE) &&
-      !setInputSource(MEDIA_DSPI_SPDIF_SOURCE, userInitiated)) {
+
+  bool selected = true;
+  if (sourceKnown && liveSource == MEDIA_DSPI_SPDIF_SOURCE &&
+      !mediaDspiSourcePrimed) {
+    // A preset can boot DSPi directly into S/PDIF1 before a carrier exists.
+    // Its same-source SET path is intentionally a no-op, so force one genuine
+    // transition through always-available USB while the ESP is already
+    // transmitting encoded silence. This mirrors the proven manual recovery
+    // without touching User Volume.
+    Serial.println("MEDIA ROUTE: cold S/PDIF1 route; re-arming via USB");
+    selected = setInputSource(SRC_USB, false) &&
+               setInputSource(MEDIA_DSPI_SPDIF_SOURCE, false);
+  } else if (!sourceKnown || liveSource != MEDIA_DSPI_SPDIF_SOURCE) {
+    selected = setInputSource(MEDIA_DSPI_SPDIF_SOURCE, userInitiated);
+  }
+  if (!selected) {
     Serial.println("MEDIA ROUTE: failed to select DSPi S/PDIF input 1");
     return false;
   }
@@ -8614,6 +8636,36 @@ bool activateDspiMediaRoute(uint32_t sampleRate, bool userInitiated)
   dspi.spdifState = 1;
   dspi.spdifNonAudio = false;
   dspi.sampleRate = sampleRate;
+
+  // startSpdif() has already filled and enabled a circular DMA ring containing
+  // valid consumer S/PDIF silence. Keep music parked in the PCM prefill ring
+  // until DSPi reports an exact audio lock at the file's native rate. This
+  // prevents the first decoded samples from straddling receiver acquisition.
+  const unsigned long lockDeadline = millis() + 1200;
+  bool locked = false;
+  do {
+    uint8_t statusPayload[16] = {0};
+    if (getExact(REQ_GET_SPDIF_RX_STATUS, 0, sizeof(statusPayload),
+                 statusPayload, sizeof(statusPayload), false) &&
+        statusPayload[0] == 2 &&
+        statusPayload[1] == (uint8_t)MEDIA_DSPI_SPDIF_SOURCE &&
+        readLe32(statusPayload + 4) == sampleRate) {
+      dspi.spdifState = 2;
+      dspi.sampleRate = sampleRate;
+      locked = true;
+      break;
+    }
+    if ((long)(millis() - lockDeadline) >= 0) break;
+    delay(25);
+  } while ((long)(millis() - lockDeadline) < 0);
+
+  if (!locked) {
+    Serial.printf("MEDIA ROUTE: S/PDIF1 lock timeout expected-rate=%lu\n",
+                  (unsigned long)sampleRate);
+    return false;
+  }
+
+  mediaDspiSourcePrimed = true;
   mediaRoute.active = true;
   mediaRoute.activeRate = sampleRate;
   Serial.printf(
