@@ -196,6 +196,9 @@ public:
             MediaRouteCallback routeCallback,
             void *routeContext, Stream &out);
   void requestStop();
+  // Track changes may retain a same-rate S/PDIF carrier filled with valid
+  // encoded silence. Ordinary requestStop() always tears the carrier down.
+  void requestTrackTransitionStop();
   void stop();
   bool serviceStopCleanup();
   bool togglePause();
@@ -271,6 +274,7 @@ private:
   size_t readRing(int32_t *stereoOutput, size_t frames);
   bool startSpdif(int8_t dataOutPin);
   void stopSpdif();
+  void requestStopInternal(bool retainSpdifCarrier);
   void setError(const char *message);
   void reportStorageReadFault(const char *stage);
 
@@ -302,6 +306,7 @@ private:
   int32_t *pcmRing = nullptr;
   void *spdifTxChannel = nullptr;
   int8_t spdifDataOutPin = -1;
+  uint32_t spdifSampleRate = 0;
   TaskHandle_t decoderTaskHandle = nullptr;
   TaskHandle_t outputTaskHandle = nullptr;
   QueueHandle_t seekCommandQueue = nullptr;
@@ -316,6 +321,7 @@ private:
   void *startRouteContext = nullptr;
   size_t startPrefillTarget = 0;
   volatile bool stopRequested = false;
+  volatile bool retainSpdifCarrierRequested = false;
   volatile bool decoderComplete = false;
   volatile bool storageIoFault = false;
   volatile bool terminalEventPending = false;

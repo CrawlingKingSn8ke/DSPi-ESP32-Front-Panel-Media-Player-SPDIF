@@ -3070,6 +3070,15 @@ size_t MediaPlayerPoC::readRing(int32_t *stereoOutput, size_t frames)
 
 bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
 {
+  if (spdifTxChannel && retainSpdifCarrierRequested &&
+      spdifDataOutPin == dataOutPin &&
+      spdifSampleRate == currentFile.sampleRate) {
+    retainSpdifCarrierRequested = false;
+    Serial.printf(
+        "MEDIA SPDIF TX: reused continuous carrier rate=%lu Hz data=GPIO%d\n",
+        (unsigned long)spdifSampleRate, dataOutPin);
+    return true;
+  }
   stopSpdif();
   pinMode(dataOutPin, OUTPUT);
   digitalWrite(dataOutPin, LOW);
@@ -3154,6 +3163,8 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   }
   spdifTxChannel = tx;
   spdifDataOutPin = dataOutPin;
+  spdifSampleRate = currentFile.sampleRate;
+  retainSpdifCarrierRequested = false;
   Serial.printf(
       "MEDIA SPDIF TX: enabled rate=%lu Hz carrier=%lu Hz data=GPIO%d "
       "depth=24-bit block-DMA\n",
@@ -3177,6 +3188,8 @@ void MediaPlayerPoC::stopSpdif()
     digitalWrite(spdifDataOutPin, LOW);
     spdifDataOutPin = -1;
   }
+  spdifSampleRate = 0;
+  retainSpdifCarrierRequested = false;
 }
 
 void MediaPlayerPoC::setError(const char *message)
@@ -3191,7 +3204,14 @@ bool MediaPlayerPoC::beginPlay(const char *path, int8_t dataOutPin,
                                MediaRouteCallback routeCallback,
                                void *routeContext, Stream &out)
 {
-  stop();
+  // A cooperative track transition may leave the DMA engine transmitting
+  // block-aligned encoded silence. Keep it alive while probing and prefilling
+  // the next file; startSpdif() will reuse it only when pin and rate match.
+  const bool retainedCarrierIdle =
+      retainSpdifCarrierRequested && spdifTxChannel &&
+      !decoderTaskHandle && !outputTaskHandle &&
+      state == MediaPlaybackState::Stopped;
+  if (!retainedCarrierIdle) stop();
   if (decoderTaskHandle || outputTaskHandle) {
     out.printf("MEDIA PLAY: rejected path=%s reason=previous media task still stopping\n",
                path ? path : "(none)");
@@ -3420,10 +3440,21 @@ bool MediaPlayerPoC::play(const char *path, int8_t dataOutPin,
 
 void MediaPlayerPoC::requestStop()
 {
+  requestStopInternal(false);
+}
+
+void MediaPlayerPoC::requestTrackTransitionStop()
+{
+  requestStopInternal(true);
+}
+
+void MediaPlayerPoC::requestStopInternal(bool retainSpdifCarrier)
+{
   const bool haveResources = decoderTaskHandle || outputTaskHandle || decoder ||
                              spdifTxChannel;
   if (state == MediaPlaybackState::Stopped && !haveResources) return;
 
+  retainSpdifCarrierRequested = retainSpdifCarrier && spdifTxChannel;
   stopRequested = true;
   __atomic_add_fetch(&seekGeneration, 1U, __ATOMIC_ACQ_REL);
   state = MediaPlaybackState::Draining;
@@ -3471,7 +3502,7 @@ bool MediaPlayerPoC::serviceStopCleanup()
     return state == MediaPlaybackState::Stopped;
   }
 
-  stopSpdif();
+  if (!retainSpdifCarrierRequested) stopSpdif();
   closeDecoder();
   resetRing();
   if (seekCommandQueue) xQueueReset(seekCommandQueue);
@@ -3873,7 +3904,8 @@ void MediaPlayerPoC::outputTask()
   }
   encoder.reset();
 
-  auto sendFrames = [&](const int32_t *samples, size_t frames) -> bool {
+  auto sendFrames = [&](const int32_t *samples, size_t frames,
+                        bool allowWhileStopping = false) -> bool {
     if (!encoder.encode(samples, frames, encoded, encodedWordCapacity)) {
       __atomic_add_fetch(&stats.spdifErrors, 1U, __ATOMIC_RELAXED);
       setError("S/PDIF block encode failed");
@@ -3882,7 +3914,7 @@ void MediaPlayerPoC::outputTask()
     const uint8_t *next = reinterpret_cast<const uint8_t *>(encoded);
     size_t remaining = frames * SpdifBlockEncoder::kWordsPerStereoFrame *
                        sizeof(uint32_t);
-    while (remaining && !stopRequested) {
+    while (remaining && (!stopRequested || allowWhileStopping)) {
       size_t written = 0;
       esp_err_t result = i2s_channel_write(tx, next, remaining, &written, 25);
       if (written) {
@@ -3908,7 +3940,7 @@ void MediaPlayerPoC::outputTask()
         return false;
       }
     }
-    return !stopRequested;
+    return !stopRequested || allowWhileStopping;
   };
 
   bool naturalEnd = false;
@@ -3996,6 +4028,44 @@ void MediaPlayerPoC::outputTask()
     if (!stopRequested && state != MediaPlaybackState::Error) {
       state = MediaPlaybackState::Finished;
       terminalEventPending = true;
+      // Do not let the DMA ring run unattended while the main loop decides
+      // whether to advance. Continue producing valid silence so the DSPi
+      // receiver never has to reacquire a same-rate carrier.
+      while (!stopRequested && state != MediaPlaybackState::Error) {
+        if (!sendFrames(nullptr, kOutputChunkFrames)) break;
+      }
+    }
+  }
+
+  if (stopRequested && retainSpdifCarrierRequested && spdifTxChannel &&
+      state != MediaPlaybackState::Error) {
+    // Finish the current 192-frame channel-status block, then replace a full
+    // DMA-ring span with encoded silence. The inactive transition interval can
+    // consequently repeat only valid complete blocks, and the next output task
+    // can safely restart its encoder at block frame zero.
+    const size_t blockRemainder =
+        (192u - (size_t)encoder.frameNumber()) % 192u;
+    bool carrierReady = !blockRemainder ||
+                        sendFrames(nullptr, blockRemainder, true);
+    size_t silenceFrames =
+        kSpdifDmaDescriptorCount * (kSpdifDmaFramesPerDescriptor / 2u);
+    while (carrierReady && silenceFrames) {
+      const size_t frames = std::min(silenceFrames, kOutputChunkFrames);
+      if (!sendFrames(nullptr, frames, true)) {
+        carrierReady = false;
+        break;
+      }
+      silenceFrames -= frames;
+    }
+    if (carrierReady && silenceFrames == 0) {
+      Serial.printf(
+          "MEDIA SPDIF TX: carrier retained rate=%lu Hz silence=%u frames\n",
+          (unsigned long)spdifSampleRate,
+          (unsigned)(kSpdifDmaDescriptorCount *
+                     (kSpdifDmaFramesPerDescriptor / 2u)));
+    } else {
+      retainSpdifCarrierRequested = false;
+      Serial.println("MEDIA SPDIF TX: carrier retention failed; teardown required");
     }
   }
 

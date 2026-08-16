@@ -3,7 +3,7 @@
 Experimental fork of the DSPi ESP32 Front Panel that sends the integrated SD-card music player to a WeebLabs DSPi over a single-wire, 24-bit, 44.1/48 kHz logic-level S/PDIF connection.
 
 > [!IMPORTANT]
-> This repository is an isolated test build, not the stable release of the main front-panel project. S/PDIF stability is improved substantially but occasional output dropouts remain in one tested DSPi hardware configuration. See [EXPERIMENTAL-SPDIF.md](EXPERIMENTAL-SPDIF.md) before flashing or wiring it.
+> This repository is an isolated test build, not the stable release of the main front-panel project. The ESP transmitter is stable in current testing when paired with the experimental DSPi S/PDIF receiver overhaul; official DSPi integration is still pending. See [EXPERIMENTAL-SPDIF.md](EXPERIMENTAL-SPDIF.md) before flashing or wiring it.
 
 The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 

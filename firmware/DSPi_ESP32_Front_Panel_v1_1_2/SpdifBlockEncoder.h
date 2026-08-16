@@ -16,6 +16,7 @@ public:
   // Only the two native rates supported by this media player are accepted.
   bool setSampleRate(uint32_t sampleRate);
   void reset();
+  uint8_t frameNumber() const { return frameNumber_; }
 
   // Encodes the most-significant 24 bits of signed, MSB-aligned stereo PCM.
   // A null PCM pointer generates valid digital silence while preserving the

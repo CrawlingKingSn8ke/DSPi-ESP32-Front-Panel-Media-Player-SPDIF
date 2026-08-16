@@ -9243,7 +9243,7 @@ bool requestMediaTrackTransition(int candidateIndex, int direction, bool wrap,
           mediaQueuePaths[candidateIndex],
           sizeof(mediaTrackTransition.displayPath));
 
-  mediaPlayerPoc.requestStop();
+  mediaPlayerPoc.requestTrackTransitionStop();
   Serial.printf(
       "MEDIA TRANSITION: queued index=%d direction=%d auto=%s path=%s\n",
       candidateIndex, (int)mediaTrackTransition.direction,
@@ -9309,17 +9309,17 @@ void serviceMediaTrackTransition()
     Serial.printf("MEDIA TRANSITION: rejected index=%d path=%s reason=%s\n",
                   candidate, mediaQueuePaths[candidate],
                   mediaPlayerPoc.playbackError());
-    mediaPlayerPoc.requestStop();
-
     if (mediaTrackTransition.skipRejected &&
         mediaTrackTransition.attempts < mediaQueueCount &&
         moveMediaTransitionCandidate()) {
+      mediaPlayerPoc.requestTrackTransitionStop();
       mediaTrackTransition.phase = MediaTrackTransitionPhase::WaitForStop;
       if (uiView == VIEW_MEDIA_NOW_PLAYING && !mediaVolumeOverlayVisible) {
         drawMediaNowPlaying();
       }
       return;
     }
+    mediaPlayerPoc.requestStop();
     mediaTrackTransition.phase = MediaTrackTransitionPhase::FailureCleanup;
   };
 
@@ -9332,6 +9332,7 @@ void serviceMediaTrackTransition()
   if (mediaTrackTransition.phase == MediaTrackTransitionPhase::StartCandidate) {
     const int candidate = mediaTrackTransition.candidateIndex;
     if (candidate < 0 || candidate >= mediaQueueCount) {
+      mediaPlayerPoc.requestStop();
       mediaTrackTransition.phase = MediaTrackTransitionPhase::FailureCleanup;
       return;
     }

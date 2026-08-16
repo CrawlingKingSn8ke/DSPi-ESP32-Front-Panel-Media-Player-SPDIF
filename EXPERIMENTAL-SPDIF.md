@@ -22,6 +22,9 @@ This fork replaces the earlier three-wire ESP-to-DSPi I2S media link with a sing
   with the same status and correct parity on the left and right subframes.
 - DMA reserve is approximately 64 ms at 48 kHz and 70 ms at 44.1 kHz.
 - The output task and I2S interrupt have elevated, deterministic priorities.
+- Same-rate track changes retain the live transmitter and fill the complete DMA
+  ring with block-aligned encoded silence, avoiding receiver reacquisition.
+- A 44.1/48 kHz change still performs a controlled transmitter restart.
 - GPIO13 is explicitly driven low after playback stops.
 
 ## Observed hardware behaviour
@@ -29,23 +32,20 @@ This fork replaces the earlier three-wire ESP-to-DSPi I2S media link with a sing
 Two DSPi systems have behaved differently:
 
 1. A system with four PCM5102 DAC boards is stable with this S/PDIF music-player firmware, with no observed dropout or distortion.
-2. A second system uses a TV S/PDIF input, a DSPi S/PDIF output feeding an external DAC, and a PCM5102 on a DSPi I2S output. USB input and TV S/PDIF input are stable through the DSPi S/PDIF output. With the ESP as the S/PDIF source, the external DAC on the DSPi S/PDIF output can drop out while the simultaneous PCM5102/I2S output remains stable. Moving the ESP source between DSPi S/PDIF GPIO4 and GPIO5 did not remove the behaviour. DMA/carrier hardening reduced but did not eliminate it.
+2. A second system uses a TV S/PDIF input, a DSPi S/PDIF output feeding an external DAC, and a PCM5102 on a DSPi I2S output. The ESP source originally exposed receiver/output dropouts that were not present with the older inputs. Testing the experimental DSPi `spdif_rx_overhaul` receiver code removed those recurring dropouts. The ESP transmitter has remained stable with that receiver build.
 
-This evidence suggests a source-dependent interaction affecting the DSPi S/PDIF output path rather than a general failure of the ESP decoder, SD pipeline, DSP processing, or one DSPi receiver GPIO. The exact cause is not yet proven.
+Both the ESP and an independent TV S/PDIF transmitter can produce one small click roughly ten seconds after the first fresh receiver lock. It does not repeat while the receiver remains locked. That shared behaviour points to receiver clock settling rather than the ESP encoder or SD/audio pipeline.
 
-For a hardware signal-integrity diagnostic, fit a 68-100 ohm series resistor
-at the ESP GPIO13 source end of the S/PDIF wire. Both ends being 3.3 V logic
-compatible does not provide edge damping; the resistor is for ringing and
-reflections, not voltage conversion. Keep the connection and ground return
-short. This is a recommended test, not a claim that hardware is the cause.
+Keep the internal 3.3 V logic connection and its ground return short. A tested
+68-ohm series resistor did not improve this installation and is not required by
+the current wiring guidance.
 
 ## Verified OTA application
 
-- File: `DSPi-ESP32-Front-Panel-v1.2.1.bin`
-- Size: 1,909,936 bytes
-- SHA-256: `CA693E387D8F08C0C9C3D037AE6FC231F3D8A8D7B239A626156A4B3445EDD110`
-- Local source commit: `903de33`
-- Focused contracts: 34 passed
+- File: `DSPi-ESP32-Front-Panel-v1.2.1-Continuous-SPDIF-Carrier-OTA.bin`
+- Size: 1,911,808 bytes
+- SHA-256: `1A77C60E10644145CEC09822BD6A337D2EE6BF5E51A65B626843E262D6132B44`
+- Focused contracts: 58 passed
 - ESP32 Arduino core: 3.3.11
 
 Use the application-only file for browser OTA. Do not upload the 16 MB full-flash image through the browser updater.
