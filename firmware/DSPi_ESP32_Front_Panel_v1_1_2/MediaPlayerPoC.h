@@ -48,7 +48,10 @@ struct MediaPlaybackStats {
   uint32_t longestUnderrunFrames = 0;
   uint32_t lastUnderrunAtMs = 0;
   uint32_t spdifTimeouts = 0;
+  uint32_t spdifPartialWrites = 0;
   uint32_t spdifErrors = 0;
+  uint32_t spdifCarrierRestarts = 0;
+  uint32_t spdifRetainedTransitions = 0;
   uint32_t ringHighWaterFrames = 0;
   uint32_t ringLowWaterFrames = 0;
   uint32_t decoderStackMinFree = 0;
@@ -233,6 +236,12 @@ private:
     Prefill,
     Activate
   };
+  enum class SpdifCarrierRetention : uint8_t {
+    Off = 0,
+    Requested,
+    Ready,
+    Faulted
+  };
 
   bool probeWav(MediaFsFile &file, MediaFileInfo &info);
   bool probeFlac(MediaFsFile &file, MediaFileInfo &info);
@@ -275,6 +284,13 @@ private:
   bool startSpdif(int8_t dataOutPin);
   void stopSpdif();
   void requestStopInternal(bool retainSpdifCarrier);
+  bool stopIsRequested() const;
+  void setStopRequested(bool requested);
+  SpdifCarrierRetention spdifCarrierRetention() const;
+  void setSpdifCarrierRetention(SpdifCarrierRetention retention);
+  bool publishRetainedSpdifCarrier();
+  bool decoderTaskRunning() const;
+  bool outputTaskRunning() const;
   void setError(const char *message);
   void reportStorageReadFault(const char *stage);
 
@@ -321,7 +337,13 @@ private:
   void *startRouteContext = nullptr;
   size_t startPrefillTarget = 0;
   volatile bool stopRequested = false;
-  volatile bool retainSpdifCarrierRequested = false;
+  volatile uint8_t spdifCarrierRetentionState =
+      static_cast<uint8_t>(SpdifCarrierRetention::Off);
+  volatile uint32_t spdifTimeoutsLifetime = 0;
+  volatile uint32_t spdifPartialWritesLifetime = 0;
+  volatile uint32_t spdifErrorsLifetime = 0;
+  volatile uint32_t spdifCarrierRestartsLifetime = 0;
+  volatile uint32_t spdifRetainedTransitionsLifetime = 0;
   volatile bool decoderComplete = false;
   volatile bool storageIoFault = false;
   volatile bool terminalEventPending = false;

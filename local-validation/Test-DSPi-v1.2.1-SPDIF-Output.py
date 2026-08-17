@@ -1,5 +1,6 @@
 import re
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -133,7 +134,7 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("sampleRate == 48000", body)
         self.assertNotIn("96000", body)
 
-    def test_transmitter_is_master_with_internal_clocks_and_data_only_pin(self):
+    def test_transmitter_is_master_with_exact_internal_clock_math(self):
         body = function_body(PLAYER, "bool MediaPlayerPoC::startSpdif")
         self.assertIn("I2S_ROLE_MASTER", body)
         self.assertIn("currentFile.sampleRate * 2u", body)
@@ -141,7 +142,20 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("standardConfig.gpio_cfg.bclk = I2S_GPIO_UNUSED", body)
         self.assertIn("standardConfig.gpio_cfg.ws = I2S_GPIO_UNUSED", body)
         self.assertIn("standardConfig.gpio_cfg.dout = (gpio_num_t)dataOutPin", body)
-        self.assertIn("I2S_CLK_SRC_APLL", body)
+        # ESP32-S3 uses PLL_F160M in Arduino core 3.3.11 / IDF 5.5.5.
+        # The guarded APLL path is portability code, not the active S3 path.
+        self.assertIn("#if SOC_I2S_SUPPORTS_APLL", body)
+        for source_rate, expected_line_rate in (
+            (44_100, 5_644_800),
+            (48_000, 6_144_000),
+        ):
+            configured_i2s_rate = source_rate * 2
+            line_rate = configured_i2s_rate * 2 * 32
+            self.assertEqual(expected_line_rate, line_rate)
+            mclk = configured_i2s_rate * 256
+            divider = Fraction(160_000_000, mclk)
+            self.assertLessEqual(divider.denominator, 512)
+            self.assertEqual(Fraction(160_000_000, 1), divider * mclk)
 
     def test_output_uses_block_dma_and_valid_encoded_silence(self):
         body = function_body(PLAYER, "void MediaPlayerPoC::outputTask()")
@@ -216,6 +230,8 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn("kSpdifDmaDescriptorCount = 16", PLAYER)
         self.assertIn("kSpdifInterruptPriority = 2", PLAYER)
         self.assertIn("kOutputTaskPriority = 6", PLAYER)
+        self.assertIn("ESP32-S3 uses GDMA", PLAYER)
+        self.assertIn("LOWMED interrupt", PLAYER)
         self.assertIn(
             "kSpdifDmaFramesPerDescriptor == 192u * 2u", PLAYER
         )
@@ -229,6 +245,17 @@ class SpdifOutputContracts(unittest.TestCase):
         self.assertIn(
             "block < kSpdifDmaDescriptorCount", start
         )
+
+    def test_partial_writes_have_persistent_low_cost_counters(self):
+        body = function_body(PLAYER, "void MediaPlayerPoC::outputTask()")
+        self.assertIn("written < requested", body)
+        self.assertIn("spdifPartialWritesLifetime", body)
+        self.assertIn("spdifTimeoutsLifetime", body)
+        self.assertIn("spdifErrorsLifetime", body)
+        self.assertIn("next += written", body)
+        self.assertIn("remaining -= written", body)
+        self.assertIn("S/PDIF DMA write made no progress", body)
+        self.assertIn("spdifCarrierRestarts", ENCODER_HEADER + PLAYER + INO)
 
     def test_stopped_transmitter_is_explicitly_held_low(self):
         stop = function_body(PLAYER, "void MediaPlayerPoC::stopSpdif")

@@ -9132,9 +9132,9 @@ bool startMediaPlaybackAttempt(const char *path, bool preserveRouteOnFailure,
 {
   if (!path || !path[0]) return false;
   mediaTrackTransition = MediaTrackTransitionState{};
-  if (mediaPlayerPoc.playbackState() != MediaPlaybackState::Stopped) {
-    mediaPlayerPoc.stop();
-  }
+  // A direct start is not a cooperative transition. stop() is idempotent and
+  // also tears down a carrier retained during the one-loop Stopped window.
+  mediaPlayerPoc.stop();
   if (mediaPlayerPoc.playbackState() != MediaPlaybackState::Stopped) {
     return false;
   }
@@ -9398,8 +9398,10 @@ void stopMediaPlayback(const char *reason)
   cancelMediaArtworkRequest(true);
   if (mediaPlayerPoc.playbackState() != MediaPlaybackState::Stopped) {
     mediaPlayerPoc.printPlaybackStatus(Serial);
-    mediaPlayerPoc.stop();
   }
+  // Stopped may still own an intentionally retained same-rate carrier between
+  // transition phases. Genuine stop/input actions must always release it.
+  mediaPlayerPoc.stop();
   restoreDspiMediaRoute();
   mediaCurrentPath[0] = '\0';
   mediaPlaybackSuspended = false;
@@ -9415,8 +9417,8 @@ void parkMediaPlayback(const char *reason)
   cancelMediaArtworkRequest(false);
   if (mediaPlayerPoc.playbackState() != MediaPlaybackState::Stopped) {
     mediaPlayerPoc.printPlaybackStatus(Serial);
-    mediaPlayerPoc.stop();
   }
+  mediaPlayerPoc.stop();
   restoreDspiMediaRoute();
   mediaPlaybackSuspended = mediaCurrentPath[0] != '\0';
   Serial.printf("MEDIA PLAY: parked-at-start reason=%s path=%s\n",

@@ -456,13 +456,18 @@ void updateAtomicMinimum(uint32_t *target, uint32_t value)
                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
 }
 
+bool atomicFlagIsSet(const volatile bool *flag)
+{
+  return flag && __atomic_load_n(flag, __ATOMIC_ACQUIRE);
+}
+
 size_t cooperativeDecoderRead(MediaFsFile *file,
                               volatile bool *cancelRequested,
                               DecoderReadTelemetry &telemetry,
                               void *output, size_t bytesToRead)
 {
   if (!file || !*file || !output || bytesToRead == 0 ||
-      (cancelRequested && *cancelRequested)) {
+      atomicFlagIsSet(cancelRequested)) {
     return 0;
   }
 
@@ -487,7 +492,7 @@ size_t cooperativeDecoderRead(MediaFsFile *file,
   const uint32_t callbackStartedAt = millis();
 
   while (totalRead < bytesToRead &&
-         !(cancelRequested && *cancelRequested) && !file->hadIoError()) {
+         !atomicFlagIsSet(cancelRequested) && !file->hadIoError()) {
     const size_t sliceRequest =
         std::min(kDecoderReadSliceBytes, bytesToRead - totalRead);
     const uint32_t sliceStartedAt = millis();
@@ -496,7 +501,7 @@ size_t cooperativeDecoderRead(MediaFsFile *file,
     {
       SharedSpiGuard guard;
       transferStartedAt = millis();
-      if (!(cancelRequested && *cancelRequested) && !file->hadIoError()) {
+      if (!atomicFlagIsSet(cancelRequested) && !file->hadIoError()) {
         sliceRead = file->read(destination + totalRead, sliceRequest);
       }
     }
@@ -986,7 +991,7 @@ drwav_bool32 wavSeek(void *context, int offset, drwav_seek_origin origin)
 {
   DecoderIoContext *io = static_cast<DecoderIoContext *>(context);
   if (!io || !io->file || !*io->file ||
-      (io->cancelRequested && *io->cancelRequested)) {
+      atomicFlagIsSet(io->cancelRequested)) {
     return DRWAV_FALSE;
   }
   return seekFile(*io->file, offset, (int)origin)
@@ -997,7 +1002,7 @@ drwav_bool32 wavTell(void *context, drwav_int64 *cursor)
 {
   DecoderIoContext *io = static_cast<DecoderIoContext *>(context);
   if (!io || !io->file || !*io->file || !cursor ||
-      (io->cancelRequested && *io->cancelRequested)) {
+      atomicFlagIsSet(io->cancelRequested)) {
     return DRWAV_FALSE;
   }
   SharedSpiGuard guard;
@@ -1017,12 +1022,12 @@ drflac_bool32 flacSeek(void *context, int offset, drflac_seek_origin origin)
 {
   FlacStreamContext *stream = static_cast<FlacStreamContext *>(context);
   if (!stream || !stream->file || !*stream->file ||
-      (stream->cancelRequested && *stream->cancelRequested)) {
+      atomicFlagIsSet(stream->cancelRequested)) {
     return DRFLAC_FALSE;
   }
 
   SharedSpiGuard guard;
-  if (stream->cancelRequested && *stream->cancelRequested) return DRFLAC_FALSE;
+  if (atomicFlagIsSet(stream->cancelRequested)) return DRFLAC_FALSE;
   int64_t base = 0;
   if (origin == DRFLAC_SEEK_SET) {
     base = (int64_t)stream->baseOffset;
@@ -1046,12 +1051,12 @@ drflac_bool32 flacTell(void *context, drflac_int64 *cursor)
 {
   FlacStreamContext *stream = static_cast<FlacStreamContext *>(context);
   if (!stream || !stream->file || !*stream->file || !cursor ||
-      (stream->cancelRequested && *stream->cancelRequested)) {
+      atomicFlagIsSet(stream->cancelRequested)) {
     return DRFLAC_FALSE;
   }
 
   SharedSpiGuard guard;
-  if (stream->cancelRequested && *stream->cancelRequested) return DRFLAC_FALSE;
+  if (atomicFlagIsSet(stream->cancelRequested)) return DRFLAC_FALSE;
   uint64_t physical = stream->file->position();
   if (physical < stream->baseOffset) return DRFLAC_FALSE;
   *cursor = (drflac_int64)(physical - stream->baseOffset);
@@ -1079,7 +1084,7 @@ drmp3_bool32 mp3Seek(void *context, int offset, drmp3_seek_origin origin)
 {
   DecoderIoContext *io = static_cast<DecoderIoContext *>(context);
   if (!io || !io->file || !*io->file ||
-      (io->cancelRequested && *io->cancelRequested)) {
+      atomicFlagIsSet(io->cancelRequested)) {
     return DRMP3_FALSE;
   }
   return seekFile(*io->file, offset, (int)origin)
@@ -1090,7 +1095,7 @@ drmp3_bool32 mp3Tell(void *context, drmp3_int64 *cursor)
 {
   DecoderIoContext *io = static_cast<DecoderIoContext *>(context);
   if (!io || !io->file || !*io->file || !cursor ||
-      (io->cancelRequested && *io->cancelRequested)) {
+      atomicFlagIsSet(io->cancelRequested)) {
     return DRMP3_FALSE;
   }
   SharedSpiGuard guard;
@@ -1236,7 +1241,7 @@ bool MediaPlayerPoC::switchMountedCardAccessMode(
     return false;
   }
   if (state != MediaPlaybackState::Stopped || decoder ||
-      decoderTaskHandle || outputTaskHandle) {
+      decoderTaskRunning() || outputTaskRunning()) {
     Serial.println(
         "MEDIA SD: access-mode switch rejected; playback resources active");
     return false;
@@ -1273,7 +1278,7 @@ bool MediaPlayerPoC::switchMountedCardAccessMode(
 bool MediaPlayerPoC::unmountCard(uint32_t lockTimeoutMs)
 {
   if (state != MediaPlaybackState::Stopped || decoder ||
-      decoderTaskHandle || outputTaskHandle) {
+      decoderTaskRunning() || outputTaskRunning()) {
     Serial.println("MEDIA SD: unmount rejected; playback resources active");
     return false;
   }
@@ -1308,7 +1313,7 @@ bool MediaPlayerPoC::prepareCardForControllerRestart(
     uint32_t lockTimeoutMs)
 {
   if (state != MediaPlaybackState::Stopped || decoder ||
-      decoderTaskHandle || outputTaskHandle) {
+      decoderTaskRunning() || outputTaskRunning()) {
     Serial.println(
         "MEDIA SD: restart preparation rejected; playback resources active");
     return false;
@@ -2297,7 +2302,7 @@ MediaPlayerPoC::Mp3SeekAttempt MediaPlayerPoC::seekMp3CandidateToFrame(
 
   uint64_t remaining = frame;
   while (remaining > 0) {
-    if (stopRequested) {
+    if (stopIsRequested()) {
       attempt.result = Mp3SeekAttemptResult::Stopped;
       break;
     }
@@ -2346,7 +2351,7 @@ bool MediaPlayerPoC::prefillMp3Candidate(
 
   const uint32_t startedAt = millis();
   while (framesWritten < capacityFrames) {
-    if (stopRequested) {
+    if (stopIsRequested()) {
       failure = Mp3SeekAttemptResult::Stopped;
       return false;
     }
@@ -2465,7 +2470,7 @@ bool MediaPlayerPoC::prefillAfterSeek()
   unsigned long deadline = millis() + kSeekPrefillTimeoutMs;
   const size_t target = std::min(kSeekPrefillFrames,
                                  ringFrameCapacity / 4);
-  while (!stopRequested && ringAvailable() < target &&
+  while (!stopIsRequested() && ringAvailable() < target &&
          ringWritable() > 0 && (long)(millis() - deadline) < 0) {
     size_t request = std::min(kDecodeChunkFrames, ringWritable());
     size_t frames = decodeFrames(decoder->stereo, request);
@@ -2475,7 +2480,7 @@ bool MediaPlayerPoC::prefillAfterSeek()
         reportStorageReadFault("seek-prefill");
         cardMounted = false;
         setError("SD read failed or card removed");
-        stopRequested = true;
+        setStopRequested(true);
         return false;
       }
       decoderComplete = true;
@@ -2504,7 +2509,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
       (uint32_t)uxTaskGetStackHighWaterMark(nullptr);
   updateTaskStackWatermark(true);
   if (stackBefore < kSeekMinimumFreeStackBytes) {
-    if (!stopRequested) {
+    if (!stopIsRequested()) {
       state = seekResumePaused ? MediaPlaybackState::Paused
                                : MediaPlaybackState::Playing;
     }
@@ -2526,7 +2531,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
   if ((bits & kOutputQuiescentBit) == 0) {
     xEventGroupClearBits(mediaControlEvents,
                          kSeekActiveBit | kOutputQuiescentBit);
-    if (!stopRequested) {
+    if (!stopIsRequested()) {
       state = seekResumePaused ? MediaPlaybackState::Paused
                                : MediaPlaybackState::Playing;
     }
@@ -2558,7 +2563,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
     // MP3 seeks are transactional. The active decoder, buffered audio and
     // counters remain untouched until a separate decoder has reached the
     // target and produced a complete staging prefill.
-    while (!stopRequested) {
+    while (!stopIsRequested()) {
       if (currentFile.totalFrames > 0) {
         latest.targetFrame = std::min<uint64_t>(
             latest.targetFrame, currentFile.totalFrames - 1);
@@ -2630,7 +2635,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
           __atomic_load_n(&seekGeneration, __ATOMIC_ACQUIRE) !=
               latest.generation) {
         candidateReady = false;
-        if (!stopRequested) {
+        if (!stopIsRequested()) {
           attempt.result = Mp3SeekAttemptResult::Superseded;
         }
       }
@@ -2678,7 +2683,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
       if (candidatePrefill) heap_caps_free(candidatePrefill);
 
       if (completed) break;
-      if (stopRequested) break;
+      if (stopIsRequested()) break;
       if (haveReplacement) {
         Serial.printf(
             "MEDIA SEEK: superseded generation=%lu by generation=%lu "
@@ -2702,7 +2707,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
     }
   } else {
     // Preserve the proven v12.1 WAV/FLAC in-place path unchanged.
-    while (!stopRequested) {
+    while (!stopIsRequested()) {
       if (currentFile.totalFrames > 0) {
         latest.targetFrame = std::min<uint64_t>(
             latest.targetFrame, currentFile.totalFrames - 1);
@@ -2715,7 +2720,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
       bool seekOk =
           heapBefore &&
           seekDecoderToFrame(latest.targetFrame, latest.generation);
-      if (stopRequested) break;
+      if (stopIsRequested()) break;
       updateTaskStackWatermark(true);
       bool heapAfter = heap_caps_check_integrity_all(true);
       seekOk = seekOk && heapAfter;
@@ -2777,7 +2782,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
   xEventGroupClearBits(mediaControlEvents,
                        kSeekActiveBit | kOutputQuiescentBit);
 
-  if (stopRequested) {
+  if (stopIsRequested()) {
     publishSeekEvent(MediaSeekResult::Cancelled, latest.targetFrame,
                      actualFrame, latest.generation, elapsed);
     return false;
@@ -2819,7 +2824,7 @@ bool MediaPlayerPoC::performSeek(SeekCommand command)
   publishSeekEvent(MediaSeekResult::Failed, latest.targetFrame,
                    actualFrame, latest.generation, elapsed);
   setError("decoder seek and recovery failed");
-  stopRequested = true;
+  setStopRequested(true);
   return false;
 }
 
@@ -3068,17 +3073,62 @@ size_t MediaPlayerPoC::readRing(int32_t *stereoOutput, size_t frames)
   return frames;
 }
 
+bool MediaPlayerPoC::stopIsRequested() const
+{
+  return __atomic_load_n(&stopRequested, __ATOMIC_ACQUIRE);
+}
+
+void MediaPlayerPoC::setStopRequested(bool requested)
+{
+  __atomic_store_n(&stopRequested, requested, __ATOMIC_RELEASE);
+}
+
+MediaPlayerPoC::SpdifCarrierRetention
+MediaPlayerPoC::spdifCarrierRetention() const
+{
+  return static_cast<SpdifCarrierRetention>(
+      __atomic_load_n(&spdifCarrierRetentionState, __ATOMIC_ACQUIRE));
+}
+
+void MediaPlayerPoC::setSpdifCarrierRetention(
+    SpdifCarrierRetention retention)
+{
+  __atomic_store_n(&spdifCarrierRetentionState,
+                   static_cast<uint8_t>(retention), __ATOMIC_RELEASE);
+}
+
+bool MediaPlayerPoC::publishRetainedSpdifCarrier()
+{
+  uint8_t expected = static_cast<uint8_t>(SpdifCarrierRetention::Requested);
+  return __atomic_compare_exchange_n(
+      &spdifCarrierRetentionState, &expected,
+      static_cast<uint8_t>(SpdifCarrierRetention::Ready), false,
+      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+bool MediaPlayerPoC::decoderTaskRunning() const
+{
+  return __atomic_load_n(&decoderTaskHandle, __ATOMIC_ACQUIRE) != nullptr;
+}
+
+bool MediaPlayerPoC::outputTaskRunning() const
+{
+  return __atomic_load_n(&outputTaskHandle, __ATOMIC_ACQUIRE) != nullptr;
+}
+
 bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
 {
-  if (spdifTxChannel && retainSpdifCarrierRequested &&
+  if (spdifTxChannel &&
+      spdifCarrierRetention() == SpdifCarrierRetention::Ready &&
       spdifDataOutPin == dataOutPin &&
       spdifSampleRate == currentFile.sampleRate) {
-    retainSpdifCarrierRequested = false;
+    setSpdifCarrierRetention(SpdifCarrierRetention::Off);
     Serial.printf(
         "MEDIA SPDIF TX: reused continuous carrier rate=%lu Hz data=GPIO%d\n",
         (unsigned long)spdifSampleRate, dataOutPin);
     return true;
   }
+  const bool replacingCarrier = spdifTxChannel != nullptr;
   stopSpdif();
   pinMode(dataOutPin, OUTPUT);
   digitalWrite(dataOutPin, LOW);
@@ -3087,9 +3137,9 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
       I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
   channelConfig.dma_desc_num = kSpdifDmaDescriptorCount;
   channelConfig.dma_frame_num = kSpdifDmaFramesPerDescriptor;
-  // Use a deterministic level-2 interrupt rather than the driver's lowest
-  // available default. The output task remains blocking/cooperative, so this
-  // only protects descriptor service from display and filesystem activity.
+  // Preserve the elevated request for non-GDMA targets. ESP32-S3 uses GDMA in
+  // IDF 5.5.5, where the public driver selects a LOWMED interrupt and does not
+  // expose an exact priority override; its callback remains IRAM-safe.
   channelConfig.intr_priority = kSpdifInterruptPriority;
   // Raw zero DMA words are not S/PDIF silence: they remove the biphase
   // carrier and force the downstream receiver to relock. Retain previously
@@ -3102,7 +3152,7 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   i2s_std_config_t standardConfig = {};
   i2s_std_clk_config_t clockConfig =
       I2S_STD_CLK_DEFAULT_CONFIG(currentFile.sampleRate * 2u);
-#if SOC_CLK_APLL_SUPPORTED
+#if SOC_I2S_SUPPORTS_APLL
   clockConfig.clk_src = I2S_CLK_SRC_APLL;
 #endif
   i2s_std_slot_config_t slotConfig =
@@ -3164,7 +3214,10 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
   spdifTxChannel = tx;
   spdifDataOutPin = dataOutPin;
   spdifSampleRate = currentFile.sampleRate;
-  retainSpdifCarrierRequested = false;
+  setSpdifCarrierRetention(SpdifCarrierRetention::Off);
+  if (replacingCarrier) {
+    __atomic_add_fetch(&spdifCarrierRestartsLifetime, 1U, __ATOMIC_RELAXED);
+  }
   Serial.printf(
       "MEDIA SPDIF TX: enabled rate=%lu Hz carrier=%lu Hz data=GPIO%d "
       "depth=24-bit block-DMA\n",
@@ -3175,6 +3228,7 @@ bool MediaPlayerPoC::startSpdif(int8_t dataOutPin)
 
 void MediaPlayerPoC::stopSpdif()
 {
+  setSpdifCarrierRetention(SpdifCarrierRetention::Off);
   if (spdifTxChannel) {
     i2s_chan_handle_t tx = static_cast<i2s_chan_handle_t>(spdifTxChannel);
     i2s_channel_disable(tx);
@@ -3189,11 +3243,14 @@ void MediaPlayerPoC::stopSpdif()
     spdifDataOutPin = -1;
   }
   spdifSampleRate = 0;
-  retainSpdifCarrierRequested = false;
 }
 
 void MediaPlayerPoC::setError(const char *message)
 {
+  // Retention is published as Ready only after the output task has aligned and
+  // replaced a complete ring. Faulted cannot be resurrected by a later track
+  // request while this TX/task lifetime is still unwinding.
+  setSpdifCarrierRetention(SpdifCarrierRetention::Faulted);
   strlcpy(errorText, message ? message : "unknown media error",
           sizeof(errorText));
   state = MediaPlaybackState::Error;
@@ -3208,17 +3265,20 @@ bool MediaPlayerPoC::beginPlay(const char *path, int8_t dataOutPin,
   // block-aligned encoded silence. Keep it alive while probing and prefilling
   // the next file; startSpdif() will reuse it only when pin and rate match.
   const bool retainedCarrierIdle =
-      retainSpdifCarrierRequested && spdifTxChannel &&
-      !decoderTaskHandle && !outputTaskHandle &&
+      spdifCarrierRetention() == SpdifCarrierRetention::Ready &&
+      spdifTxChannel && !decoderTaskRunning() && !outputTaskRunning() &&
       state == MediaPlaybackState::Stopped;
   if (!retainedCarrierIdle) stop();
-  if (decoderTaskHandle || outputTaskHandle) {
+  if (decoderTaskRunning() || outputTaskRunning()) {
     out.printf("MEDIA PLAY: rejected path=%s reason=previous media task still stopping\n",
                path ? path : "(none)");
     return false;
   }
   if (!seekCommandQueue || !seekEventQueue || !mediaControlEvents) {
     setError("media control queues unavailable");
+    // A retained-idle carrier has no task owner here. Do not leave its
+    // physical transmitter running after this early setup failure.
+    stopSpdif();
     out.printf("MEDIA PLAY: rejected path=%s reason=%s\n",
                path ? path : "(none)", errorText);
     return false;
@@ -3233,7 +3293,7 @@ bool MediaPlayerPoC::beginPlay(const char *path, int8_t dataOutPin,
                        kSeekActiveBit | kOutputQuiescentBit);
   state = MediaPlaybackState::Starting;
   startStage = StartStage::Idle;
-  stopRequested = false;
+  setStopRequested(false);
   decoderComplete = false;
   storageIoFault = false;
   terminalEventPending = false;
@@ -3270,6 +3330,9 @@ bool MediaPlayerPoC::beginPlay(const char *path, int8_t dataOutPin,
 
   if (state == MediaPlaybackState::Error) {
     startStage = StartStage::Idle;
+    // A failed candidate must not strand a previously retained transmitter.
+    // No playback task exists at this point, so immediate teardown is safe.
+    stopSpdif();
     out.printf("MEDIA PLAY: rejected path=%s reason=%s\n",
                path ? path : "(null)", errorText);
     return false;
@@ -3304,7 +3367,7 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
 
   if (startStage == StartStage::Prefill) {
     size_t budget = std::max<size_t>(1, decodeChunkBudget);
-    while (!stopRequested && budget-- &&
+    while (!stopIsRequested() && budget-- &&
            ringAvailable() < startPrefillTarget && ringWritable() > 0) {
       size_t request = std::min(kDecodeChunkFrames, ringWritable());
       size_t frames = decodeFrames(decoder->stereo, request);
@@ -3430,6 +3493,9 @@ bool MediaPlayerPoC::play(const char *path, int8_t dataOutPin,
     if (status == MediaStartStatus::Started) return true;
     if (status == MediaStartStatus::Failed ||
         status == MediaStartStatus::Idle) {
+      // Direct synchronous callers do not have the UI transition state
+      // machine to perform failure cleanup on their behalf.
+      stop();
       return false;
     }
     delay(0);
@@ -3450,15 +3516,29 @@ void MediaPlayerPoC::requestTrackTransitionStop()
 
 void MediaPlayerPoC::requestStopInternal(bool retainSpdifCarrier)
 {
-  const bool haveResources = decoderTaskHandle || outputTaskHandle || decoder ||
+  const bool alreadyStopping = stopIsRequested();
+  const bool decoderRunning = decoderTaskRunning();
+  const bool outputRunning = outputTaskRunning();
+  const bool haveResources = decoderRunning || outputRunning || decoder ||
                              spdifTxChannel;
   if (state == MediaPlaybackState::Stopped && !haveResources) return;
 
-  retainSpdifCarrierRequested = retainSpdifCarrier && spdifTxChannel;
-  stopRequested = true;
+  if (!retainSpdifCarrier) {
+    setSpdifCarrierRetention(SpdifCarrierRetention::Off);
+  } else if (spdifTxChannel && !alreadyStopping &&
+             state != MediaPlaybackState::Error) {
+    uint8_t expected = static_cast<uint8_t>(SpdifCarrierRetention::Off);
+    __atomic_compare_exchange_n(
+        &spdifCarrierRetentionState, &expected,
+        static_cast<uint8_t>(SpdifCarrierRetention::Requested), false,
+        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+  }
+  // Publish the retention decision before tasks observe the stop request.
+  setStopRequested(true);
   __atomic_add_fetch(&seekGeneration, 1U, __ATOMIC_ACQ_REL);
-  state = MediaPlaybackState::Draining;
-  if (decoderTaskHandle) xTaskNotifyGive(decoderTaskHandle);
+  if (state != MediaPlaybackState::Error) {
+    state = MediaPlaybackState::Draining;
+  }
   if (mediaControlEvents) {
     xEventGroupClearBits(mediaControlEvents,
                          kSeekActiveBit | kOutputQuiescentBit);
@@ -3467,7 +3547,9 @@ void MediaPlayerPoC::requestStopInternal(bool retainSpdifCarrier)
   // When no task owns a resource, complete cleanup immediately. Otherwise the
   // main-loop transition state machine polls serviceStopCleanup() without
   // blocking the encoder, BLE processing or display service.
-  if (!decoderTaskHandle && !outputTaskHandle) {
+  // The decoder polls at a bounded 20 ms maximum, so no notification through
+  // a handle that may concurrently self-delete is needed.
+  if (!decoderRunning && !outputRunning) {
     serviceStopCleanup();
   }
 }
@@ -3479,17 +3561,22 @@ void MediaPlayerPoC::stop()
   // Synchronous Stop remains available for explicit user shutdown and legacy
   // call sites. Track changes use requestStop() and cooperative cleanup.
   unsigned long deadline = millis() + kTaskStopTimeoutMs;
-  while ((decoderTaskHandle || outputTaskHandle) &&
+  while ((decoderTaskRunning() || outputTaskRunning()) &&
          (long)(millis() - deadline) < 0) {
+    // As soon as the output owner exits, ordinary STOP can disable TX even if
+    // a slow SD read keeps the decoder task alive for longer.
+    serviceStopCleanup();
     delay(2);
   }
 
-  if (decoderTaskHandle || outputTaskHandle) {
+  const bool decoderRunning = decoderTaskRunning();
+  const bool outputRunning = outputTaskRunning();
+  if (decoderRunning || outputRunning) {
     strlcpy(errorText, "media task is still stopping", sizeof(errorText));
     state = MediaPlaybackState::Draining;
     Serial.printf("MEDIA STOP: timeout decoder=%s output=%s; cleanup deferred\n",
-                  decoderTaskHandle ? "active" : "done",
-                  outputTaskHandle ? "active" : "done");
+                  decoderRunning ? "active" : "done",
+                  outputRunning ? "active" : "done");
     return;
   }
   serviceStopCleanup();
@@ -3497,12 +3584,16 @@ void MediaPlayerPoC::stop()
 
 bool MediaPlayerPoC::serviceStopCleanup()
 {
-  if (decoderTaskHandle || outputTaskHandle) return false;
-  if (state != MediaPlaybackState::Draining && !stopRequested) {
+  // Never delete TX while its output task owns the channel. Once that writer
+  // has release-published its exit, a genuine stop can drive GPIO13 low without
+  // waiting for an unrelated decoder/SD operation to finish.
+  if (outputTaskRunning()) return false;
+  if (state != MediaPlaybackState::Draining && !stopIsRequested()) {
     return state == MediaPlaybackState::Stopped;
   }
 
-  if (!retainSpdifCarrierRequested) stopSpdif();
+  if (spdifCarrierRetention() != SpdifCarrierRetention::Ready) stopSpdif();
+  if (decoderTaskRunning()) return false;
   closeDecoder();
   resetRing();
   if (seekCommandQueue) xQueueReset(seekCommandQueue);
@@ -3511,7 +3602,7 @@ bool MediaPlayerPoC::serviceStopCleanup()
     xEventGroupClearBits(mediaControlEvents,
                          kSeekActiveBit | kOutputQuiescentBit);
   }
-  stopRequested = false;
+  setStopRequested(false);
   decoderComplete = false;
   terminalEventPending = false;
   seekResumePaused = false;
@@ -3550,7 +3641,7 @@ bool MediaPlayerPoC::requestSeek(uint64_t targetFrame)
   if ((current != MediaPlaybackState::Playing &&
        current != MediaPlaybackState::Paused &&
        current != MediaPlaybackState::Seeking) ||
-      !decoder || !decoderTaskHandle || !seekCommandQueue ||
+      !decoder || !decoderTaskRunning() || !seekCommandQueue ||
       !mediaControlEvents) {
     return false;
   }
@@ -3574,7 +3665,8 @@ bool MediaPlayerPoC::requestSeek(uint64_t targetFrame)
   seekResumePaused = resumePaused;
   state = MediaPlaybackState::Seeking;
   __atomic_add_fetch(&stats.seekRequests, 1U, __ATOMIC_RELAXED);
-  xTaskNotifyGive(decoderTaskHandle);
+  // The decoder polls this queue every 2 ms while buffered and every 20 ms at
+  // end-of-file. Avoid notifying through a task handle that can self-delete.
   Serial.printf("MEDIA SEEK REQUEST generation=%lu target=%llu paused=%s\n",
                 (unsigned long)generation,
                 (unsigned long long)targetFrame,
@@ -3595,7 +3687,7 @@ bool MediaPlayerPoC::takeSeekEvent(MediaSeekEvent &event)
 
 bool MediaPlayerPoC::beginExternalHold(uint32_t timeoutMs)
 {
-  if (!active() || !outputTaskHandle || !mediaControlEvents) return true;
+  if (!active() || !outputTaskRunning() || !mediaControlEvents) return true;
   if (seeking()) return false;
 
   // Include the quiesce handshake itself in the expected-control window. The
@@ -3672,7 +3764,8 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
       "MEDIA STATUS: state=%s format=%s rate=%lu depth=%u channels=%u "
       "decoded=%llu output=%llu ring=%u/%u underrun=%lu events=%lu "
       "longest_underrun=%lu last_underrun_ms=%lu lowwater=%lu "
-      "spdif_timeout=%lu spdif_error=%lu highwater=%lu "
+      "spdif_timeout=%lu spdif_partial=%lu spdif_error=%lu "
+      "spdif_restart=%lu spdif_retained=%lu highwater=%lu "
       "dec_stack_free=%lu out_stack_free=%lu seek=%lu/%lu/%lu "
       "seek_ms=%lu sd_cb=%lu sd_slices=%lu sd_slow=%lu sd_err=%lu "
       "sd_yield=%lu cb_max_ms=%lu slice_max_ms=%lu "
@@ -3689,7 +3782,10 @@ void MediaPlayerPoC::printPlaybackStatus(Stream &out) const
       (unsigned long)snapshot.lastUnderrunAtMs,
       (unsigned long)snapshot.ringLowWaterFrames,
       (unsigned long)snapshot.spdifTimeouts,
+      (unsigned long)snapshot.spdifPartialWrites,
       (unsigned long)snapshot.spdifErrors,
+      (unsigned long)snapshot.spdifCarrierRestarts,
+      (unsigned long)snapshot.spdifRetainedTransitions,
       (unsigned long)snapshot.ringHighWaterFrames,
       (unsigned long)snapshot.decoderStackMinFree,
       (unsigned long)snapshot.outputStackMinFree,
@@ -3757,9 +3853,15 @@ MediaPlaybackStats MediaPlayerPoC::playbackStats() const
   snapshot.lastUnderrunAtMs =
       __atomic_load_n(&stats.lastUnderrunAtMs, __ATOMIC_ACQUIRE);
   snapshot.spdifTimeouts =
-      __atomic_load_n(&stats.spdifTimeouts, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&spdifTimeoutsLifetime, __ATOMIC_ACQUIRE);
+  snapshot.spdifPartialWrites =
+      __atomic_load_n(&spdifPartialWritesLifetime, __ATOMIC_ACQUIRE);
   snapshot.spdifErrors =
-      __atomic_load_n(&stats.spdifErrors, __ATOMIC_ACQUIRE);
+      __atomic_load_n(&spdifErrorsLifetime, __ATOMIC_ACQUIRE);
+  snapshot.spdifCarrierRestarts =
+      __atomic_load_n(&spdifCarrierRestartsLifetime, __ATOMIC_ACQUIRE);
+  snapshot.spdifRetainedTransitions =
+      __atomic_load_n(&spdifRetainedTransitionsLifetime, __ATOMIC_ACQUIRE);
   snapshot.ringHighWaterFrames =
       __atomic_load_n(&stats.ringHighWaterFrames, __ATOMIC_ACQUIRE);
   snapshot.ringLowWaterFrames =
@@ -3830,7 +3932,7 @@ void MediaPlayerPoC::outputTaskEntry(void *context)
 void MediaPlayerPoC::decoderTask()
 {
   updateTaskStackWatermark(true);
-  while (!stopRequested) {
+  while (!stopIsRequested()) {
     SeekCommand command;
     if (seekCommandQueue &&
         xQueueReceive(seekCommandQueue, &command, 0) == pdTRUE) {
@@ -3853,11 +3955,11 @@ void MediaPlayerPoC::decoderTask()
     size_t frames = decodeFrames(decoder->stereo, kDecodeChunkFrames);
     updateTaskStackWatermark(true);
     if (frames == 0) {
-      if (storageIoFault && !stopRequested) {
+      if (storageIoFault && !stopIsRequested()) {
         reportStorageReadFault("decoder");
         cardMounted = false;
         setError("SD read failed or card removed");
-        stopRequested = true;
+        setStopRequested(true);
         Serial.printf("MEDIA SD: read fault path=%s; mount invalidated\n",
                       currentPath[0] ? currentPath : "(none)");
         break;
@@ -3868,14 +3970,14 @@ void MediaPlayerPoC::decoderTask()
     __atomic_add_fetch(&stats.decodedFrames, frames, __ATOMIC_RELAXED);
     if (writeRing(decoder->stereo, frames) != frames) {
       setError("PCM ring write failed");
-      stopRequested = true;
+      setStopRequested(true);
       break;
     }
   }
 
   closeDecoder();
   decoderComplete = true;
-  decoderTaskHandle = nullptr;
+  __atomic_store_n(&decoderTaskHandle, nullptr, __ATOMIC_RELEASE);
   vTaskDelete(nullptr);
 }
 
@@ -3891,33 +3993,54 @@ void MediaPlayerPoC::outputTask()
   SpdifBlockEncoder encoder;
   if (!encoded) {
     setError("S/PDIF DMA staging allocation failed");
-    outputTaskHandle = nullptr;
+    setStopRequested(true);
+    __atomic_store_n(&outputTaskHandle, nullptr, __ATOMIC_RELEASE);
     vTaskDelete(nullptr);
     return;
   }
   if (!encoder.setSampleRate(currentFile.sampleRate)) {
     heap_caps_free(encoded);
     setError("Unsupported S/PDIF channel-status rate");
-    outputTaskHandle = nullptr;
+    setStopRequested(true);
+    __atomic_store_n(&outputTaskHandle, nullptr, __ATOMIC_RELEASE);
     vTaskDelete(nullptr);
     return;
   }
   encoder.reset();
 
-  auto sendFrames = [&](const int32_t *samples, size_t frames,
-                        bool allowWhileStopping = false) -> bool {
+  auto sendFrames = [&](const int32_t *samples, size_t frames) -> bool {
     if (!encoder.encode(samples, frames, encoded, encodedWordCapacity)) {
-      __atomic_add_fetch(&stats.spdifErrors, 1U, __ATOMIC_RELAXED);
+      __atomic_add_fetch(&spdifErrorsLifetime, 1U, __ATOMIC_RELAXED);
       setError("S/PDIF block encode failed");
+      setStopRequested(true);
       return false;
     }
     const uint8_t *next = reinterpret_cast<const uint8_t *>(encoded);
     size_t remaining = frames * SpdifBlockEncoder::kWordsPerStereoFrame *
                        sizeof(uint32_t);
-    while (remaining && (!stopRequested || allowWhileStopping)) {
+    while (remaining) {
+      // Once encoded, a retaining transition must submit the complete buffer
+      // so encoder phase and queued bytes cannot diverge. An ordinary STOP
+      // clears the retention token and may abort because TX will be deleted.
+      if (stopIsRequested() &&
+          spdifCarrierRetention() != SpdifCarrierRetention::Requested) {
+        return false;
+      }
+
+      const size_t requested = remaining;
       size_t written = 0;
       esp_err_t result = i2s_channel_write(tx, next, remaining, &written, 25);
+      if (written > requested) {
+        __atomic_add_fetch(&spdifErrorsLifetime, 1U, __ATOMIC_RELAXED);
+        setError("S/PDIF DMA write count invalid");
+        setStopRequested(true);
+        return false;
+      }
       if (written) {
+        if (written < requested) {
+          __atomic_add_fetch(&spdifPartialWritesLifetime, 1U,
+                             __ATOMIC_RELAXED);
+        }
         next += written;
         remaining -= written;
       }
@@ -3930,17 +4053,24 @@ void MediaPlayerPoC::outputTask()
         if (expectedControlTimeout) {
           __atomic_add_fetch(&expectedHoldTimeouts, 1U, __ATOMIC_RELAXED);
         } else {
-          __atomic_add_fetch(&stats.spdifTimeouts, 1U, __ATOMIC_RELAXED);
+          __atomic_add_fetch(&spdifTimeoutsLifetime, 1U, __ATOMIC_RELAXED);
         }
         continue;
       }
       if (result != ESP_OK) {
-        __atomic_add_fetch(&stats.spdifErrors, 1U, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&spdifErrorsLifetime, 1U, __ATOMIC_RELAXED);
         setError("S/PDIF DMA write failed");
+        setStopRequested(true);
+        return false;
+      }
+      if (written == 0 && remaining) {
+        __atomic_add_fetch(&spdifErrorsLifetime, 1U, __ATOMIC_RELAXED);
+        setError("S/PDIF DMA write made no progress");
+        setStopRequested(true);
         return false;
       }
     }
-    return !stopRequested || allowWhileStopping;
+    return true;
   };
 
   bool naturalEnd = false;
@@ -3952,13 +4082,13 @@ void MediaPlayerPoC::outputTask()
   // continuous quarter-second consumer-PCM silence stream to acquire lock
   // before consuming the first buffered music frame.
   size_t leadInFrames = currentFile.sampleRate / 4u;
-  while (leadInFrames && !stopRequested) {
+  while (leadInFrames && !stopIsRequested()) {
     const size_t frames = std::min(leadInFrames, kOutputChunkFrames);
     if (!sendFrames(nullptr, frames)) break;
     leadInFrames -= frames;
   }
 
-  while (!stopRequested) {
+  while (!stopIsRequested()) {
     EventBits_t control = mediaControlEvents
         ? xEventGroupGetBits(mediaControlEvents) : 0;
     if (control & (kSeekActiveBit | kExternalHoldBit)) {
@@ -4016,28 +4146,30 @@ void MediaPlayerPoC::outputTask()
     updateTaskStackWatermark(false);
   }
 
-  if (naturalEnd && !stopRequested &&
+  if (naturalEnd && !stopIsRequested() &&
       state != MediaPlaybackState::Error) {
     state = MediaPlaybackState::Draining;
     size_t remaining = kTailSilenceFrames;
-    while (remaining && !stopRequested) {
+    while (remaining && !stopIsRequested()) {
       size_t frames = std::min(remaining, kOutputChunkFrames);
       if (!sendFrames(nullptr, frames)) break;
       remaining -= frames;
     }
-    if (!stopRequested && state != MediaPlaybackState::Error) {
+    if (!stopIsRequested() && state != MediaPlaybackState::Error) {
       state = MediaPlaybackState::Finished;
       terminalEventPending = true;
       // Do not let the DMA ring run unattended while the main loop decides
       // whether to advance. Continue producing valid silence so the DSPi
       // receiver never has to reacquire a same-rate carrier.
-      while (!stopRequested && state != MediaPlaybackState::Error) {
+      while (!stopIsRequested() && state != MediaPlaybackState::Error) {
         if (!sendFrames(nullptr, kOutputChunkFrames)) break;
       }
     }
   }
 
-  if (stopRequested && retainSpdifCarrierRequested && spdifTxChannel &&
+  if (stopIsRequested() &&
+      spdifCarrierRetention() == SpdifCarrierRetention::Requested &&
+      spdifTxChannel &&
       state != MediaPlaybackState::Error) {
     // Finish the current 192-frame channel-status block, then replace a full
     // DMA-ring span with encoded silence. The inactive transition interval can
@@ -4046,25 +4178,28 @@ void MediaPlayerPoC::outputTask()
     const size_t blockRemainder =
         (192u - (size_t)encoder.frameNumber()) % 192u;
     bool carrierReady = !blockRemainder ||
-                        sendFrames(nullptr, blockRemainder, true);
+                        sendFrames(nullptr, blockRemainder);
     size_t silenceFrames =
         kSpdifDmaDescriptorCount * (kSpdifDmaFramesPerDescriptor / 2u);
     while (carrierReady && silenceFrames) {
       const size_t frames = std::min(silenceFrames, kOutputChunkFrames);
-      if (!sendFrames(nullptr, frames, true)) {
+      if (!sendFrames(nullptr, frames)) {
         carrierReady = false;
         break;
       }
       silenceFrames -= frames;
     }
-    if (carrierReady && silenceFrames == 0) {
+    if (carrierReady && silenceFrames == 0 &&
+        publishRetainedSpdifCarrier()) {
+      __atomic_add_fetch(&spdifRetainedTransitionsLifetime, 1U,
+                         __ATOMIC_RELAXED);
       Serial.printf(
           "MEDIA SPDIF TX: carrier retained rate=%lu Hz silence=%u frames\n",
           (unsigned long)spdifSampleRate,
           (unsigned)(kSpdifDmaDescriptorCount *
                      (kSpdifDmaFramesPerDescriptor / 2u)));
     } else {
-      retainSpdifCarrierRequested = false;
+      setSpdifCarrierRetention(SpdifCarrierRetention::Off);
       Serial.println("MEDIA SPDIF TX: carrier retention failed; teardown required");
     }
   }
@@ -4073,6 +4208,6 @@ void MediaPlayerPoC::outputTask()
     xEventGroupClearBits(mediaControlEvents, kOutputQuiescentBit);
   }
   free(encoded);
-  outputTaskHandle = nullptr;
+  __atomic_store_n(&outputTaskHandle, nullptr, __ATOMIC_RELEASE);
   vTaskDelete(nullptr);
 }
