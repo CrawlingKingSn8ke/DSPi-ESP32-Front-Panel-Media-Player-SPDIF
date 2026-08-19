@@ -7,7 +7,7 @@ FIRMWARE = ROOT / "firmware" / "DSPi_ESP32_Front_Panel_v1_1_2"
 MODE = (FIRMWARE / "WifiTransferMode.cpp").read_text()
 HEADER = (FIRMWARE / "WifiTransferMode.h").read_text()
 WEB = (FIRMWARE / "WifiTransferWeb.h").read_text()
-BUILD = (ROOT / "Build-and-Flash-DSPi-Front-Panel-v1.2.0.ps1").read_text()
+BUILD = (ROOT / "DSPi-Front-Panel-Build-Engine.ps1").read_text()
 
 
 class LocalWebOtaContracts(unittest.TestCase):

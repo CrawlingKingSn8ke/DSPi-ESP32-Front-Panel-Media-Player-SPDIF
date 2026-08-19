@@ -1,5 +1,8 @@
 [CmdletBinding()]
 param(
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$ReleaseVersion,
     [string]$Port = "COM10",
     [int]$Baud = 921600,
     [switch]$Erase,
@@ -12,7 +15,6 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$ReleaseVersion = "1.2.0"
 $ProjectName = "DSPi-ESP32-Front-Panel"
 $SketchName = "DSPi_ESP32_Front_Panel_v1_1_2"
 $RequiredEsp32Core = "3.3.11"

@@ -1,8 +1,17 @@
 # DSPi ESP32 Front Panel v1.2.1
 
-## Playback-stability maintenance release
+## S/PDIF Forensic r2
 
-Version 1.2.1 republishes the current tested `main` firmware state as a clean, traceable release so the Git tag, source archive and generated binaries all correspond to the same code.
+This release packages the current experimental S/PDIF media-player firmware as a clean, traceable build. It preserves the complete front-panel feature set and the earlier SD/FLAC playback work.
+
+### S/PDIF transmitter hardening
+
+- Verify the 24-bit consumer encoder, B/M/W cadence, parity, channel-status bytes and split-call BMC continuity at both supported rates.
+- Preload all sixteen 3,072-byte DMA descriptors with valid encoded silence before transmitter enable.
+- Keep a valid same-rate carrier across track transitions while still stopping cleanly for input changes, errors and genuine playback stops.
+- Finish partially written encoded buffers before retaining a carrier so the encoder and queued DMA phase cannot diverge.
+- Use atomic Off, Requested, Ready and Faulted retention states so errors and ordinary stops cannot preserve or resurrect an unsafe carrier.
+- Add lightweight RAM-only counters for timeouts, partial writes, write/encode errors, live-carrier replacements and retained transitions.
 
 ### Music-player reliability
 
@@ -12,7 +21,7 @@ Version 1.2.1 republishes the current tested `main` firmware state as a clean, t
 - Use 4 KiB decoder SD read slices for more efficient contiguous reads.
 - Raise low-ring protection thresholds and add detailed SD/decoder/ring telemetry to serial command `s`.
 
-### Other fixes carried from current main
+### Other fixes carried forward
 
 - Document the tested ESP32-to-DSPi I2S wiring.
 - Fix occupied preset overwrite acknowledgement timing on compatible DSPi firmware.
@@ -30,4 +39,4 @@ Version 1.2.1 republishes the current tested `main` firmware state as a clean, t
 
 Use the application-only image at offset `0x10000` to preserve BLE pairing, learned mappings and panel settings. Use the full merged image at offset `0x0` for a clean installation or recovery.
 
-The release binaries should be generated with `Build-DSPi-Front-Panel-v1.2.1.ps1`; use the resulting `SHA256SUMS-v1.2.1.txt` values when publishing the GitHub release.
+The release binaries were generated with ESP32 Arduino core 3.3.11. Eighty-five focused contracts and the Arduino build passed.
