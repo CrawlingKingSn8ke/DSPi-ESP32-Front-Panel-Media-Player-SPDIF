@@ -7,9 +7,9 @@ Experimental fork of the DSPi ESP32 Front Panel that sends the integrated SD-car
 
 The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 
-## Version 1.2.1
+## Version 1.2.1 S/PDIF Forensic r2
 
-Version 1.2.1 republishes the complete VU IMP interface, preset and playback-reliability firmware from the current tested source state. It includes the post-v1.2.0 SD/FLAC playback stabilisation and occupied-preset overwrite acknowledgement fix while retaining DSPi firmware v1.1.5/V28 compatibility, including four selectable S/PDIF inputs.
+Forensic r2 is the current tested build. It retains the complete VU IMP interface, presets, SD music player and local Wi-Fi transfer/update portal while hardening the experimental 24-bit S/PDIF transmitter and continuous same-rate carrier transitions.
 
 ### Main changes
 
@@ -21,9 +21,12 @@ Version 1.2.1 republishes the complete VU IMP interface, preset and playback-rel
 - Confirmed DSPi Console changes update the Home state and use the same full-screen notifications as local controls.
 - Music playback uses the normal I2S Home state, with automatic route ownership and reliable 44.1/48 kHz operation.
 - Hardened 48 kHz decoder scheduling, BLE reconnect deferral, background-artwork limits and underrun telemetry.
+- Standards-checked 24-bit consumer S/PDIF at 44.1/48 kHz with a complete encoded-silence DMA preload.
+- Atomic carrier-retention lifecycle and exact continuation after partial DMA writes during track transitions.
+- RAM-only S/PDIF timeout, partial-write, error, restart and retained-transition counters.
 - Preserves the v1.1.3 S/PDIF 4 compatibility, Wi-Fi Music Transfer, BLE remote and SD music-player features.
 
-See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the v1.2.1 maintenance summary. The generated `SHA256SUMS-v1.2.1.txt` release asset contains the verified firmware checksums.
+See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [EXPERIMENTAL-SPDIF.md](EXPERIMENTAL-SPDIF.md) for the evidence boundary. The `SHA256SUMS-v1.2.1-SPDIF-Forensic-r2.txt` release asset contains the verified firmware checksums.
 
 ## Hardware
 
@@ -113,7 +116,7 @@ The Arduino sketch retains its historical v1.1.2 directory name so the existing 
 firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
 ```
 
-The v1.2.1 wrappers build and name the release artifacts as v1.2.1 while reusing the validated v1.2.0 build engine and board profile.
+The v1.2.1 wrappers use the version-neutral build engine and name generated artifacts as v1.2.1.
 
 Board profile:
 
