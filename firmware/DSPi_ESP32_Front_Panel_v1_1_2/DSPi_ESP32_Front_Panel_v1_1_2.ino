@@ -195,8 +195,8 @@
 #define ENCODER_LONG_PRESS_MS 750
 #define PRESET_SAVE_HOLD_MS 5000
 #define ENCODER_VISUALIZER_HOLD_MS 5000
-#define ENCODER_COUNTS_PER_DETENT 2
-#define ENCODER_MENU_DETENTS_PER_STEP 2
+#define ENCODER_COUNTS_PER_DETENT 4
+#define ENCODER_MENU_DETENTS_PER_STEP 1
 #define BLE_SCAN_TIME_MS 8000
 // A sleeping HID remote can advertise only briefly when a key wakes it. Keep
 // the reconnect listener continuous while audio is inactive; pollBleRemote()
@@ -14590,9 +14590,8 @@ void applyEncoderDetents(int16_t detents)
     return;
   }
   if (uiView == VIEW_EDIT) {
-    // This encoder generates two decoded events for each physical click.
-    // Menu navigation already combines those events; edit mode must do the
-    // same or booleans toggle twice and 5% values jump by 10%.
+    // Decoded detents now correspond directly to physical clicks. Keep the
+    // shared divider here so menu and edit cadence stay calibrated together.
     if ((encoderMenuDetentRemainder > 0 && detents < 0) ||
         (encoderMenuDetentRemainder < 0 && detents > 0)) {
       encoderMenuDetentRemainder = 0;
