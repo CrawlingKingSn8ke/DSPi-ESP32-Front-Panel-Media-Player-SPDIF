@@ -148,6 +148,7 @@ progress{width:100%;height:14px;accent-color:var(--accent)}.meterlabel{display:f
 
   <section class="card">
     <h2>Music Library</h2>
+    <p id="storageNotice" class="muted">Checking SD card...</p>
     <nav id="crumbs" class="crumbs" aria-label="Current SD folder"></nav>
     <div class="row">
       <button id="parent" type="button">Up one folder</button>
@@ -244,6 +245,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 let currentPath="",queueBasePath="",page=0,incompletePage=0,hasMore=false,incompleteHasMore=false,deleting=false;
 let queue=[],running=false,cancelRequested=false,controller=null;
 let serverWriterActive=false,serverAccepting=false,statusBusy=false,finishBusy=false;
+let storageAvailable=null;
 let finishingClient=false,statusTimer=0,networkTimer=0,scanningNetwork=false;
 let firmwareFile=null,firmwareRunning=false,firmwareStarted=0;
 let scannedNetworks=[];
@@ -332,6 +334,13 @@ function updateControls(){
   document.querySelectorAll("button.deleteEntry").forEach(button=>{
     button.disabled=locked||running||deleting||serverWriterActive||!serverAccepting;
   });
+  // Keep firmware/network controls independent of SD availability.
+  ["listing","mkdirForm","files","folderFiles","incomplete"].forEach(id=>{
+    const section=$(id).closest("section");
+    section.querySelectorAll("button,input").forEach(control=>{
+      if(storageAvailable===false)control.disabled=true;
+    });
+  });
 }
 async function refreshStatus(showErrors=false){
   if(statusBusy||finishingClient||firmwareRunning||deleting||(running&&!showErrors))return null;
@@ -340,8 +349,10 @@ async function refreshStatus(showErrors=false){
     const data=await requestJson(API.status);
     serverWriterActive=Boolean(data.writerActive);
     serverAccepting=Boolean(data.accepting);
+    storageAvailable=Boolean(data.storageAvailable);
+    $("storageNotice").textContent=storageAvailable?"SD card ready":"No SD card available. Firmware updates still work. Insert a card and reopen Wi-Fi for music transfers.";
     $("mode").textContent=data.mode||"Wi-Fi Transfer";
-    $("free").textContent=formatBytes(data.freeBytes);
+    $("free").textContent=storageAvailable?formatBytes(data.freeBytes):"No SD card";
     $("writer").textContent=serverWriterActive?(data.currentFile||"Active"):"Idle";
     if(data.message&&!running)setNotice(data.message);
     updateControls();
@@ -939,7 +950,7 @@ window.addEventListener("beforeunload",event=>{
   // scan.  New installations still get an immediate list; existing users can
   // rescan explicitly with the button whenever they need to change network.
   if(!network||!network.saved)await scanNetworks(false);
-  if(status){setNotice(status.message||"Ready. Choose an SD folder and select files.");await browse("",0);}
+  if(status){setNotice(storageAvailable?(status.message||"Ready. Choose an SD folder and select files."):"Update-only mode: choose an application .bin below. No SD card required.");if(storageAvailable)await browse("",0);}
   startPolling();
 })();
 </script>

@@ -561,7 +561,7 @@ bool WifiTransferModeController::preflightStorage(
 }
 
 bool WifiTransferModeController::start(MediaFsStorage &storage,
-                                       const char *transferRoot) {
+                                       const char *transferRoot, bool updateOnly) {
   if (active()) return false;
 
   // A previous failed/abandoned web update must not leak state into a new
@@ -578,7 +578,13 @@ bool WifiTransferModeController::start(MediaFsStorage &storage,
              storage.accessMode() == MediaFsAccessMode::TransferReadWrite;
 
   char error[96] = {0};
-  if (!prepared &&
+  if (updateOnly) {
+    if (!allocateWorkspace()) return false;
+    storage_ = nullptr;
+    freeBytes_ = 0;
+    totalBytes_ = 0;
+  }
+  if (!updateOnly && !prepared &&
       !preflightStorage(storage, transferRoot, error, sizeof(error))) {
     setError(error[0] ? error : "storage preflight failed");
     return false;
@@ -968,8 +974,8 @@ void WifiTransferModeController::serviceStationConnection() {
 }
 
 bool WifiTransferModeController::startSoftApAndServer() {
-  if (!workspace_ || !storage_ ||
-      storage_->accessMode() != MediaFsAccessMode::TransferReadWrite) {
+  if (!workspace_ || (storage_ &&
+      storage_->accessMode() != MediaFsAccessMode::TransferReadWrite)) {
     setError("SD transfer mount was lost");
     Serial.println("WIFI XFER: AP start failed SD-not-transfer-rw");
     return false;
@@ -1496,6 +1502,8 @@ void WifiTransferModeController::handleStatus() {
   sendJsonString(stateText(current.state));
   server.sendContent(",\"accepting\":");
   server.sendContent(current.accepting ? "true" : "false");
+  server.sendContent(",\"storageAvailable\":");
+  server.sendContent(storage_ ? "true" : "false");
   server.sendContent(",\"writerActive\":");
   server.sendContent(current.writerActive ? "true" : "false");
   server.sendContent(",\"finishRequested\":");
@@ -2098,7 +2106,8 @@ void WifiTransferModeController::handleFirmwareRaw() {
     // Music/BLE are already stopped by entry into transfer mode. Flush the SD
     // metadata once before internal-flash writing; no SD operation is admitted
     // while firmwareUpdateActive_ is true.
-    bool sdSynced = false;
+    // Update-only sessions never acquired SD ownership and need no SD sync.
+    bool sdSynced = storage_ == nullptr;
     if (storage_ &&
         storage_->accessMode() == MediaFsAccessMode::TransferReadWrite) {
       SharedSpiGuard guard;

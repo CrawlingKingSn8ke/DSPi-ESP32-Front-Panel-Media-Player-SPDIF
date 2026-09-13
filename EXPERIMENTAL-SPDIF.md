@@ -88,15 +88,16 @@ Both the ESP and an independent TV S/PDIF transmitter can produce one small clic
 Keep the internal 3.3 V logic connection and its ground return short. A series
 resistor is not a mandatory requirement for this tested wiring.
 
-## Current verified Forensic r2 build
+## Current verified v1.2.1 build
 
-- OTA: `DSPi-ESP32-Front-Panel-v1.2.1-SPDIF-Forensic-r2-OTA.bin`
-- OTA size: 1,912,624 bytes
-- OTA SHA-256: `8C4DE6295B6299080621401FD8FEB289A114D3DD129D6BF4C5D9A4BA7FEE22D6`
-- Full USB: `DSPi-ESP32-Front-Panel-v1.2.1-SPDIF-Forensic-r2-Full.bin`
+- OTA: `DSPi-ESP32-Front-Panel-v1.2.1-OTA.bin`
+- OTA size: 1,917,376 bytes
+- OTA SHA-256: `7114EB7B34567901A8D24F64CAD36DF6553A96A6C79F0714E087EE4772BBE9BD`
+- Full USB: `DSPi-ESP32-Front-Panel-v1.2.1-Full.bin`
 - Full USB size: 16,777,216 bytes
-- Full USB SHA-256: `A04E5C920D6FF32D6B98039E6E5060BD9B6B4B18BE98C3E6F2E41BE10D6162B6`
-- Focused contracts: 85 passed
+- Full USB SHA-256: `81215910F230EC241DE025208A42A11E4683F0A2247A00158E91654D258FFAA4`
+- Firmware contracts: 113 passed
+- Wi-Fi portal assertions: 18 passed
 - ESP32 Arduino core: 3.3.11
 
 Use the application-only file for browser OTA. Do not upload the 16 MB full-flash image through the browser updater.

@@ -87,7 +87,9 @@ public:
   // station connection, and the HTTP server. storage must still be the same
   // singleton RW mount proven by preflightStorage(); start() will perform the
   // probe itself if the caller has not already done so.
-  bool start(MediaFsStorage &storage, const char *transferRoot = "/");
+  // updateOnly deliberately leaves storage_ null; SD endpoints stay unavailable.
+  bool start(MediaFsStorage &storage, const char *transferRoot = "/",
+             bool updateOnly = false);
 
   // Entry rollback before the service has been exposed to uploads.  This
   // never tears down Wi-Fi directly: it requests the same quiesce, sync,

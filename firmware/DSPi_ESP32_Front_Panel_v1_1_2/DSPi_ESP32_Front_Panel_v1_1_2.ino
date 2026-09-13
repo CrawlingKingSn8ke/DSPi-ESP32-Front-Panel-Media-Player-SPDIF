@@ -198,7 +198,10 @@
 #define ENCODER_COUNTS_PER_DETENT 2
 #define ENCODER_MENU_DETENTS_PER_STEP 2
 #define BLE_SCAN_TIME_MS 8000
-#define BLE_RECONNECT_SCAN_MS 2500
+// A sleeping HID remote can advertise only briefly when a key wakes it. Keep
+// the reconnect listener continuous while audio is inactive; pollBleRemote()
+// still stops it immediately before timing-critical playback.
+#define BLE_RECONNECT_SCAN_MS 0
 #define BLE_RESCAN_INTERVAL_MS 5000
 #define BLE_MAX_DEVICES 8
 #define BLE_MAPPING_COUNT 21
@@ -6014,6 +6017,7 @@ unsigned long wifiTransferUiRedrawRetryAt = 0;
 bool wifiTransferExitWasRecovery = false;
 bool wifiTransferNormalAccessReleased = false;
 bool wifiTransferWriteAccessActive = false;
+bool wifiTransferUpdateOnly = false;
 bool wifiTransferNetworkStarted = false;
 bool wifiTransferPhaseActionIssued = false;
 bool wifiTransferLastSyncOk = true;
@@ -6198,6 +6202,9 @@ bool bleProfileValid = false;
 char bleSavedName[25] = {};
 char bleSavedAddress[18] = {};
 uint8_t bleSavedAddressType = 0;
+char bleResolvedIdentityAddress[18] = {};
+uint8_t bleResolvedIdentityAddressType = 0;
+bool bleResolvedIdentityValid = false;
 
 BleUiMode bleUiMode = BLE_UI_NONE;
 uint8_t bleResultIndex = 0;
@@ -11472,7 +11479,7 @@ void drawRoundDecimalPoint(int16_t x, int16_t y)
   canvas->fillCircle(x, y, 3, uiMainText());
 }
 
-void drawVolumeTextCustom(int16_t x, int16_t y, const String &text, uint16_t colour)
+void drawVolumeTextCustom(int16_t x, int16_t y, const String &text, uint16_t colour, bool drawDecimal)
 {
   char prev = 0;
   for (uint16_t i = 0; i < text.length(); i++) {
@@ -11480,7 +11487,8 @@ void drawVolumeTextCustom(int16_t x, int16_t y, const String &text, uint16_t col
     if (ch == ' ') { x += FontLarge.spaceAdvance; prev = ch; continue; }
     if (ch == '.') {
       x += volumeKernAdjust(prev, ch);
-      drawRoundDecimalPoint(x + 9, y + 67);
+      // The decimal has its own halo; do not duplicate it in digit glow passes.
+      if (drawDecimal) drawRoundDecimalPoint(x + 9, y + 67);
       x += 20;
       prev = ch;
       continue;
@@ -11527,12 +11535,12 @@ void drawVolumeNumber(int16_t y)
   if (volX < 8) volX = 8;
 
   uint16_t glow = blend565(C_BLACK, uiMainText(), 108);
-  drawVolumeTextCustom(volX - 1, y, value, glow);
-  drawVolumeTextCustom(volX + 1, y, value, glow);
-  drawVolumeTextCustom(volX, y - 1, value, glow);
-  drawVolumeTextCustom(volX, y + 1, value, glow);
-  drawVolumeTextCustom(volX + 1, y + 1, value, glow);
-  drawVolumeTextCustom(volX, y, value, uiMainText());
+  drawVolumeTextCustom(volX - 1, y, value, glow, false);
+  drawVolumeTextCustom(volX + 1, y, value, glow, false);
+  drawVolumeTextCustom(volX, y - 1, value, glow, false);
+  drawVolumeTextCustom(volX, y + 1, value, glow, false);
+  drawVolumeTextCustom(volX + 1, y + 1, value, glow, false);
+  drawVolumeTextCustom(volX, y, value, uiMainText(), true);
   drawDbLabel(dbX, y + 52);
 }
 
@@ -12557,7 +12565,9 @@ void drawWifiTransferPowerOffNotice()
   uiView = VIEW_WIFI_TRANSFER_ACTIVE;
   drawBase();
   drawFontCentredGlowColour(FontMedium, 18, "TRANSFER COMPLETE", uiMainText());
-  drawFontCentredGlowColour(FontSmall, 72, "SD card is ready", uiMainText());
+  drawFontCentredGlowColour(FontSmall, 72,
+                            wifiTransferUpdateOnly ? "Wi-Fi closed safely" : "SD card is ready",
+                            uiMainText());
   drawFontCentredGlowColour(FontMedium, 108, "POWER OFF NOW", uiMainText());
   drawFontCentredGlowColour(FontSmall, 158,
                             "Leave power off for 10 seconds", uiMainText());
@@ -15203,12 +15213,83 @@ void bleSelect()
 
 #if DSPI_HAVE_NIMBLE
 
+void clearBleResolvedIdentity()
+{
+  portENTER_CRITICAL(&bleDataMux);
+  memset(bleResolvedIdentityAddress, 0, sizeof(bleResolvedIdentityAddress));
+  bleResolvedIdentityAddressType = 0;
+  bleResolvedIdentityValid = false;
+  portEXIT_CRITICAL(&bleDataMux);
+}
+
+void captureBleResolvedIdentity(const NimBLEAddress &address)
+{
+  if (address.isNull()) return;
+  const std::string text = address.toString();
+  if (text.length() != 17) return;
+
+  portENTER_CRITICAL(&bleDataMux);
+  strlcpy(bleResolvedIdentityAddress, text.c_str(),
+          sizeof(bleResolvedIdentityAddress));
+  bleResolvedIdentityAddressType = address.getType();
+  bleResolvedIdentityValid = true;
+  portEXIT_CRITICAL(&bleDataMux);
+  Serial.printf("BLE: resolved peer identity=%s type=%u\n",
+                text.c_str(), (unsigned)address.getType());
+}
+
+bool copyBleResolvedIdentity(BleDeviceInfo &device)
+{
+  bool valid = false;
+  portENTER_CRITICAL(&bleDataMux);
+  if (bleResolvedIdentityValid) {
+    strlcpy(device.address, bleResolvedIdentityAddress,
+            sizeof(device.address));
+    device.addressType = bleResolvedIdentityAddressType;
+    valid = true;
+  }
+  portEXIT_CRITICAL(&bleDataMux);
+  return valid;
+}
+
+void migrateSavedRemoteToBondIdentity()
+{
+  if (!bleProfileValid) return;
+
+  const int bondCount = NimBLEDevice::getNumBonds();
+  if (bondCount != 1) {
+    Serial.printf("BLE RECONNECT: identity migration skipped bonds=%d\n",
+                  bondCount);
+    return;
+  }
+
+  const NimBLEAddress identity = NimBLEDevice::getBondedAddress(0);
+  if (identity.isNull()) return;
+  const std::string identityText = identity.toString();
+  if (identityText.length() != 17) return;
+  if (String(bleSavedAddress).equalsIgnoreCase(identityText.c_str()) &&
+      bleSavedAddressType == identity.getType()) return;
+
+  Serial.printf(
+      "BLE RECONNECT: normalising saved peer old=%s/%u identity=%s/%u\n",
+      bleSavedAddress, (unsigned)bleSavedAddressType,
+      identityText.c_str(), (unsigned)identity.getType());
+  strlcpy(bleSavedAddress, identityText.c_str(), sizeof(bleSavedAddress));
+  bleSavedAddressType = identity.getType();
+  markDeferredPreference(PREF_DIRTY_BLE_DEVICE, 500);
+}
+
 bool bleDeviceMatchesSaved(const NimBLEAdvertisedDevice *device)
 {
   if (!bleProfileValid) return false;
   String address = String(std::string(device->getAddress()).c_str());
+  // NimBLE may report the same resolved peer identity with the identity flag
+  // present (PUBLIC_ID/RANDOM_ID) or stripped (PUBLIC/RANDOM). Bit zero is the
+  // actual public-vs-random address family; bit one only marks an identity
+  // representation. Requiring all bits to match rejects a valid saved bond.
   return address.equalsIgnoreCase(bleSavedAddress) &&
-         device->getAddressType() == bleSavedAddressType;
+         (device->getAddressType() & 0x01U) ==
+             (bleSavedAddressType & 0x01U);
 }
 
 void copyAdvertisedDevice(BleDeviceInfo &out, const NimBLEAdvertisedDevice *device)
@@ -15223,6 +15304,29 @@ void copyAdvertisedDevice(BleDeviceInfo &out, const NimBLEAdvertisedDevice *devi
   out.addressType = device->getAddressType();
   out.rssi = device->getRSSI();
   out.hidAdvertised = device->isAdvertisingService(NimBLEUUID("1812"));
+}
+
+bool bleIsSingleBondDirectedWake(const NimBLEAdvertisedDevice *device)
+{
+  if (!bleProfileValid || !device) return false;
+  NimBLEAddress savedIdentity(std::string(bleSavedAddress),
+                              bleSavedAddressType);
+  return device->getAddress().isNull() &&
+         device->getAdvType() == BLE_HCI_ADV_RPT_EVTYPE_DIR_IND &&
+         !device->isScannable() &&
+         NimBLEDevice::getNumBonds() == 1 &&
+         NimBLEDevice::isBonded(savedIdentity);
+}
+
+void copySavedBleDevice(BleDeviceInfo &out, int8_t rssi)
+{
+  memset(&out, 0, sizeof(out));
+  strlcpy(out.name, bleSavedName[0] ? bleSavedName : "BLE remote",
+          sizeof(out.name));
+  strlcpy(out.address, bleSavedAddress, sizeof(out.address));
+  out.addressType = bleSavedAddressType;
+  out.rssi = rssi;
+  out.hidAdvertised = true;
 }
 
 uint32_t bleHashByte(uint32_t hash, uint8_t value)
@@ -15322,9 +15426,14 @@ class DspiBleClientCallbacks : public NimBLEClientCallbacks {
 
   void onAuthenticationComplete(NimBLEConnInfo &connInfo) override {
     bleSecurityConfirmed = connInfo.isEncrypted();
+    if (connInfo.isBonded()) captureBleResolvedIdentity(connInfo.getIdAddress());
     Serial.printf("BLE: pairing complete, encrypted=%s bonded=%s\n",
                   connInfo.isEncrypted() ? "yes" : "no",
                   connInfo.isBonded() ? "yes" : "no");
+  }
+
+  void onIdentity(NimBLEConnInfo &connInfo) override {
+    captureBleResolvedIdentity(connInfo.getIdAddress());
   }
 } dspiBleClientCallbacks;
 
@@ -15334,8 +15443,20 @@ class DspiBleScanCallbacks : public NimBLEScanCallbacks {
 
     BleScanPurpose purpose = bleScanPurpose;
     if (purpose == BLE_SCAN_RECONNECT) {
-      if (!bleDeviceMatchesSaved(device)) return;
-      copyAdvertisedDevice(blePendingDevice, device);
+      const bool matchesSaved = bleDeviceMatchesSaved(device);
+      const bool directedWake = bleIsSingleBondDirectedWake(device);
+      if (!matchesSaved && !directedWake) return;
+      if (directedWake) {
+        Serial.printf("BLE RECONNECT: directed wake; using saved identity=%s/%u\r\n",
+                      bleSavedAddress, (unsigned)bleSavedAddressType);
+        copySavedBleDevice(blePendingDevice, device->getRSSI());
+      } else {
+        const std::string advertisedAddress = device->getAddress().toString();
+        Serial.printf("BLE RECONNECT: matched address=%s type=%u\r\n",
+                      advertisedAddress.c_str(),
+                      (unsigned)device->getAddressType());
+        copyAdvertisedDevice(blePendingDevice, device);
+      }
       blePendingSave = false;
       bleConnectRequested = true;
       NimBLEDevice::getScan()->stop();
@@ -15387,6 +15508,7 @@ BleDeviceInfo bleConnectDevice = {};
 volatile bool bleConnectTaskRunning = false;
 volatile bool bleConnectTaskFinished = false;
 volatile bool bleConnectTaskResult = false;
+volatile bool bleConnectBondFailed = false;
 bool bleConnectTaskSave = false;
 volatile uint32_t bleConnectTaskGeneration = 0;
 
@@ -15406,7 +15528,11 @@ void bleConnectWorker(void *parameter)
   }
   if (ok && bleConnectTaskSave) {
     Serial.println("BLE PAIR: stage=save-profile");
-    saveRemoteDevice(bleConnectDevice);
+    BleDeviceInfo savedDevice = bleConnectDevice;
+    if (copyBleResolvedIdentity(savedDevice)) {
+      Serial.println("BLE PAIR: saving resolved bond identity");
+    }
+    saveRemoteDevice(savedDevice);
   }
   Serial.printf("BLE PAIR: worker finish result=%s elapsed=%lu ms stack_free=%u\n",
                 ok ? "OK" : "FAILED",
@@ -15443,6 +15569,14 @@ void beginBleRemote()
     Serial.println("BLE: stack initialization failed.");
     return;
   }
+
+  migrateSavedRemoteToBondIdentity();
+
+  Serial.printf("BLE BOOT: stack=ready profile=%s saved=%s/%u bonds=%d\r\n",
+                bleProfileValid ? "yes" : "no",
+                bleProfileValid ? bleSavedAddress : "none",
+                (unsigned)bleSavedAddressType,
+                NimBLEDevice::getNumBonds());
 
   // A saved remote is searched for immediately after boot. If it is asleep,
   // normal periodic reconnect scans continue without blocking the UI.
@@ -15642,7 +15776,28 @@ bool startBleScan(BleScanPurpose purpose, uint32_t duration)
   lastBleScanAt = millis();
   NimBLEScan *scan = NimBLEDevice::getScan();
   scan->clearResults();
-  if (!scan->start(duration, false, true)) {
+  // Pairing needs scan responses for names and service details. Reconnection
+  // already has a saved identity, so passive scanning sees the first short
+  // wake advertisement immediately instead of waiting for a scan response.
+  // A forever scan must use callback-only storage: a bounded result vector
+  // would permanently discard a remote that wakes after eight other devices.
+  // The reconnect filter also accepts directed advertisements addressed to a
+  // resolvable private initiator address, as used by newer bonded HID remotes.
+  scan->setActiveScan(purpose == BLE_SCAN_USER);
+  scan->setWindow(purpose == BLE_SCAN_RECONNECT ? 100 : 80);
+  scan->setMaxResults(purpose == BLE_SCAN_RECONNECT ? 0 : BLE_MAX_DEVICES);
+  scan->setFilterPolicy(purpose == BLE_SCAN_RECONNECT
+                            ? BLE_HCI_SCAN_FILT_NO_WL_INITA
+                            : BLE_HCI_SCAN_FILT_NO_WL);
+  const bool started = scan->start(duration, false, true);
+  if (purpose == BLE_SCAN_RECONNECT) {
+    Serial.printf("BLE RECONNECT: scan start=%s active=%s saved=%s/%u bonds=%d\r\n",
+                  started ? "OK" : "FAILED",
+                  scan->isScanning() ? "yes" : "no",
+                  bleSavedAddress, (unsigned)bleSavedAddressType,
+                  NimBLEDevice::getNumBonds());
+  }
+  if (!started) {
     bleScanActive = false;
     bleScanPurpose = BLE_SCAN_NONE;
     return false;
@@ -15735,6 +15890,7 @@ void bleStartUserScan()
 
 bool connectBleRemote(const BleDeviceInfo &device, bool saveOnSuccess)
 {
+  bleConnectBondFailed = false;
   Serial.println("BLE PAIR: stage=connect");
   NimBLEAddress address(std::string(device.address), device.addressType);
   bleClient = NimBLEDevice::getClientByPeerAddress(address);
@@ -15764,6 +15920,27 @@ bool connectBleRemote(const BleDeviceInfo &device, bool saveOnSuccess)
     bleClient->disconnect();
     return false;
   }
+
+  // Encryption protects only this live connection. A stored bond is required
+  // to authenticate again after either device loses power. Never save a panel
+  // profile that works for one session but cannot reconnect after a reboot.
+  NimBLEConnInfo connectionInfo = bleClient->getConnInfo();
+  NimBLEAddress identity = connectionInfo.getIdAddress();
+  const bool liveBonded = connectionInfo.isBonded();
+  const bool storedBonded = liveBonded && !identity.isNull() &&
+                            NimBLEDevice::isBonded(identity);
+  Serial.printf("BLE: bond live=%s stored=%s identity=%s/%u.\n",
+                liveBonded ? "yes" : "no",
+                storedBonded ? "yes" : "no",
+                identity.toString().c_str(), (unsigned)identity.getType());
+  if (!storedBonded) {
+    bleConnectBondFailed = true;
+    bleSecurityConfirmed = false;
+    bleConnected = false;
+    bleClient->disconnect();
+    return false;
+  }
+  captureBleResolvedIdentity(identity);
 
   Serial.println("BLE PAIR: stage=service-discovery");
   // Discover the complete GATT database. Amazon Fire TV remotes and some other
@@ -16413,7 +16590,11 @@ void processBleReport(const BleReportPacket &packet)
   memcpy(bleHeldData, packet.data, packet.length);
 
   UiAction action = actionForRemotePacket(packet);
-  if (uiView == VIEW_HOME) action = resolveHomeShortcut(action);
+  // Home notifications must not turn the same shortcut into raw volume navigation.
+  if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY ||
+      (uiView == VIEW_FEATURE_CONFIRM && featureConfirmReturnView == VIEW_HOME)) {
+    action = resolveHomeShortcut(action);
+  }
   action = contextualizeUiAction(action);
   bleHeldAction = action;
   bleHeldSeekGesture = remoteActionStartsMediaSeek(action);
@@ -16479,6 +16660,20 @@ void pollBleRemote()
   }
 
   if (bleTransferShutdownRequested) return;
+
+  // Keep the software state honest if the controller ends a forever scan
+  // without delivering its completion callback. Do not interfere with the
+  // intentional stop performed after a saved peer has already matched.
+  if (!audioCritical && bleScanActive &&
+      bleScanPurpose == BLE_SCAN_RECONNECT && !bleConnectRequested &&
+      !bleConnectTaskRunning &&
+      (uint32_t)(millis() - lastBleScanAt) >= 500U &&
+      !NimBLEDevice::getScan()->isScanning()) {
+    resetBleScanState(false);
+    scheduleSavedReconnect();
+    Serial.println("BLE RECONNECT: scan stopped unexpectedly; retrying");
+  }
+
   if (bleRemovalInProgress) {
     serviceBleRemoteRemoval();
   } else if (bleStackRestartPending && !bleConnectTaskRunning &&
@@ -16490,6 +16685,7 @@ void pollBleRemote()
   if (bleConnectRequested && !bleConnectTaskRunning) {
     bleConnectRequested = false;
     bleConnectDevice = blePendingDevice;
+    clearBleResolvedIdentity();
     bleConnectTaskSave = blePendingSave;
     bleConnectTaskGeneration =
         __atomic_add_fetch(&bleConnectionGeneration, 1U, __ATOMIC_ACQ_REL);
@@ -16551,7 +16747,9 @@ void pollBleRemote()
       if (!ok) scheduleSavedReconnect();
       blePairingUiCompleted = ok;
       bleUiMode = BLE_UI_MESSAGE;
-      bleMessage = ok ? "Remote ready" : "No key reports";
+      bleMessage = ok ? "Remote ready" :
+                   (bleConnectBondFailed ? "Bond failed - reset remote" :
+                                           "No key reports");
       bleMessageUntil = millis() + 1800;
       drawBleScreen();
     }
@@ -16897,6 +17095,7 @@ void resetWifiTransferSessionState()
   wifiTransferExitWasRecovery = false;
   wifiTransferNormalAccessReleased = false;
   wifiTransferWriteAccessActive = false;
+  wifiTransferUpdateOnly = false;
   wifiTransferNetworkStarted = false;
   wifiTransferPhaseActionIssued = false;
   wifiTransferLastSyncOk = true;
@@ -17314,6 +17513,12 @@ void serviceWifiTransfer()
       }
       wifiTransferPhaseActionIssued = true;
       if (!mediaPlayerPoc.mountCardForTransfer()) {
+        if (!mediaPlayerPoc.mounted()) {
+          wifiTransferUpdateOnly = true;
+          setWifiTransferPhase(WifiTransferPhase::StopBle,
+                               "No SD card: firmware updates only");
+          break;
+        }
         wifiTransferPhaseActionIssued = false;
         wifiTransferRetryCount++;
         wifiTransferRetryAt = now + 500U;
@@ -17384,7 +17589,7 @@ void serviceWifiTransfer()
     case WifiTransferPhase::StartNetwork: {
       if (!wifiTransferPhaseActionIssued) {
         wifiTransferPhaseActionIssued = true;
-        if (!wifiTransferMode.start(mediaFs, "/")) {
+        if (!wifiTransferMode.start(mediaFs, "/", wifiTransferUpdateOnly)) {
           beginWifiTransferRecovery("Wi-Fi transfer task failed to start");
           break;
         }
@@ -17707,6 +17912,11 @@ void serviceWifiTransfer()
     }
 
     case WifiTransferPhase::ValidateNormalAccess: {
+      if (wifiTransferUpdateOnly) {
+        setWifiTransferPhase(WifiTransferPhase::RestartBle,
+                             "Preparing safe BLE restart");
+        break;
+      }
       if (mediaPlayerPoc.mounted() &&
           mediaPlayerPoc.cardAccessMode() ==
               MediaFsAccessMode::NormalReadOnly) {

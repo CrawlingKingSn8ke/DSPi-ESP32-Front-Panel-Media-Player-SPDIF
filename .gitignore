@@ -1,5 +1,6 @@
 /build/
 /local-validation/builds/
+/local-validation/build-work/
 /firmware/*/build/
 /release/
 *.bin

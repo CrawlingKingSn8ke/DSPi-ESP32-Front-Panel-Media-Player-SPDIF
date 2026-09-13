@@ -1,8 +1,8 @@
 # DSPi ESP32 Front Panel v1.2.1
 
-## S/PDIF Forensic r2
+## S/PDIF transmitter and media-player hardening
 
-This release packages the current experimental S/PDIF media-player firmware as a clean, traceable build. It preserves the complete front-panel feature set and the earlier SD/FLAC playback work.
+This release packages the current experimental S/PDIF media-player firmware as a clean, traceable build. It preserves the complete front-panel feature set and the earlier SD/FLAC playback work, then adds the final BLE, local OTA and interface maintenance listed below.
 
 ### S/PDIF transmitter hardening
 
@@ -25,6 +25,18 @@ This release packages the current experimental S/PDIF media-player firmware as a
 
 - Document the tested ESP32-to-DSPi I2S wiring.
 - Fix occupied preset overwrite acknowledgement timing on compatible DSPi firmware.
+
+### Final maintenance update
+
+- Allow browser firmware updates to start without an SD card while continuing
+  to require the card for music transfer.
+- Keep repeated Home feature shortcuts mapped to their feature action while a
+  confirmation overlay is visible, preventing accidental 1 dB volume steps.
+- Draw the large volume decimal point once rather than in every glow pass.
+- Reconnect newer Fire TV remotes that expose a zero-address directed wake
+  advertisement by using the single verified saved bond identity.
+- Keep continuous passive reconnect scanning bounded and suspend it during
+  audio-critical local playback.
 
 ## Build environment
 
