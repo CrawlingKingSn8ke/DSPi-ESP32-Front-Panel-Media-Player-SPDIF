@@ -157,9 +157,24 @@ Restrictions:
 - Removing the card while mounted or playing is not supported.
 - After a genuine SD-card fault, remove all power before retrying.
 
+## Update firmware over local Wi-Fi
+
+The first installation must use the full USB image. After that, future application updates can be installed from the panel's local Wi-Fi page while preserving BLE bonds, remote mappings, presets and screen settings. An SD card is not required for firmware updates.
+
+1. Download `DSPi-ESP32-Front-Panel-v1.2.1-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
+2. Stop or pause local music playback.
+3. Open **System > Wi-Fi Transfer/Update** on the panel and confirm **Start**.
+4. Connect to the network shown on the panel and open its displayed browser address.
+5. Under **Local firmware update**, select **Choose application .bin** and choose the `-OTA.bin` file.
+6. Select **Install firmware**, confirm the warning and keep the unit powered while it uploads and verifies the image.
+7. Wait for the panel to restart automatically. The browser disconnecting during the restart is normal.
+
+> [!WARNING]
+> Never upload `DSPi-ESP32-Front-Panel-v1.2.1-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
+
 ## Wi-Fi Music Transfer
 
-Open **System > Wi-Fi Transfer/Update** and confirm Start. The panel displays the Wi-Fi connection details and browser address. Firmware upload works without an SD card; file transfer requires a mounted card.
+Open **System > Wi-Fi Transfer/Update** and confirm **Start**. The panel displays the Wi-Fi connection details and browser address. Music-file transfer requires a mounted SD card.
 
 From a phone or computer:
 

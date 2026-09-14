@@ -43,6 +43,16 @@ unchanged.
 
 Do not upload the 16 MB full image through the browser updater.
 
+## Local Wi-Fi OTA update
+
+1. Download `DSPi-ESP32-Front-Panel-v1.2.1-OTA.bin`.
+2. On the panel, open **System > Wi-Fi Transfer/Update** and confirm **Start**.
+3. Connect to the displayed network and open the displayed browser address.
+4. Under **Local firmware update**, choose the application `-OTA.bin` and select **Install firmware**.
+5. Keep power connected until verification finishes and the panel restarts automatically.
+
+The OTA update preserves settings and does not require an SD card. Never select the 16 MB `-Full.bin` file in the browser updater.
+
 ## Validation
 
 - 123 focused/static/behavioural contracts passed.
