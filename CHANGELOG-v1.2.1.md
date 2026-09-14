@@ -37,6 +37,11 @@ This release packages the current experimental S/PDIF media-player firmware as a
   advertisement by using the single verified saved bond identity.
 - Keep continuous passive reconnect scanning bounded and suspend it during
   audio-critical local playback.
+- Scale rotary input so each physical detent changes Home volume by exactly
+  1 dB while menu navigation remains one item per detent.
+- Reduce rendering overhead without changing pixels: reuse colour blends per
+  visible RLE run, skip transparent runs, walk glyph coordinates incrementally,
+  directly index common font characters and precompute album-art source columns.
 
 ## Build environment
 

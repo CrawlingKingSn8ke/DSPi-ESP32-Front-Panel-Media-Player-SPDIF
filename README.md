@@ -26,7 +26,10 @@ This is the current tested S/PDIF media-player build. It retains the complete VU
 - RAM-only S/PDIF timeout, partial-write, error, restart and retained-transition counters.
 - Fire TV remotes using private directed wake advertisements reconnect through their verified saved bond after an ESP32 restart.
 - Home shortcut notifications no longer reinterpret a repeated feature key as a volume step.
+- Rotary volume changes now advance by exactly 1 dB per physical encoder detent, matching the BLE remote.
 - The large volume decimal point is rendered once without loose glow pixels.
+- Text rendering skips transparent RLE runs, reuses each run's colour blend, walks glyph coordinates without per-pixel division and directly indexes the common fonts.
+- Album-art scaling reuses precomputed source columns, reducing scaling divisions without changing the image, SD-card admission delay or JPEG decoding safeguards.
 - Browser firmware updates can start without an SD card; song transfer still requires one.
 - Preserves the v1.1.3 S/PDIF 4 compatibility, Wi-Fi Music Transfer, BLE remote and SD music-player features.
 

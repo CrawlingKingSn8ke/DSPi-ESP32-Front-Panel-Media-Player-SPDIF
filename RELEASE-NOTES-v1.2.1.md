@@ -23,6 +23,13 @@ unchanged.
 - Repeated Loudness/Leveller Home shortcuts remain feature actions while their
   full-screen notification is visible instead of becoming a volume step.
 - The large volume decimal point is drawn once, removing loose glow pixels.
+- Rotary volume control advances by exactly 1 dB per physical detent while
+  retaining one-item-per-detent menu navigation.
+- RLE glyph rendering now skips transparent runs, calculates a colour blend
+  once per visible run, avoids per-pixel coordinate division and uses direct
+  lookup for the common fonts.
+- Album-art scaling precomputes source columns. Artwork timing remains governed
+  by the existing audio-buffer, SD-card and JPEG-decoding safeguards.
 - Verbose BLE advertisement-capture diagnostics are not present in the final
   build.
 
@@ -38,8 +45,8 @@ Do not upload the 16 MB full image through the browser updater.
 
 ## Validation
 
-- 113 focused/static/behavioural contracts passed.
+- 123 focused/static/behavioural contracts passed.
 - 18 Wi-Fi portal assertions passed and the complete JavaScript parsed.
 - ESP32 Arduino core 3.3.11 build passed.
-- Program storage: 1,917,229 bytes.
-- Static RAM: 77,388 bytes.
+- Program storage: 1,917,249 bytes (60%).
+- Static RAM: 78,028 bytes (23%).

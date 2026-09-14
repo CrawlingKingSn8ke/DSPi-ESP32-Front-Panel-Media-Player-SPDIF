@@ -6668,8 +6668,26 @@ static const GlyphDef FontDb_glyphs[] = {
 };
 static const FontDef FontDb = {FontDb_glyphs, 2, 38, 7};
 
+int16_t commonGlyphIndex(char ch)
+{
+  if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+  if (ch >= 'a' && ch <= 'z') return 26 + ch - 'a';
+  if (ch >= '0' && ch <= '9') return 52 + ch - '0';
+  switch (ch) {
+    case '.': return 62;
+    case '-': return 63;
+    case '/': return 64;
+    default: return -1;
+  }
+}
+
 const GlyphDef *findGlyph(const FontDef &font, char ch)
 {
+  if (&font == &FontSmall || &font == &FontMedium || &font == &FontLarge) {
+    const int16_t index = commonGlyphIndex(ch);
+    if (index < 0 || index >= font.count) return nullptr;
+    return font.glyphs[index].ch == ch ? &font.glyphs[index] : nullptr;
+  }
   for (uint8_t i = 0; i < font.count; i++) {
     if (font.glyphs[i].ch == ch) return &font.glyphs[i];
   }
@@ -6797,17 +6815,28 @@ void drawGlyphRle(int16_t x, int16_t y, const GlyphDef *g, uint16_t colour)
   for (uint16_t i = 0; i < g->dataLen; i += 2) {
     uint8_t count = pgm_read_byte(g->data + i);
     uint8_t alpha = pgm_read_byte(g->data + i + 1);
+    if (alpha == 0) {
+      pos += count;
+      if (pos >= total) return;
+      continue;
+    }
+    const uint16_t runColour = blend565(C_BLACK, colour, alpha);
+    uint16_t sourceX = pos % g->w;
+    uint16_t sourceY = pos / g->w;
 
     for (uint8_t n = 0; n < count; n++) {
       if (pos >= total) return;
-      if (alpha > 0) {
-        int16_t px = x + (pos % g->w);
-        int16_t py = y + (pos / g->w);
-        if (px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
-          canvas->drawPixel(px, py, blend565(C_BLACK, colour, alpha));
-        }
+      int16_t px = x + sourceX;
+      int16_t py = y + sourceY;
+      if (px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
+        canvas->drawPixel(px, py, runColour);
       }
       pos++;
+      sourceX++;
+      if (sourceX >= g->w) {
+        sourceX = 0;
+        sourceY++;
+      }
     }
   }
 }
@@ -6845,18 +6874,29 @@ void drawGlyphRleClipped(int16_t x, int16_t y, const GlyphDef *g,
   for (uint16_t i = 0; i < g->dataLen; i += 2) {
     uint8_t count = pgm_read_byte(g->data + i);
     uint8_t alpha = pgm_read_byte(g->data + i + 1);
+    if (alpha == 0) {
+      pos += count;
+      if (pos >= total) return;
+      continue;
+    }
+    const uint16_t runColour = blend565(C_BLACK, colour, alpha);
+    uint16_t sourceX = pos % g->w;
+    uint16_t sourceY = pos / g->w;
     for (uint8_t n = 0; n < count; n++) {
       if (pos >= total) return;
-      if (alpha > 0) {
-        int16_t px = x + (pos % g->w);
-        int16_t py = y + (pos / g->w);
-        if (px >= clipX && px < clipRight &&
-            py >= clipY && py < clipBottom &&
-            px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
-          canvas->drawPixel(px, py, blend565(C_BLACK, colour, alpha));
-        }
+      int16_t px = x + sourceX;
+      int16_t py = y + sourceY;
+      if (px >= clipX && px < clipRight &&
+          py >= clipY && py < clipBottom &&
+          px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
+        canvas->drawPixel(px, py, runColour);
       }
       pos++;
+      sourceX++;
+      if (sourceX >= g->w) {
+        sourceX = 0;
+        sourceY++;
+      }
     }
   }
 }
@@ -7003,18 +7043,27 @@ void drawGlyphRleScaled(int16_t x, int16_t y, const GlyphDef *g,
   for (uint16_t i = 0; i < g->dataLen; i += 2) {
     uint8_t count = pgm_read_byte(g->data + i);
     uint8_t alpha = pgm_read_byte(g->data + i + 1);
+    if (alpha == 0) {
+      pos += count;
+      if (pos >= total) return;
+      continue;
+    }
+    const uint16_t runColour = blend565(C_BLACK, colour, alpha);
+    uint16_t sourceX = pos % g->w;
+    uint16_t sourceY = pos / g->w;
     for (uint8_t n = 0; n < count; n++) {
       if (pos >= total) return;
-      if (alpha > 0) {
-        uint16_t sourceX = pos % g->w;
-        uint16_t sourceY = pos / g->w;
-        int16_t px = x + (int16_t)(((uint32_t)sourceX * scalePercent + 50) / 100);
-        int16_t py = y + (int16_t)(((uint32_t)sourceY * scalePercent + 50) / 100);
-        if (px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
-          canvas->drawPixel(px, py, blend565(C_BLACK, colour, alpha));
-        }
+      int16_t px = x + (int16_t)(((uint32_t)sourceX * scalePercent + 50) / 100);
+      int16_t py = y + (int16_t)(((uint32_t)sourceY * scalePercent + 50) / 100);
+      if (px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
+        canvas->drawPixel(px, py, runColour);
       }
       pos++;
+      sourceX++;
+      if (sourceX >= g->w) {
+        sourceX = 0;
+        sourceY++;
+      }
     }
   }
 }
@@ -12880,16 +12929,20 @@ void drawMediaArtwork(int16_t x, int16_t y, int16_t edge)
     drawFallbackArtwork(x, y, edge);
     return;
   }
+  if (edge <= 0 || edge > UI_W) return;
 
   uint16_t sourceEdge = std::min(mediaArtworkWidth, mediaArtworkHeight);
   uint16_t sourceX = (mediaArtworkWidth - sourceEdge) / 2;
   uint16_t sourceY = (mediaArtworkHeight - sourceEdge) / 2;
+  static uint16_t sourceColumns[UI_W];
+  for (int16_t dx = 0; dx < edge; dx++) {
+    sourceColumns[dx] = sourceX + (uint32_t)dx * sourceEdge / edge;
+  }
   for (int16_t dy = 0; dy < edge; dy++) {
     uint16_t sy = sourceY + (uint32_t)dy * sourceEdge / edge;
     for (int16_t dx = 0; dx < edge; dx++) {
-      uint16_t sx = sourceX + (uint32_t)dx * sourceEdge / edge;
       canvas->drawPixel(x + dx, y + dy,
-          mediaArtworkPixels[(uint32_t)sy * mediaArtworkWidth + sx]);
+          mediaArtworkPixels[(uint32_t)sy * mediaArtworkWidth + sourceColumns[dx]]);
     }
   }
   canvas->drawRect(x, y, edge, edge, uiAccentDark());
