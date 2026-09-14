@@ -1,15 +1,15 @@
-# DSPi ESP32 Media Player — S/PDIF Test Firmware
+# DSPi ESP32 Front Panel — Media Player S/PDIF
 
-Experimental fork of the DSPi ESP32 Front Panel that sends the integrated SD-card music player to a WeebLabs DSPi over a single-wire, 24-bit, 44.1/48 kHz logic-level S/PDIF connection.
+Stable ESP32-S3 front-panel firmware with an integrated SD-card music player and a single-wire, 24-bit, 44.1/48 kHz logic-level S/PDIF connection to a WeebLabs DSPi.
 
 > [!IMPORTANT]
-> This repository is an isolated test build, not the stable release of the main front-panel project. The ESP transmitter is stable in current testing when paired with the experimental DSPi S/PDIF receiver overhaul; official DSPi integration is still pending. See [EXPERIMENTAL-SPDIF.md](EXPERIMENTAL-SPDIF.md) before flashing or wiring it.
+> The ESP32-to-DSPi audio link is direct 3.3 V GPIO-level S/PDIF. It is not a consumer coaxial or optical connection. Read [S/PDIF implementation and wiring](SPDIF-IMPLEMENTATION.md) before connecting the hardware.
 
 The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 
 ## Version 1.2.1
 
-This is the current tested S/PDIF media-player build. It retains the complete VU IMP interface, presets, SD music player and local Wi-Fi transfer/update portal, together with the hardened 24-bit S/PDIF transmitter and continuous same-rate carrier transitions.
+This is the current stable S/PDIF media-player build. It retains the complete VU IMP interface, presets, SD music player and local Wi-Fi transfer/update portal, together with the hardened 24-bit S/PDIF transmitter and continuous same-rate carrier transitions.
 
 ### Main changes
 
@@ -33,7 +33,7 @@ This is the current tested S/PDIF media-player build. It retains the complete VU
 - Browser firmware updates can start without an SD card; song transfer still requires one.
 - Preserves the v1.1.3 S/PDIF 4 compatibility, Wi-Fi Music Transfer, BLE remote and SD music-player features.
 
-See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [EXPERIMENTAL-SPDIF.md](EXPERIMENTAL-SPDIF.md) for the evidence boundary. The `SHA256SUMS-v1.2.1.txt` release asset contains the verified firmware checksums.
+See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [SPDIF-IMPLEMENTATION.md](SPDIF-IMPLEMENTATION.md) for the implementation, compatibility and wiring details. The `SHA256SUMS-v1.2.1.txt` release asset contains the verified firmware checksums.
 
 ## Hardware
 
@@ -67,7 +67,7 @@ The UART runs at 115200 baud. Enable the DSPi UART interface with TX GPIO16 and 
 | GPIO13 | GPIO5 | Logic-level S/PDIF data to DSPi S/PDIF input 1 |
 | GND | GND | Common ground |
 
-Configure DSPi S/PDIF input 1 on Pico GPIO5. The firmware validates this setting before starting playback. The test connection is short, direct 3.3 V logic with a common ground; no coaxial or optical line driver is implied. Do not connect this GPIO-level signal to consumer coaxial S/PDIF equipment.
+Configure DSPi S/PDIF input 1 on Pico GPIO5. The firmware validates this setting before starting playback. Keep the direct 3.3 V logic connection and common-ground return short; no coaxial or optical line driver is implied. Do not connect this GPIO-level signal to consumer coaxial S/PDIF equipment.
 
 ### Rotary encoder
 

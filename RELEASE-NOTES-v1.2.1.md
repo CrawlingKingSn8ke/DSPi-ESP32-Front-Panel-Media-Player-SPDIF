@@ -1,4 +1,4 @@
-# DSPi ESP32 Media Player S/PDIF v1.2.1
+# DSPi ESP32 Front Panel — Media Player S/PDIF v1.2.1
 
 Current ESP32-S3 front-panel firmware for the integrated SD-card music player
 over a single-wire, logic-level S/PDIF connection to DSPi.

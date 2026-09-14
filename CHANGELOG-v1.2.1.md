@@ -2,7 +2,7 @@
 
 ## S/PDIF transmitter and media-player hardening
 
-This release packages the current experimental S/PDIF media-player firmware as a clean, traceable build. It preserves the complete front-panel feature set and the earlier SD/FLAC playback work, then adds the final BLE, local OTA and interface maintenance listed below.
+This release packages the stable S/PDIF media-player firmware as a clean, traceable build. It preserves the complete front-panel feature set and the earlier SD/FLAC playback work, then adds the BLE, local OTA and interface maintenance listed below.
 
 ### S/PDIF transmitter hardening
 

@@ -1,4 +1,4 @@
-# Experimental S/PDIF media-player build
+# S/PDIF media-player implementation
 
 ## Purpose
 
@@ -65,7 +65,7 @@ Two DSPi systems have behaved differently:
 The ESP hardening, standards-correct channel status and true full-ring preload
 substantially improved behaviour but did not eliminate that recurring dropout.
 A physical 68-ohm GPIO source resistor also did not cure it. Testing current
-WeebLabs main combined with the experimental DSPi `spdif_rx_overhaul` removed
+WeebLabs main combined with the DSPi `spdif_rx_overhaul` development work removed
 the recurring dropout without further ESP clock compensation.
 
 The strongest current evidence therefore points to the older DSPi
@@ -91,12 +91,12 @@ resistor is not a mandatory requirement for this tested wiring.
 ## Current verified v1.2.1 build
 
 - OTA: `DSPi-ESP32-Front-Panel-v1.2.1-OTA.bin`
-- OTA size: 1,917,376 bytes
-- OTA SHA-256: `7114EB7B34567901A8D24F64CAD36DF6553A96A6C79F0714E087EE4772BBE9BD`
+- OTA size: 1,917,392 bytes
+- OTA SHA-256: `4F8595B6C152CBC96C06B34ECADDFDAC1369B392D8BD864501A92251BFD84AB3`
 - Full USB: `DSPi-ESP32-Front-Panel-v1.2.1-Full.bin`
 - Full USB size: 16,777,216 bytes
-- Full USB SHA-256: `81215910F230EC241DE025208A42A11E4683F0A2247A00158E91654D258FFAA4`
-- Firmware contracts: 113 passed
+- Full USB SHA-256: `AB31406C065863E3C49EE0E125748A6BFA4789D3056CC3E53FC6A902C85F5EF3`
+- Firmware contracts: 123 passed
 - Wi-Fi portal assertions: 18 passed
 - ESP32 Arduino core: 3.3.11
 
