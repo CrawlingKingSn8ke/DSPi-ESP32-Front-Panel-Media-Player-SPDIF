@@ -168,6 +168,7 @@ The first installation must use the full USB image. After that, future applicati
 5. Under **Local firmware update**, select **Choose application .bin** and choose the `-OTA.bin` file.
 6. Select **Install firmware**, confirm the warning and keep the unit powered while it uploads and verifies the image.
 7. Wait for the panel to restart automatically. The browser disconnecting during the restart is normal.
+8. After the restart, switch off or disconnect all power for at least 10 seconds, then power the unit back on before using the media player. A software restart does not power-cycle the SD card, so this step is required for a reliable SD remount.
 
 > [!WARNING]
 > Never upload `DSPi-ESP32-Front-Panel-v1.2.1-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.

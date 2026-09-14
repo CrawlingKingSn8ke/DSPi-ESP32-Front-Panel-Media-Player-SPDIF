@@ -50,6 +50,7 @@ Do not upload the 16 MB full image through the browser updater.
 3. Connect to the displayed network and open the displayed browser address.
 4. Under **Local firmware update**, choose the application `-OTA.bin` and select **Install firmware**.
 5. Keep power connected until verification finishes and the panel restarts automatically.
+6. After it restarts, remove all power for at least 10 seconds, then power it back on before using the media player. This resets the still-powered SD card so it can remount reliably.
 
 The OTA update preserves settings and does not require an SD card. Never select the 16 MB `-Full.bin` file in the browser updater.
 
