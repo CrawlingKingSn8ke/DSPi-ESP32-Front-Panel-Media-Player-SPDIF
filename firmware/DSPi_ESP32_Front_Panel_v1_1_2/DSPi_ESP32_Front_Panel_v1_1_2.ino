@@ -93,6 +93,7 @@
 #include <jpeg_decoder.h>
 #include "MediaPlayerPoC.h"
 #include "Mp3ArtworkPolicy.h"
+#include "ArtworkCache.h"
 #include "WifiTransferMode.h"
 
 #define DSPI_HAVE_NIMBLE 1
@@ -8858,6 +8859,30 @@ bool decodeMediaArtworkAttempt(uint8_t *jpeg, size_t jpegLength,
     }
   }
 
+  // The worker is the only cache owner. Never consume internal/audio RAM for
+  // this optional optimisation; retain a PSRAM reserve for other users.
+  static ArtworkCache cache(
+      +[](size_t bytes) -> void * {
+        if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) <
+            bytes + 512U * 1024U) return nullptr;
+        return heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      }, free);
+  if (mediaArtworkCancelled(control)) {
+    MediaPlayerPoC::freeArtworkJpeg(jpeg);
+    return false;
+  }
+  if (cache.copy(jpeg, jpegLength, result.pixels, result.width, result.height)) {
+    MediaPlayerPoC::freeArtworkJpeg(jpeg);
+    if (mediaArtworkCancelled(control)) {
+      free(result.pixels);
+      result.pixels = nullptr;
+      return false;
+    }
+    result.loaded = true;
+    Serial.println("MEDIA ART: exact JPEG cache hit; decode skipped");
+    return true;
+  }
+
   esp_jpeg_image_scale_t chosenScale = JPEG_IMAGE_SCALE_0;
   esp_jpeg_image_output_t info = {};
   bool haveInfo = false;
@@ -8911,11 +8936,16 @@ bool decodeMediaArtworkAttempt(uint8_t *jpeg, size_t jpegLength,
   esp_jpeg_image_output_t decodedInfo = {};
   bool ok = esp_jpeg_decode(&config, &decodedInfo) == ESP_OK &&
             decodedInfo.width > 0 && decodedInfo.height > 0;
-  MediaPlayerPoC::freeArtworkJpeg(jpeg);
-  if (!ok) {
+  if (!ok || mediaArtworkCancelled(control) ||
+      uint64_t(decodedInfo.width) * decodedInfo.height * sizeof(uint16_t) >
+          info.output_len) {
+    MediaPlayerPoC::freeArtworkJpeg(jpeg);
     free(decoded);
     return false;
   }
+  cache.remember(jpeg, jpegLength, reinterpret_cast<uint16_t *>(decoded),
+                 decodedInfo.width, decodedInfo.height);
+  MediaPlayerPoC::freeArtworkJpeg(jpeg);
 
   result.pixels = reinterpret_cast<uint16_t *>(decoded);
   result.width = decodedInfo.width;
