@@ -2,6 +2,7 @@
 #include "Mp3SeekPolicy.h"
 #include "Mp3ArtworkPolicy.h"
 #include "SpdifBlockEncoder.h"
+#include "DirectoryPageCache.h"
 
 #define DR_WAV_NO_STDIO
 #define DR_WAV_IMPLEMENTATION
@@ -25,6 +26,18 @@
 #include <soc/soc_caps.h>
 
 namespace {
+
+void *allocateDirectoryPage(size_t bytes)
+{
+  const uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+  if (heap_caps_get_free_size(caps) < bytes + 512U * 1024U) return nullptr;
+  return heap_caps_malloc(bytes, caps);
+}
+
+// Only the foreground browser/storage owner accesses this optional cache.
+// Audio tasks never allocate, invalidate or consult it.
+DirectoryPageCache<MediaBrowserEntry, MediaDirectoryPageInfo>
+    directoryPageCache(allocateDirectoryPage, heap_caps_free);
 
 // Playback uses a conservative shared-SPI clock with automatic lower-speed
 // fallbacks for card compatibility.
@@ -1236,6 +1249,7 @@ bool MediaPlayerPoC::mountCardForTransfer(uint32_t lockTimeoutMs)
 bool MediaPlayerPoC::switchMountedCardAccessMode(
     MediaFsAccessMode accessMode, uint32_t lockTimeoutMs)
 {
+  directoryPageCache.clear();
   if (accessMode == MediaFsAccessMode::Unmounted || !cardMounted ||
       !mediaFs.mounted()) {
     return false;
@@ -1277,6 +1291,7 @@ bool MediaPlayerPoC::switchMountedCardAccessMode(
 
 bool MediaPlayerPoC::unmountCard(uint32_t lockTimeoutMs)
 {
+  directoryPageCache.clear();
   if (state != MediaPlaybackState::Stopped || decoder ||
       decoderTaskRunning() || outputTaskRunning()) {
     Serial.println("MEDIA SD: unmount rejected; playback resources active");
@@ -1371,6 +1386,7 @@ bool MediaPlayerPoC::prepareCardForControllerRestart(
 bool MediaPlayerPoC::mountCardWithMode(MediaFsAccessMode accessMode,
                                        uint32_t lockTimeoutMs)
 {
+  directoryPageCache.clear();
   if (accessMode == MediaFsAccessMode::Unmounted) return false;
 
   // Normal browsing and transfer writing use the same SdFs instance.  The
@@ -1669,10 +1685,29 @@ size_t MediaPlayerPoC::listDirectoryPage(
   pageInfo = MediaDirectoryPageInfo{};
   if (!entries || capacity == 0) return 0;
   for (size_t i = 0; i < capacity; i++) clearBrowserEntry(entries[i]);
-  if (!cardMounted || !path || !path[0]) return 0;
+  if (!cardMounted) { directoryPageCache.clear(); return 0; }
+  if (!path || !path[0]) return 0;
 
   if (mode != MediaDirectoryPageMode::First && !anchor) {
     mode = MediaDirectoryPageMode::First;
+  }
+
+  const bool cacheAllowed =
+      mediaFs.accessMode() == MediaFsAccessMode::NormalReadOnly;
+  if (!cacheAllowed) directoryPageCache.clear();
+  size_t cachedCount = 0;
+  if (cacheAllowed && directoryPageCache.copy(
+          path, capacity, static_cast<unsigned>(mode), anchor, entries,
+          pageInfo, cachedCount)) {
+    // Probe the mounted card, rather than allowing a cached page to conceal
+    // an observed removal/read failure. No directory rescan is needed.
+    SharedSpiGuard guard;
+    if (cardMounted && mediaFs.mountedCardUsable() && !mediaFs.errorCode()) {
+      return cachedCount;
+    }
+    directoryPageCache.clear();
+    pageInfo = MediaDirectoryPageInfo{};
+    for (size_t i = 0; i < capacity; ++i) clearBrowserEntry(entries[i]);
   }
 
   MediaFsFile &directory = browserDirectoryScratch;
@@ -1862,6 +1897,20 @@ size_t MediaPlayerPoC::listDirectoryPage(
       pageInfo.hasPrevious = pageInfo.eligibleEntries > count;
       pageInfo.hasNext = entriesAfterAnchor > 0;
       break;
+  }
+  if (cacheAllowed && cardMounted) {
+    bool storageHealthy;
+    {
+      SharedSpiGuard guard;
+      storageHealthy = !mediaFs.errorCode();
+    }
+    // PSRAM allocation/copy must not extend shared-SPI ownership.
+    if (storageHealthy) {
+      directoryPageCache.remember(path, capacity, static_cast<unsigned>(mode),
+                                  anchor, entries, count, pageInfo);
+    } else {
+      directoryPageCache.clear();
+    }
   }
   return count;
 }
