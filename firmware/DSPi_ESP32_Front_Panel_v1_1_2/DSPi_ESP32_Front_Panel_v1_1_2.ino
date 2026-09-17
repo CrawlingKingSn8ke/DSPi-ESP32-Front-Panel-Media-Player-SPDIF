@@ -94,6 +94,7 @@
 #include "MediaPlayerPoC.h"
 #include "Mp3ArtworkPolicy.h"
 #include "ArtworkCache.h"
+#include "SubSynth.h"
 #include "WifiTransferMode.h"
 
 #define DSPI_HAVE_NIMBLE 1
@@ -210,7 +211,7 @@
 #define BLE_PROFILE_VERSION 3
 #define BLE_MAPPING_VERSION 5
 #define HOME_SHORTCUT_COUNT 5
-#define HOME_SHORTCUT_OPTION_COUNT 13
+#define HOME_SHORTCUT_OPTION_COUNT 14
 #define HOME_SHORTCUT_VERSION 2
 #define BLE_REPEAT_DELAY_MS 350
 #define BLE_REPEAT_INTERVAL_MS 120
@@ -5241,7 +5242,10 @@ enum MenuPage {
   PAGE_MEDIA_SETTINGS,
   PAGE_SCREEN_SETTINGS,
   PAGE_IDLE_SCREEN,
-  PAGE_THEME
+  PAGE_THEME,
+  PAGE_SUB_SYNTH,
+  PAGE_SUB_SELECT,
+  PAGE_SUB_OUTPUTS
 };
 
 enum LegacyUiColourChoice : uint8_t {
@@ -5477,7 +5481,8 @@ enum UiAction : uint8_t {
   ACT_MEDIA_NEXT,
   ACT_MEDIA_STOP,
   ACT_MEDIA_OPEN,
-  ACT_MEDIA_SETTINGS
+  ACT_MEDIA_SETTINGS,
+  ACT_SUB_SYNTH_TOGGLE
 };
 
 
@@ -5488,6 +5493,7 @@ enum BleMappingKind : uint8_t {
 };
 
 struct DspiState {
+  SubSynthState subSynth;
   bool connected;
   uint8_t platform;
   uint8_t firmwareMajor;
@@ -5798,7 +5804,7 @@ int editOriginalInt = 0;
 bool editBool = false;
 bool editOriginalBool = false;
 
-uint8_t rememberedMenuIndex[PAGE_THEME + 1] = {};
+uint8_t rememberedMenuIndex[PAGE_SUB_OUTPUTS + 1] = {};
 uint8_t lastMainMenuIndex = 0;
 
 uint8_t brightnessPercent = 80;
@@ -5884,7 +5890,8 @@ const UiAction homeShortcutOptions[HOME_SHORTCUT_OPTION_COUNT] = {
   ACT_INPUT_TOGGLE,
   ACT_MENU_TOGGLE,
   ACT_VISUALIZER_TOGGLE,
-  ACT_MUTE
+  ACT_MUTE,
+  ACT_SUB_SYNTH_TOGGLE
 };
 
 const char *homeShortcutOptionNames[HOME_SHORTCUT_OPTION_COUNT] = {
@@ -5900,7 +5907,8 @@ const char *homeShortcutOptionNames[HOME_SHORTCUT_OPTION_COUNT] = {
   "Cycle input",
   "Open Menu",
   "VU meter",
-  "Mute"
+  "Mute",
+  "Toggle Sub Synth"
 };
 
 const UiAction homeShortcutDefaults[HOME_SHORTCUT_COUNT] = {
@@ -7762,6 +7770,145 @@ bool syncPresetDirectoryCandidate(DspiState &candidate, bool names)
   return true;
 }
 
+bool readSubSynthParam(SubSynthParam p, float &value)
+{
+  if (p >= SUB_PARAM_COUNT) return false;
+  const SubSynthSpec &spec = subSynthSpecs[p];
+  uint8_t data[4] = {};
+  if (!getExact(spec.get, 0, spec.bytes, data, sizeof(data), false)) return false;
+  if (spec.bytes == 4) memcpy(&value, data, 4);
+  else value = spec.bytes == 2 ? readLe16(data) : data[0];
+  return subSynthValid(p, value);
+}
+
+bool probeSubSynth(SubSynthState &state)
+{
+  uint8_t data[1] = {}; uint16_t length = 0;
+  DspiTxnResult result = dspiGetResult(0x11, 0, 1, data, sizeof(data), length, false);
+  if (result == DSPI_TXN_ERROR) {
+    state = SubSynthState{}; state.known = true;
+    return true;
+  }
+  if (result != DSPI_TXN_OK || length != 1 || data[0] > 1) return false;
+  const uint8_t enabled = data[0];
+  // Require the extended beta3 settings, not only the older enable command.
+  result = dspiGetResult(0x2f, 0, 1, data, sizeof(data), length, false);
+  if (result == DSPI_TXN_ERROR) {
+    state = SubSynthState{}; state.known = true;
+    return true;
+  }
+  if (result != DSPI_TXN_OK || length != 1 || data[0] > 1) return false;
+  state.known = state.supported = true;
+  state.value[SUB_ENABLE] = enabled;
+  state.value[SUB_LINK] = data[0];
+  return true;
+}
+
+bool syncSubSynthDetails(bool outputs)
+{
+  if (!dspi.connected || !dspi.subSynth.supported) return false;
+  if (outputs) dspi.subSynth.outputsKnown = false;
+  SubSynthState next = dspi.subSynth;
+  for (uint8_t p = 0; p < SUB_PARAM_COUNT; ++p) {
+    if (!readSubSynthParam(static_cast<SubSynthParam>(p), next.value[p])) return false;
+  }
+  if (outputs) {
+    next.enabledOutputs = 0;
+    dspi.subSynth.outputsKnown = false;
+    for (uint8_t out = 0; out < std::min<uint8_t>(dspi.outputChannels, 9); ++out) {
+      uint8_t enabled = 0;
+      if (!getExactByte(0x73, enabled, out, false) || enabled > 1) return false;
+      if (enabled) next.enabledOutputs |= (1u << out);
+    }
+    next.outputsKnown = true;
+  }
+  dspi.subSynth = next;
+  return true;
+}
+
+bool writeSubSynthParam(SubSynthParam p, float value)
+{
+  if (!dspi.connected || !dspi.subSynth.supported || p >= SUB_PARAM_COUNT ||
+      !subSynthSpecs[p].set || !subSynthValid(p, value)) return false;
+  const SubSynthSpec &spec = subSynthSpecs[p];
+  uint8_t data[4] = {};
+  if (spec.bytes == 4) memcpy(data, &value, 4);
+  else { const uint16_t integer = static_cast<uint16_t>(value);
+    data[0] = integer & 0xff; data[1] = integer >> 8; }
+  if (!dspiSet(spec.set, 0, data, spec.bytes)) return false;
+  float readback = 0;
+  if (!readSubSynthParam(p, readback)) return false;
+  dspi.subSynth.value[p] = readback;
+  return fabsf(readback - value) < 0.01f;
+}
+
+bool isSubSynthPage(MenuPage page)
+{
+  return page == PAGE_SUB_SYNTH || page == PAGE_SUB_SELECT || page == PAGE_SUB_OUTPUTS;
+}
+
+SubSynthParam currentSubSynthParam()
+{
+  return subSynthParameter(menuPage == PAGE_SUB_SYNTH ? 0 :
+                           (menuPage == PAGE_SUB_SELECT ? 1 : 2), menuIndex);
+}
+
+String subSynthValueText(SubSynthParam p, float value)
+{
+  if (p == SUB_INVALID) return "Open";
+  if (p == SUB_ENABLE || p == SUB_LINK) return value != 0 ? "On" : "Off";
+  if (p == SUB_SELECT) {
+    return value == 1 ? "Percussive" : value == 2 ? "Sustained" : "All material";
+  }
+  if ((p == SUB_LOW || p == SUB_HIGH || p == SUB_TOP) && value <= -30) return "Off";
+  if ((p == SUB_CEILING || p == SUB_BOOST) && value == 0) return "Off";
+  // The embedded fonts have no percent glyph.
+  if (p == SUB_DEPTH) return String((int)value) + " pct";
+  if (p == SUB_HOLD) return String((int)value) + " ms";
+  return String(value, 1) + " dB";
+}
+
+bool pollVisibleSubSynthSettings()
+{
+  if (uiView != VIEW_MENU || editActive || !isSubSynthPage(menuPage) ||
+      !dspi.subSynth.known || !dspi.subSynth.supported) return false;
+  bool changed = false;
+  if (menuPage == PAGE_SUB_OUTPUTS) {
+    uint16_t enabledMask = 0;
+    for (uint8_t out = 0; out < std::min<uint8_t>(dspi.outputChannels, 9); ++out) {
+      uint8_t enabled = 0;
+      if (!getExactByte(0x73, enabled, out, false) || enabled > 1) {
+        changed = dspi.subSynth.outputsKnown;
+        dspi.subSynth.outputsKnown = false;
+        return changed;
+      }
+      if (enabled) enabledMask |= (1u << out);
+    }
+    changed = !dspi.subSynth.outputsKnown || enabledMask != dspi.subSynth.enabledOutputs;
+    dspi.subSynth.outputsKnown = true;
+    dspi.subSynth.enabledOutputs = enabledMask;
+    float mask = 0;
+    if (readSubSynthParam(SUB_MASK, mask)) {
+      changed |= mask != dspi.subSynth.value[SUB_MASK];
+      dspi.subSynth.value[SUB_MASK] = mask;
+    }
+    return changed;
+  }
+  const uint8_t first = menuPage == PAGE_SUB_SYNTH ? (menuIndex / 4) * 4 : 0;
+  const uint8_t end = menuPage == PAGE_SUB_SYNTH ? std::min<int>(first + 4, 10) : 3;
+  for (uint8_t row = first; row < end; ++row) {
+    const auto p = subSynthParameter(menuPage == PAGE_SUB_SYNTH ? 0 : 1, row);
+    // Headroom is comparatively expensive on DSPi; refresh on entry/apply/select.
+    if (p == SUB_INVALID || p == SUB_ENABLE || p == SUB_HEADROOM) continue;
+    float value = 0;
+    if (readSubSynthParam(p, value)) {
+      changed |= value != dspi.subSynth.value[p];
+      dspi.subSynth.value[p] = value;
+    }
+  }
+  return changed;
+}
+
 bool syncPsybassCandidate(DspiState &candidate)
 {
   uint8_t enabledPayload[1] = {0};
@@ -7943,6 +8090,8 @@ bool syncCurrentState(bool includePresetNames)
   candidate.levellerLookahead = byteValue != 0;
 
   if (!syncPsybassCandidate(candidate)) return false;
+  // An unsupported optional feature must not take down the established link.
+  if (!probeSubSynth(candidate.subSynth)) candidate.subSynth.known = false;
   if (!syncPresetDirectoryCandidate(candidate, includePresetNames)) return false;
   if (!includePresetNames &&
       (uiView == VIEW_VISUALIZER || pendingPresetOverlay ||
@@ -8071,6 +8220,7 @@ bool pollExternalRuntimeState()
   uint8_t observedCrossfeed = dspi.crossfeedEnabled ? 1 : 0;
   uint8_t observedLeveller = dspi.levellerEnabled ? 1 : 0;
   uint8_t observedPsybass = dspi.psybassEnabled ? 1 : 0;
+  float observedSubSynth = dspi.subSynth.value[SUB_ENABLE];
   uint8_t observedSpdifState = dspi.spdifState;
   uint32_t observedSampleRate = dspi.sampleRate;
   bool observedSpdifNonAudio = dspi.spdifNonAudio;
@@ -8099,6 +8249,8 @@ bool pollExternalRuntimeState()
   const bool psybassValid = dspi.psybassSupported &&
       getExactByte(REQ_GET_PSYBASS, observedPsybass, 0, false) &&
       observedPsybass <= 1;
+  const bool subSynthValidRead = dspi.subSynth.known && dspi.subSynth.supported &&
+      readSubSynthParam(SUB_ENABLE, observedSubSynth);
 
   // The normal runtime watcher is also used while the SD decoder is active.
   // Keep S/PDIF lock metadata in that lightweight path: activateMediaRoute()
@@ -8149,14 +8301,17 @@ bool pollExternalRuntimeState()
       (observedLeveller != 0) != dspi.levellerEnabled;
   const bool psybassChanged = psybassValid &&
       (observedPsybass != 0) != dspi.psybassEnabled;
+  const bool subSynthChanged = subSynthValidRead &&
+      observedSubSynth != dspi.subSynth.value[SUB_ENABLE];
   const bool spdifStatusChanged = spdifStatusValid &&
       (observedSpdifState != dspi.spdifState ||
        observedSpdifNonAudio != dspi.spdifNonAudio ||
        (isSpdifSource(observedInput) &&
         observedSampleRate != dspi.sampleRate));
-  const bool anyChanged = volumeChanged || presetChanged || sourceChanged ||
+  const bool subSynthMenuChanged = pollVisibleSubSynthSettings();
+  const bool anyChanged = subSynthMenuChanged || volumeChanged || presetChanged || sourceChanged ||
       loudnessChanged || crossfeedChanged || levellerChanged ||
-      psybassChanged || spdifStatusChanged;
+      psybassChanged || subSynthChanged || spdifStatusChanged;
 
   if (volumeValid) dspi.volumeDb = observedVolume;
   if (presetValid) dspi.activePreset = observedPreset;
@@ -8165,6 +8320,7 @@ bool pollExternalRuntimeState()
   if (crossfeedValid) dspi.crossfeedEnabled = observedCrossfeed != 0;
   if (levellerValid) dspi.levellerEnabled = observedLeveller != 0;
   if (psybassValid) dspi.psybassEnabled = observedPsybass != 0;
+  if (subSynthValidRead) dspi.subSynth.value[SUB_ENABLE] = observedSubSynth;
   if (spdifStatusValid) {
     dspi.spdifState = observedSpdifState;
     dspi.spdifNonAudio = observedSpdifNonAudio;
@@ -8206,6 +8362,8 @@ bool pollExternalRuntimeState()
     showFeatureStateNotification("Leveller", dspi.levellerEnabled);
   } else if (psybassChanged) {
     showFeatureStateNotification("Psy Bass", dspi.psybassEnabled);
+  } else if (subSynthChanged) {
+    showFeatureStateNotification("Sub Synth", observedSubSynth != 0);
   }
 
   if (presetChanged && menuPage == PAGE_PRESET && !editActive) {
@@ -10775,6 +10933,9 @@ String pageTitle(MenuPage page)
     case PAGE_CROSSFEED: return "Crossfeed";
     case PAGE_LEVELLER: return "Leveller";
     case PAGE_PSYBASS: return "Psy Bass";
+    case PAGE_SUB_SYNTH: return "Sub Synth";
+    case PAGE_SUB_SELECT: return "Selectivity";
+    case PAGE_SUB_OUTPUTS: return "Sub Outputs";
     case PAGE_BLUETOOTH: return "Remote";
     case PAGE_SYSTEM: return "System";
     case PAGE_MEDIA_SETTINGS: return "Music Settings";
@@ -10874,7 +11035,7 @@ void clampBleMenuIndex()
 uint8_t menuItemCount(MenuPage page)
 {
   switch (page) {
-    case PAGE_MAIN: return 9;
+    case PAGE_MAIN: return 10;
     case PAGE_INPUT: return 1;
     case PAGE_MEDIA: return mediaBrowserItemCount();
     case PAGE_PRESET: return 10;
@@ -10882,6 +11043,10 @@ uint8_t menuItemCount(MenuPage page)
     case PAGE_CROSSFEED: return 4;
     case PAGE_LEVELLER: return 6;
     case PAGE_PSYBASS: return 6;
+    case PAGE_SUB_SYNTH: return 10;
+    case PAGE_SUB_SELECT: return dspi.subSynth.value[SUB_SELECT] == 0 ? 1 : 3;
+    case PAGE_SUB_OUTPUTS: return std::max<unsigned>(1,
+        dspi.subSynth.outputsKnown ? subSynthOutputCount(dspi.subSynth.enabledOutputs) : 0);
     case PAGE_BLUETOOTH: return bleMenuItemCount();
     case PAGE_SYSTEM: return 4;
     case PAGE_MEDIA_SETTINGS: return 1;
@@ -10896,10 +11061,24 @@ uint8_t menuItemCount(MenuPage page)
 String menuItemName(MenuPage page, uint8_t index)
 {
   if (page == PAGE_MAIN) {
-    const char *items[] = {"Input", "Music", "Preset", "Loudness", "Crossfeed", "Leveller", "Psy Bass", "Remote", "System"};
-    return items[std::min<uint8_t>(index, 8)];
+    const char *items[] = {"Input", "Music", "Preset", "Loudness", "Crossfeed", "Leveller", "Psy Bass", "Sub Synth", "Remote", "System"};
+    return items[std::min<uint8_t>(index, 9)];
   }
   if (page == PAGE_INPUT) return "Source";
+  if (page == PAGE_SUB_SYNTH) {
+    const char *items[] = {"Enable", "24-36 Hz", "36-56 Hz", "56-80 Hz",
+      "Selectivity", "Sub Ceiling", "LF Boost", "Outputs", "Link Pairs", "Headroom"};
+    return items[std::min<uint8_t>(index, 9)];
+  }
+  if (page == PAGE_SUB_SELECT) {
+    const char *items[] = {"Material", "Depth", "Hold"};
+    return items[std::min<uint8_t>(index, 2)];
+  }
+  if (page == PAGE_SUB_OUTPUTS) {
+    if (!dspi.subSynth.outputsKnown) return "Unavailable";
+    const int out = subSynthOutputAt(dspi.subSynth.enabledOutputs, index);
+    return out < 0 ? String("No enabled outputs") : String("Output ") + String(out + 1);
+  }
   if (page == PAGE_MEDIA) {
     return mediaBrowserItemName(index);
   }
@@ -11000,6 +11179,7 @@ String screenTimeoutSummary()
 String currentEditValue()
 {
   if (!editActive) return "";
+  if (isSubSynthPage(menuPage)) return subSynthValueText(currentSubSynthParam(), editFloat);
   if (menuPage == PAGE_INPUT) return sourceMenuText((InputSource)editInt);
   if (menuPage == PAGE_LOUDNESS) {
     if (menuIndex == 0) return editBool ? "On" : "Off";
@@ -11045,6 +11225,16 @@ String currentEditValue()
 String menuItemValue(MenuPage page, uint8_t index)
 {
   if (editActive) return currentEditValue();
+  if (isSubSynthPage(page)) {
+    if (!dspi.subSynth.known || !dspi.subSynth.supported) return "Unavailable";
+    if (page == PAGE_SUB_OUTPUTS) {
+      const int out = dspi.subSynth.outputsKnown ?
+          subSynthOutputAt(dspi.subSynth.enabledOutputs, index) : -1;
+      return out < 0 ? "" : (((uint16_t)dspi.subSynth.value[SUB_MASK] & (1u << out)) ? "On" : "Off");
+    }
+    SubSynthParam p = subSynthParameter(page == PAGE_SUB_SYNTH ? 0 : 1, index);
+    return subSynthValueText(p, p == SUB_INVALID ? 0 : dspi.subSynth.value[p]);
+  }
   if (page == PAGE_MAIN) {
     if (index == 1 && !mediaPlayerPoc.mounted()) return "NO SD";
     return "";
@@ -11511,6 +11701,19 @@ void drawPsybassIcon(int16_t x, int16_t y, uint16_t colour)
   canvas->fillCircle(x + 14, y + 10, 1, colour);
 }
 
+void drawSubSynthIcon(int16_t x, int16_t y, uint16_t colour)
+{
+  // Compact original rendering of Console's waveform.path.badge.minus motif.
+  const int8_t points[][2] = {{4,8},{6,8},{7,3},{9,13},{11,0},
+                            {13,15},{15,5},{17,10},{19,8}};
+  for (uint8_t i = 1; i < sizeof(points) / sizeof(points[0]); ++i) {
+    canvas->drawLine(x + points[i-1][0], y + points[i-1][1],
+                     x + points[i][0], y + points[i][1], colour);
+  }
+  canvas->fillCircle(x + 3, y + 12, 3, colour);
+  canvas->drawFastHLine(x + 1, y + 12, 5, C_BLACK);
+}
+
 void drawTopStatus()
 {
   String src = sourceText();
@@ -11522,6 +11725,7 @@ void drawTopStatus()
   if (dspi.crossfeedEnabled) iconSpan += 27;
   if (dspi.levellerEnabled) iconSpan += 26;
   if (dspi.psybassSupported && dspi.psybassEnabled) iconSpan += 17;
+  if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) iconSpan += 22;
   int16_t presetLeft = 302 - fontTextWidth(FontMedium, preset);
   bool useSmall = 18 + fontTextWidth(FontMedium, src) + 12 + iconSpan > presetLeft - 8;
   const FontDef &sourceFont = useSmall ? FontSmall : FontMedium;
@@ -11543,6 +11747,10 @@ void drawTopStatus()
   }
   if (dspi.psybassSupported && dspi.psybassEnabled) {
     drawPsybassIcon(iconX, iconY, uiMainText());
+    iconX += 17;
+  }
+  if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
+    drawSubSynthIcon(iconX, iconY, uiMainText());
   }
 }
 
@@ -12101,6 +12309,15 @@ void drawFontCentredGlowColour(const FontDef &font, int16_t y, const String &tex
 
 void drawMenuTextNative(int16_t y, const String &text, uint16_t colour)
 {
+  // FontMenu lacks lowercase b. Use the complete font at the same cap height
+  // for the new title, including its full-screen on/off notification.
+  if (text == "Sub Synth") {
+    const uint8_t scale = 71;
+    const int16_t width = fontTextWidthScaledKerned(FontLarge, text, scale);
+    drawFontTextScaledKerned(FontLarge, (UI_W - width) / 2, y + 5,
+                            text, colour, scale);
+    return;
+  }
   // Native anti-aliased glyphs are intentionally drawn without a glow. This
   // keeps edges crisp and avoids the blocky look of scaled bitmap text.
   drawFontCentredVisual(FontMenu, y, text, colour);
@@ -12216,7 +12433,7 @@ void drawMenuValue(int16_t y, const String &value)
   }
 
   // Analog VU retains its compact named set and fixed text size.
-  if (menuPage == PAGE_THEME) {
+  if (menuPage == PAGE_THEME || isSubSynthPage(menuPage)) {
     drawFontCentredGlowColour(FontMedium, y + 27, value, valueColour);
     return;
   }
@@ -13297,7 +13514,7 @@ void drawPresetList()
 bool isSystemSettingsListPage(MenuPage page)
 {
   return page == PAGE_SYSTEM || page == PAGE_SCREEN_SETTINGS ||
-         page == PAGE_IDLE_SCREEN || page == PAGE_THEME;
+         page == PAGE_IDLE_SCREEN || page == PAGE_THEME || isSubSynthPage(page);
 }
 
 uint8_t themePaletteIndexForRow(uint8_t row)
@@ -13319,8 +13536,10 @@ void drawSystemSettingsList()
 
   const uint8_t count = menuItemCount(menuPage);
   menuIndex = count ? std::min<uint8_t>(menuIndex, count - 1) : 0;
-  for (uint8_t row = 0; row < count; row++) {
-    const int16_t y = ROW_Y + row * ROW_HEIGHT;
+  const uint8_t firstRow = isSubSynthPage(menuPage) ? (menuIndex / 4) * 4 : 0;
+  const uint8_t endRow = isSubSynthPage(menuPage) ? std::min<int>(count, firstRow + 4) : count;
+  for (uint8_t row = firstRow; row < endRow; row++) {
+    const int16_t y = ROW_Y + (row - firstRow) * ROW_HEIGHT;
     const bool selected = row == menuIndex;
     canvas->fillRect(4, y, UI_W - 8, ROW_HEIGHT - 1, C_BLACK);
     if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
@@ -13523,8 +13742,11 @@ int8_t mainIndexForPage(MenuPage page)
     case PAGE_CROSSFEED: return 4;
     case PAGE_LEVELLER: return 5;
     case PAGE_PSYBASS: return 6;
-    case PAGE_BLUETOOTH: return 7;
-    case PAGE_SYSTEM: return 8;
+    case PAGE_SUB_SYNTH: return 7;
+    case PAGE_SUB_SELECT: return 7;
+    case PAGE_SUB_OUTPUTS: return 7;
+    case PAGE_BLUETOOTH: return 8;
+    case PAGE_SYSTEM: return 9;
     default: return -1;
   }
 }
@@ -13533,15 +13755,21 @@ MenuPage pageForMainIndex(uint8_t index)
 {
   const MenuPage pages[] = {
     PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_LOUDNESS, PAGE_CROSSFEED,
-    PAGE_LEVELLER, PAGE_PSYBASS, PAGE_BLUETOOTH, PAGE_SYSTEM
+    PAGE_LEVELLER, PAGE_PSYBASS, PAGE_SUB_SYNTH, PAGE_BLUETOOTH, PAGE_SYSTEM
   };
-  return pages[std::min<uint8_t>(index, 8)];
+  return pages[std::min<uint8_t>(index, 9)];
 }
 
 void enterPage(MenuPage page)
 {
   encoderMenuDetentRemainder = 0;
   fadeUiOut();
+  if (isSubSynthPage(page) && dspi.connected) {
+    if (!dspi.subSynth.known) probeSubSynth(dspi.subSynth);
+    if (dspi.subSynth.supported && !syncSubSynthDetails(page == PAGE_SUB_OUTPUTS)) {
+      showToast("Sub Synth read failed");
+    }
+  }
   // Preset names are Console-owned metadata. Refresh them on demand so a
   // rename made on the PC appears without requiring a front-panel reboot.
   if (dspi.connected && (page == PAGE_PRESET || page == PAGE_INPUT)) {
@@ -13658,6 +13886,10 @@ void goBack()
     enterPage(PAGE_SCREEN_SETTINGS);
     return;
   }
+  if (menuPage == PAGE_SUB_SELECT || menuPage == PAGE_SUB_OUTPUTS) {
+    enterPage(PAGE_SUB_SYNTH);
+    return;
+  }
   if (menuPage != PAGE_MAIN) {
     if (menuPage == PAGE_MEDIA && leaveMediaFolder()) {
       return;
@@ -13674,6 +13906,15 @@ void goBack()
 
 void beginEdit()
 {
+  if (isSubSynthPage(menuPage)) {
+    const SubSynthParam p = currentSubSynthParam();
+    float current = 0;
+    if (p == SUB_INVALID || p == SUB_HEADROOM || !readSubSynthParam(p, current)) {
+      showToast("Unavailable"); drawMenu(); return;
+    }
+    dspi.subSynth.value[p] = current;
+    editFloat = current;
+  }
   editActive = true;
   if (menuPage == PAGE_INPUT) {
     editInt = (int)displayedPhysicalInputSource();
@@ -13751,6 +13992,15 @@ int wrapEditInt(int current, int direction, int step, int minimum, int maximum)
 void adjustEdit(int direction)
 {
   if (!editActive) return;
+  if (isSubSynthPage(menuPage)) {
+    const SubSynthParam p = currentSubSynthParam();
+    if (p < SUB_PARAM_COUNT) {
+      const auto &spec = subSynthSpecs[p];
+      editFloat = wrapEditFloat(editFloat, direction, spec.step, spec.minimum, spec.maximum);
+    }
+    drawMenu();
+    return;
+  }
   if (menuPage == PAGE_INPUT) {
     editInt = (int)nextInputSourceChoice((InputSource)editInt, direction);
   } else if (menuPage == PAGE_LOUDNESS) {
@@ -13824,7 +14074,13 @@ void applyEdit()
   bool ok = true;
   String successText = "Applied";
   String failureText = "DSPi error";
-  if (menuPage == PAGE_INPUT) {
+  if (isSubSynthPage(menuPage)) {
+    ok = writeSubSynthParam(currentSubSynthParam(), editFloat);
+    if (ok) {
+      float headroom = 0;
+      if (readSubSynthParam(SUB_HEADROOM, headroom)) dspi.subSynth.value[SUB_HEADROOM] = headroom;
+    }
+  } else if (menuPage == PAGE_INPUT) {
     InputSource selectedSource = (InputSource)editInt;
     // Any genuine input change takes ownership from the ESP S/PDIF player.
     // Clear even a parked/paused queue so a later Play cannot unexpectedly
@@ -14157,6 +14413,31 @@ void selectMenuItem()
     showToast("Unavailable");
     drawMenu();
     return;
+  }
+
+  if (isSubSynthPage(menuPage)) {
+    if (!dspi.subSynth.known || !dspi.subSynth.supported) {
+      showToast("Unavailable"); drawMenu(); return;
+    }
+    if (menuPage == PAGE_SUB_SYNTH && menuIndex == 4) { enterPage(PAGE_SUB_SELECT); return; }
+    if (menuPage == PAGE_SUB_SYNTH && menuIndex == 7) { enterPage(PAGE_SUB_OUTPUTS); return; }
+    if (menuPage == PAGE_SUB_SYNTH && menuIndex == 9) {
+      float value = 0;
+      if (readSubSynthParam(SUB_HEADROOM, value)) dspi.subSynth.value[SUB_HEADROOM] = value;
+      else showToast("DSPi error");
+      drawMenu(); return;
+    }
+    if (menuPage == PAGE_SUB_OUTPUTS) {
+      const int out = dspi.subSynth.outputsKnown ?
+          subSynthOutputAt(dspi.subSynth.enabledOutputs, menuIndex) : -1;
+      // Capture the original output identity before refreshing the visible mask.
+      uint8_t enabled = 0; float mask = 0;
+      bool ok = out >= 0 && getExactByte(0x73, enabled, out, false) && enabled == 1 &&
+                readSubSynthParam(SUB_MASK, mask) &&
+                writeSubSynthParam(SUB_MASK, subSynthToggleOutput((uint16_t)mask, out));
+      if (!syncSubSynthDetails(true)) dspi.subSynth.outputsKnown = false;
+      showToast(ok ? "Applied" : "Output unavailable"); drawMenu(); return;
+    }
   }
 
   beginEdit();
@@ -14543,6 +14824,21 @@ void dispatchUiAction(UiAction action)
       else {
         showToast(ok ? (String("Leveller ") + (target ? "On" : "Off"))
                      : (dspi.connected ? "DSPi error" : "NO DSPi"), 900);
+        redrawCurrentView();
+      }
+      break;
+    }
+    case ACT_SUB_SYNTH_TOGGLE: {
+      const bool fullScreen = uiView == VIEW_HOME;
+      float current = 0;
+      const bool ready = dspi.connected && dspi.subSynth.known && dspi.subSynth.supported &&
+                         readSubSynthParam(SUB_ENABLE, current);
+      const bool target = current == 0;
+      const bool ok = ready && writeSubSynthParam(SUB_ENABLE, target ? 1 : 0);
+      if (ok && fullScreen) showFeatureStateNotification("Sub Synth", target);
+      else {
+        showToast(ok ? (String("Sub Synth ") + (target ? "On" : "Off")) :
+                       (dspi.connected ? "Unavailable" : "NO DSPi"), 900);
         redrawCurrentView();
       }
       break;
