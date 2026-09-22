@@ -29,9 +29,11 @@ class SubSynthContracts(unittest.TestCase):
 
     def test_complete_font_is_used_for_new_title_and_editor(self):
         title = SOURCE.split("void drawMenuTextNative(", 1)[1].split("void drawMenuDots", 1)[0]
-        self.assertIn('text == "Sub Synth"', title)
-        self.assertIn("drawFontTextScaledKerned(FontLarge", title)
-        self.assertIn("menuPage == PAGE_THEME || isSubSynthPage(menuPage)", SOURCE)
+        menu_table = SOURCE.split("static const GlyphDef FontMenu_glyphs[] = {", 1)[1].split("};", 1)[0]
+        self.assertIn("{'b',", menu_table)
+        self.assertIn("drawFontCentredVisual(FontMenu", title)
+        self.assertNotIn('text == "Sub Synth"', title)
+        self.assertNotIn("menuPage == PAGE_THEME || isSubSynthPage(menuPage)", SOURCE)
 
     def test_all_sub_synth_value_characters_exist_in_complete_fonts(self):
         for font in ("FontSmall", "FontMedium", "FontLarge"):

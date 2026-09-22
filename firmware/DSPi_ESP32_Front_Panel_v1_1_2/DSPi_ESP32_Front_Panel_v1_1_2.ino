@@ -95,6 +95,7 @@
 #include "Mp3ArtworkPolicy.h"
 #include "ArtworkCache.h"
 #include "SubSynth.h"
+#include "UiReadability.h"
 #include "WifiTransferMode.h"
 
 #define DSPI_HAVE_NIMBLE 1
@@ -2213,6 +2214,55 @@ static const uint8_t FontMenu_61[] PROGMEM = {
   0x01, 0xAA, 0x01, 0x55, 0x04, 0x00, 0x01, 0x11, 0x06, 0xFF, 0x01, 0x33, 0x03, 0x00
 };
 
+// Lowercase b mirrors the native d glyph so Sub Synth uses the exact same
+// weight, anti-aliasing and cap scale as every established carousel title.
+static const uint8_t FontMenu_62[] PROGMEM = {
+  0x03, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x1C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x04, 0x00, 0x01, 0x11, 0x01, 0x66, 0x01, 0xBB, 0x01, 0xCC, 0x02, 0xEE, 0x01, 0xDD, 0x01, 0xBB,
+  0x01, 0x88, 0x01, 0x33, 0x0E, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x02, 0x00, 0x01, 0x11,
+  0x01, 0xAA, 0x0A, 0xFF, 0x01, 0xDD, 0x01, 0x55, 0x0C, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44,
+  0x01, 0x00, 0x01, 0x44, 0x01, 0xEE, 0x0D, 0xFF, 0x01, 0xBB, 0x01, 0x22, 0x0A, 0x00, 0x01, 0x22,
+  0x06, 0xFF, 0x02, 0x44, 0x10, 0xFF, 0x01, 0xDD, 0x01, 0x22, 0x09, 0x00, 0x01, 0x22, 0x06, 0xFF,
+  0x01, 0x66, 0x01, 0xEE, 0x11, 0xFF, 0x01, 0xEE, 0x01, 0x22, 0x08, 0x00, 0x01, 0x22, 0x06, 0xFF,
+  0x01, 0xEE, 0x05, 0xFF, 0x01, 0xCC, 0x01, 0x99, 0x02, 0x88, 0x01, 0xAA, 0x01, 0xEE, 0x08, 0xFF,
+  0x01, 0xCC, 0x08, 0x00, 0x01, 0x22, 0x0A, 0xFF, 0x01, 0x99, 0x01, 0x22, 0x06, 0x00, 0x01, 0x44,
+  0x01, 0xCC, 0x07, 0xFF, 0x01, 0x77, 0x07, 0x00, 0x01, 0x22, 0x08, 0xFF, 0x01, 0xEE, 0x01, 0x44,
+  0x0A, 0x00, 0x01, 0xAA, 0x06, 0xFF, 0x01, 0xEE, 0x01, 0x11, 0x06, 0x00, 0x01, 0x22, 0x08, 0xFF,
+  0x01, 0x44, 0x0C, 0x00, 0x01, 0xAA, 0x06, 0xFF, 0x01, 0x77, 0x06, 0x00, 0x01, 0x22, 0x07, 0xFF,
+  0x01, 0x88, 0x0D, 0x00, 0x01, 0x11, 0x01, 0xEE, 0x05, 0xFF, 0x01, 0xDD, 0x06, 0x00, 0x01, 0x22,
+  0x06, 0xFF, 0x01, 0xEE, 0x01, 0x11, 0x0E, 0x00, 0x01, 0x88, 0x06, 0xFF, 0x01, 0x22, 0x05, 0x00,
+  0x01, 0x22, 0x06, 0xFF, 0x01, 0x99, 0x0F, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x66, 0x05, 0x00,
+  0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x10, 0x00, 0x01, 0xEE, 0x05, 0xFF, 0x01, 0xAA, 0x05, 0x00,
+  0x01, 0x22, 0x06, 0xFF, 0x01, 0x11, 0x10, 0x00, 0x01, 0xAA, 0x05, 0xFF, 0x01, 0xCC, 0x05, 0x00,
+  0x01, 0x22, 0x05, 0xFF, 0x01, 0xEE, 0x11, 0x00, 0x01, 0x99, 0x05, 0xFF, 0x01, 0xDD, 0x05, 0x00,
+  0x01, 0x22, 0x05, 0xFF, 0x01, 0xDD, 0x11, 0x00, 0x01, 0x88, 0x05, 0xFF, 0x01, 0xEE, 0x05, 0x00,
+  0x01, 0x22, 0x05, 0xFF, 0x01, 0xDD, 0x11, 0x00, 0x01, 0x88, 0x05, 0xFF, 0x01, 0xEE, 0x05, 0x00,
+  0x01, 0x22, 0x05, 0xFF, 0x01, 0xEE, 0x11, 0x00, 0x01, 0x99, 0x05, 0xFF, 0x01, 0xEE, 0x05, 0x00,
+  0x01, 0x22, 0x06, 0xFF, 0x01, 0x11, 0x10, 0x00, 0x01, 0xAA, 0x05, 0xFF, 0x01, 0xCC, 0x05, 0x00,
+  0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x10, 0x00, 0x01, 0xEE, 0x05, 0xFF, 0x01, 0xBB, 0x05, 0x00,
+  0x01, 0x22, 0x06, 0xFF, 0x01, 0x88, 0x0F, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x88, 0x05, 0x00,
+  0x01, 0x22, 0x06, 0xFF, 0x01, 0xEE, 0x01, 0x11, 0x0E, 0x00, 0x01, 0x88, 0x06, 0xFF, 0x01, 0x44,
+  0x05, 0x00, 0x01, 0x22, 0x07, 0xFF, 0x01, 0x88, 0x0D, 0x00, 0x01, 0x11, 0x01, 0xEE, 0x05, 0xFF,
+  0x01, 0xEE, 0x01, 0x11, 0x05, 0x00, 0x01, 0x22, 0x08, 0xFF, 0x01, 0x33, 0x0C, 0x00, 0x01, 0xBB,
+  0x06, 0xFF, 0x01, 0x99, 0x06, 0x00, 0x01, 0x22, 0x08, 0xFF, 0x01, 0xEE, 0x01, 0x44, 0x0A, 0x00,
+  0x01, 0xAA, 0x07, 0xFF, 0x01, 0x22, 0x06, 0x00, 0x01, 0x22, 0x0A, 0xFF, 0x01, 0x99, 0x01, 0x22,
+  0x06, 0x00, 0x01, 0x44, 0x01, 0xCC, 0x07, 0xFF, 0x01, 0x99, 0x07, 0x00, 0x01, 0x22, 0x06, 0xFF,
+  0x01, 0xDD, 0x05, 0xFF, 0x01, 0xCC, 0x01, 0x99, 0x02, 0x88, 0x01, 0xAA, 0x01, 0xEE, 0x08, 0xFF,
+  0x01, 0xDD, 0x01, 0x11, 0x07, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x44, 0x01, 0xEE, 0x11, 0xFF,
+  0x01, 0xEE, 0x01, 0x33, 0x08, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x22, 0x01, 0x44, 0x10, 0xFF,
+  0x01, 0xEE, 0x01, 0x33, 0x09, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x22, 0x01, 0x00, 0x01, 0x44,
+  0x01, 0xDD, 0x0D, 0xFF, 0x01, 0xCC, 0x01, 0x33, 0x0A, 0x00, 0x01, 0x22, 0x06, 0xFF, 0x01, 0x22,
+  0x02, 0x00, 0x01, 0x11, 0x01, 0xAA, 0x0A, 0xFF, 0x01, 0xEE, 0x01, 0x66, 0x0C, 0x00, 0x01, 0x22,
+  0x06, 0xFF, 0x01, 0x22, 0x04, 0x00, 0x01, 0x11, 0x01, 0x77, 0x01, 0xBB, 0x01, 0xCC, 0x02, 0xEE,
+  0x01, 0xDD, 0x01, 0xBB, 0x01, 0x99, 0x01, 0x44, 0x0B, 0x00,
+};
+
 static const uint8_t FontMenu_63[] PROGMEM = {
   0x0C, 0x00, 0x01, 0x33, 0x01, 0x88, 0x01, 0xBB, 0x01, 0xCC, 0x01, 0xEE, 0x01, 0xFF, 0x01, 0xEE, 0x01, 0xCC, 0x01, 0xAA, 0x01, 0x66, 0x01, 0x22,
   0x13, 0x00, 0x01, 0x11, 0x01, 0x77, 0x01, 0xEE, 0x0B, 0xFF, 0x01, 0xBB, 0x01, 0x44, 0x10, 0x00, 0x01, 0x55, 0x01, 0xDD, 0x0F, 0xFF, 0x01, 0xAA,
@@ -2789,6 +2839,7 @@ static const GlyphDef FontMenu_glyphs[] = {
   {'T', 38, 45, 38, 0, 16, 368, FontMenu_54},
   {'U', 44, 45, 44, 0, 16, 674, FontMenu_55},
   {'a', 33, 32, 33, 0, 29, 542, FontMenu_61},
+  {'b', 36, 45, 36, 0, 16, 698, FontMenu_62},
   {'c', 33, 32, 33, 0, 29, 460, FontMenu_63},
   {'d', 36, 45, 36, 0, 16, 698, FontMenu_64},
   {'e', 34, 32, 34, 0, 29, 454, FontMenu_65},
@@ -2808,7 +2859,7 @@ static const GlyphDef FontMenu_glyphs[] = {
   {'v', 33, 32, 33, 0, 29, 460, FontMenu_76},
   {'y', 33, 45, 33, 0, 29, 558, FontMenu_79}
 };
-static const FontDef FontMenu = {FontMenu_glyphs, 33, 76, 15};
+static const FontDef FontMenu = {FontMenu_glyphs, 34, 76, 15};
 
 static const uint8_t FontLarge_41[] PROGMEM = {
   0x14, 0x00, 0x01, 0x11, 0x08, 0xCC, 0x01, 0x66, 0x28, 0x00, 0x01, 0x55, 0x08, 0xFF, 0x01, 0xCC, 0x28, 0x00, 0x01, 0xAA, 0x09, 0xFF, 0x01, 0x33,
@@ -6466,9 +6517,9 @@ uint16_t uiVolumeMeterColour()
   return themePaletteColour(volumeMeterPaletteIndex);
 }
 
-uint16_t uiAnalogVuColour()
+uint16_t uiAnalogVuColourForChoice(VuColourChoice choice)
 {
-  switch (analogVuColourChoice) {
+  switch (choice) {
     case VU_COLOUR_GREEN: return C_THEME_GREEN;
     case VU_COLOUR_AMBER: return C_THEME_AMBER;
     case VU_COLOUR_MAGENTA: return C_THEME_PINK;
@@ -6477,6 +6528,11 @@ uint16_t uiAnalogVuColour()
     case VU_COLOUR_CYAN:
     default: return C_CYAN;
   }
+}
+
+uint16_t uiAnalogVuColour()
+{
+  return uiAnalogVuColourForChoice(analogVuColourChoice);
 }
 
 uint16_t uiBackground() { return C_BLACK; }
@@ -6815,7 +6871,8 @@ int16_t fontVisualStartX(const FontDef &font, const String &text)
   return (UI_W - visibleWidth) / 2 - left;
 }
 
-void drawGlyphRle(int16_t x, int16_t y, const GlyphDef *g, uint16_t colour)
+void drawGlyphRle(int16_t x, int16_t y, const GlyphDef *g, uint16_t colour,
+                  bool cleanMenuGlyph = false)
 {
   if (!g) return;
   uint32_t pos = 0;
@@ -6837,7 +6894,9 @@ void drawGlyphRle(int16_t x, int16_t y, const GlyphDef *g, uint16_t colour)
       if (pos >= total) return;
       int16_t px = x + sourceX;
       int16_t py = y + sourceY;
-      if (px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
+      const bool suppress = cleanMenuGlyph &&
+          uiMenuGlyphAlpha(g->ch, sourceX, sourceY, alpha) == 0;
+      if (!suppress && px >= 0 && px < UI_W && py >= 0 && py < UI_H) {
         canvas->drawPixel(px, py, runColour);
       }
       pos++;
@@ -6865,7 +6924,8 @@ void drawFontText(const FontDef &font, int16_t x, int16_t y, const String &text,
     }
     const GlyphDef *g = findGlyph(font, ch);
     if (!g) continue;
-    drawGlyphRle(x + g->xOffset, y + g->yOffset, g, colour);
+    drawGlyphRle(x + g->xOffset, y + g->yOffset, g, colour,
+                 &font == &FontMenu);
     x += g->advance;
   }
 }
@@ -11720,12 +11780,15 @@ void drawTopStatus()
   String preset = presetText();
   drawFontRight(FontMedium, 302, 18, preset, uiMainText());
 
-  int16_t iconSpan = 0;
-  if (dspi.loudnessEnabled) iconSpan += 25;
-  if (dspi.crossfeedEnabled) iconSpan += 27;
-  if (dspi.levellerEnabled) iconSpan += 26;
-  if (dspi.psybassSupported && dspi.psybassEnabled) iconSpan += 17;
-  if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) iconSpan += 22;
+  uint8_t iconMask = 0;
+  if (dspi.loudnessEnabled) iconMask |= UI_FEATURE_LOUDNESS;
+  if (dspi.crossfeedEnabled) iconMask |= UI_FEATURE_CROSSFEED;
+  if (dspi.levellerEnabled) iconMask |= UI_FEATURE_LEVELLER;
+  if (dspi.psybassSupported && dspi.psybassEnabled) iconMask |= UI_FEATURE_PSY_BASS;
+  if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
+    iconMask |= UI_FEATURE_SUB_SYNTH;
+  }
+  const int16_t iconSpan = uiFeatureIconSpan(iconMask);
   int16_t presetLeft = 302 - fontTextWidth(FontMedium, preset);
   bool useSmall = 18 + fontTextWidth(FontMedium, src) + 12 + iconSpan > presetLeft - 8;
   const FontDef &sourceFont = useSmall ? FontSmall : FontMedium;
@@ -11734,23 +11797,19 @@ void drawTopStatus()
   int16_t iconX = 18 + fontTextWidth(sourceFont, src) + 12;
   int16_t iconY = 22;
   if (dspi.loudnessEnabled) {
-    drawEarIcon(iconX, iconY, uiMainText());
-    iconX += 25;
+    drawEarIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LOUDNESS), iconY, uiMainText());
   }
   if (dspi.crossfeedEnabled) {
-    drawHeadphonesIcon(iconX, iconY, uiMainText());
-    iconX += 27;
+    drawHeadphonesIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_CROSSFEED), iconY, uiMainText());
   }
   if (dspi.levellerEnabled) {
-    drawLevellerIcon(iconX, iconY, uiMainText());
-    iconX += 26;
+    drawLevellerIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LEVELLER), iconY, uiMainText());
   }
   if (dspi.psybassSupported && dspi.psybassEnabled) {
-    drawPsybassIcon(iconX, iconY, uiMainText());
-    iconX += 17;
+    drawPsybassIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_PSY_BASS), iconY, uiMainText());
   }
   if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
-    drawSubSynthIcon(iconX, iconY, uiMainText());
+    drawSubSynthIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_SUB_SYNTH), iconY, uiMainText());
   }
 }
 
@@ -12309,15 +12368,6 @@ void drawFontCentredGlowColour(const FontDef &font, int16_t y, const String &tex
 
 void drawMenuTextNative(int16_t y, const String &text, uint16_t colour)
 {
-  // FontMenu lacks lowercase b. Use the complete font at the same cap height
-  // for the new title, including its full-screen on/off notification.
-  if (text == "Sub Synth") {
-    const uint8_t scale = 71;
-    const int16_t width = fontTextWidthScaledKerned(FontLarge, text, scale);
-    drawFontTextScaledKerned(FontLarge, (UI_W - width) / 2, y + 5,
-                            text, colour, scale);
-    return;
-  }
   // Native anti-aliased glyphs are intentionally drawn without a glow. This
   // keeps edges crisp and avoids the blocky look of scaled bitmap text.
   drawFontCentredVisual(FontMenu, y, text, colour);
@@ -12408,6 +12458,26 @@ void drawPaletteSwatchEditor(int16_t y)
   }
 }
 
+void drawAnalogVuSwatchEditor(int16_t y)
+{
+  const uint8_t selected = (uint8_t)constrain(
+      editInt, 0, VU_COLOUR_CHOICE_COUNT - 1);
+  const VuColourChoice choice = (VuColourChoice)selected;
+  const uint16_t colour = uiAnalogVuColourForChoice(choice);
+  canvas->fillCircle(UI_W / 2, y + 28, 27, colour);
+  canvas->drawCircle(UI_W / 2, y + 28, 28, uiMainText());
+  drawFontCentredGlowColour(FontMedium, y + 61,
+                            vuColourChoiceText(choice), uiMainText());
+
+  for (uint8_t index = 0; index < VU_COLOUR_CHOICE_COUNT; ++index) {
+    const int16_t x = uiAnalogSwatchX(index);
+    canvas->fillCircle(x, y + 103, 7,
+                       uiAnalogVuColourForChoice((VuColourChoice)index));
+    canvas->drawCircle(x, y + 103, index == selected ? 9 : 8,
+                       index == selected ? uiMainText() : uiDimText());
+  }
+}
+
 void drawMenuValue(int16_t y, const String &value)
 {
   bool selectedForEdit = editActive && menuPage != PAGE_MAIN;
@@ -12432,9 +12502,8 @@ void drawMenuValue(int16_t y, const String &value)
     return;
   }
 
-  // Analog VU retains its compact named set and fixed text size.
-  if (menuPage == PAGE_THEME || isSubSynthPage(menuPage)) {
-    drawFontCentredGlowColour(FontMedium, y + 27, value, valueColour);
+  if (menuPage == PAGE_THEME && menuIndex == 3) {
+    drawAnalogVuSwatchEditor(y);
     return;
   }
 
@@ -12760,10 +12829,9 @@ void drawWifiTransferConfirmation()
   drawBase();
   drawFontCentredGlow(FontMedium, 8, "WI-FI TRANSFER");
   drawTaperLine(UI_W / 2, 44, 238, 1, uiAccentDark());
-  drawFontCentredGlowColour(FontSmall, 60, "Playback will stop", uiMainText());
-  drawFontCentredGlowColour(FontSmall, 86,
+  drawFontCentredGlowColour(FontMedium, 56, "Playback will stop", uiMainText());
+  drawFontCentredGlowColour(FontMedium, 88,
                             "BLE remote will disconnect", uiMainText());
-  drawFontCentredGlowColour(FontSmall, 112, "Do not remove power", C_BLUE);
 
   const uint16_t startColour = wifiTransferConfirmStart ? uiMainText() : uiDimText();
   const uint16_t cancelColour = wifiTransferConfirmStart ? uiDimText() : uiMainText();
@@ -12774,8 +12842,6 @@ void drawWifiTransferConfirmation()
   }
   drawFontText(FontMedium, 46, 161, "START", startColour);
   drawFontText(FontMedium, 193, 161, "CANCEL", cancelColour);
-  drawFontCentredGlowColour(FontSmall, 211,
-                            "Left / Right, then Select", uiDimText());
   flushCanvasLocked();
 }
 
@@ -12794,31 +12860,28 @@ void drawWifiTransferScreen()
   drawBase();
   drawFontCentredGlow(FontMedium, 1, "WI-FI TRANSFER");
   drawTaperLine(UI_W / 2, 35, 238, 1, uiAccentDark());
-  drawFontCentredGlowColour(FontSmall, 42, "Network", uiDimText());
-  drawFontCentredGlowColour(FontSmall, 61,
+  drawFontCentredGlowColour(FontMedium, 42, "Network", uiAccent());
+  drawFontCentredGlowColour(FontMedium, 66,
                             wifiTransferUiSsid[0]
                               ? wifiTransferUiSsid : "Starting access point",
                             uiMainText());
-  drawFontCentredGlowColour(FontSmall, 82, "Password", uiDimText());
-  drawFontCentredGlowColour(FontSmall, 101,
+  drawFontCentredGlowColour(FontMedium, 90, "Password", uiAccent());
+  drawFontCentredGlowColour(FontMedium, 114,
                             wifiTransferUiPassword[0]
                               ? wifiTransferUiPassword : "Preparing...",
                             uiMainText());
   String openLine = String("Open: ") +
       (wifiTransferUiIp[0] ? wifiTransferUiIp : "192.168.4.1");
-  drawFontCentredGlowColour(FontSmall, 124, openLine, uiMainText());
-  drawFontCentredGlowColour(FontSmall, 146, "BLE remote inactive", uiDimText());
-  drawFontCentredGlowColour(FontSmall, 166, "Do not remove power", C_BLUE);
+  openLine = ellipsizeFontText(FontMedium, openLine, UI_W - 18);
+  drawFontCentredGlowColour(FontMedium, 143, openLine, uiMainText());
   String status = cleanDisplayText(String(wifiTransferUiStatus), 80);
-  status = ellipsizeFontText(FontSmall, status, UI_W - 18);
-  drawFontCentredGlowColour(FontSmall, 184, status, uiMainText());
+  status = ellipsizeFontText(FontMedium, status, UI_W - 18);
+  drawFontCentredGlowColour(FontMedium, 174, status, uiMainText());
   String progress = cleanDisplayText(String(wifiTransferUiProgress), 80);
-  progress = ellipsizeFontText(FontSmall, progress, UI_W - 18);
+  progress = ellipsizeFontText(FontMedium, progress, UI_W - 18);
   if (progress.length()) {
-    drawFontCentredGlowColour(FontSmall, 203, progress, uiMainText());
+    drawFontCentredGlowColour(FontMedium, 205, progress, uiMainText());
   }
-  drawFontCentredGlowColour(FontSmall, 221,
-                            "Finish safely in browser", uiDimText());
 
   // Never wait indefinitely for the shared LCD/SD SPI bus while the transfer
   // lifecycle is changing SD ownership.  Render to the canvas immediately,
@@ -13545,19 +13608,22 @@ void drawSystemSettingsList()
     if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
 
     String value = menuItemValue(menuPage, row);
-    const bool paletteSwatch = menuPage == PAGE_THEME && row < 3;
-    const int16_t valueWidth = paletteSwatch ? 28 : (value.length()
-        ? std::min<int16_t>(105, fontTextWidth(FontSmall, value)) : 0);
-    const int16_t labelWidth = UI_W - 30 - valueWidth;
-    String label = ellipsizeFontText(
-        FontMedium, menuItemName(menuPage, row), labelWidth);
-    drawFontText(FontMedium, 13, y + 4, label, uiMainText());
+    const bool paletteSwatch = menuPage == PAGE_THEME && row < 4;
+    if (paletteSwatch) value = "";
+    const int16_t requestedValueWidth = paletteSwatch ? 28 :
+        (value.length() ? fontTextWidth(FontMedium, value) : 0);
+    const UiListColumns columns = uiListColumns(UI_W, requestedValueWidth);
+    String label = ellipsizeFontText(FontMedium,
+        menuItemName(menuPage, row), columns.labelWidth);
+    drawFontText(FontMedium, columns.labelX, y + 4, label, uiMainText());
     if (value.length()) {
-      value = ellipsizeFontText(FontSmall, value, 105);
-      drawFontRight(FontSmall, UI_W - 13, y + 8, value, uiAccent());
+      value = ellipsizeFontText(FontMedium, value, columns.valueWidth);
+      drawFontRight(FontMedium, columns.valueRight, y + 4, value, uiAccent());
     }
     if (paletteSwatch) {
-      const uint16_t swatch = themePaletteColour(themePaletteIndexForRow(row));
+      const uint16_t swatch = row < 3
+          ? themePaletteColour(themePaletteIndexForRow(row))
+          : uiAnalogVuColourForChoice(analogVuColourChoice);
       canvas->fillCircle(UI_W - 17, y + 17, 9, swatch);
       canvas->drawCircle(UI_W - 17, y + 17, 10, uiDimText());
     }
@@ -13569,8 +13635,9 @@ void drawSystemSettingsList()
   }
 
   if (toastText.length() && (long)(toastUntil - millis()) > 0) {
-    canvas->fillRect(12, 213, UI_W - 24, 24, C_BLACK);
-    drawFontCentredGlowColour(FontSmall, 214, toastText, uiAccent());
+    canvas->fillRect(8, 210, UI_W - 16, 29, C_BLACK);
+    const String toast = ellipsizeFontText(FontMedium, toastText, UI_W - 24);
+    drawFontCentredGlowColour(FontMedium, 211, toast, uiAccent());
   }
   flushCanvasLocked();
 }
@@ -13651,10 +13718,11 @@ void drawStatusScreen()
   drawFontCentredGlow(FontMedium, 8, "Status");
   drawTaperLine(UI_W / 2, 44, 220, 1, uiAccentDark());
 
-  String primary = dspi.connected ? "DSPi ready" : "Communication fault";
-  uint16_t primaryColour = dspi.connected ? uiAccent() : uiFault();
-
-  drawFontCentredGlowColour(FontMedium, 55, primary, primaryColour);
+  int16_t rowY = 54;
+  if (!dspi.connected) {
+    drawFontCentredGlowColour(FontMedium, rowY, "Communication fault", uiFault());
+    rowY += 31;
+  }
   String firmwareLine = "DSPi FW unavailable";
   if (dspi.connected) {
     String pico = dspi.platform == 0 ? "RP2040" : "RP2350";
@@ -13666,18 +13734,22 @@ void drawStatusScreen()
     }
     firmwareLine = pico + "  " + firmware;
   }
-  drawFontCentredGlowColour(FontSmall, 96, firmwareLine,
+  drawFontCentredGlowColour(FontMedium, rowY, firmwareLine,
                             dspi.connected ? uiMainText() : uiDimText());
-  drawFontCentredGlowColour(FontSmall, 128,
+  rowY += 31;
+  drawFontCentredGlowColour(FontMedium, rowY,
                             dspi.connected ? "UART linked at 115200" : "UART offline",
                             dspi.connected ? uiAccent() : uiFault());
+  rowY += 31;
   String remote = bleConnected ? "Remote connected" :
                   (bleProfileValid ? "Remote configured" : "No remote saved");
-  drawFontCentredGlowColour(FontSmall, 158, remote,
+  drawFontCentredGlowColour(FontMedium, rowY, remote,
                             bleConnected ? uiAccent() : uiDimText());
-  drawFontCentredGlow(FontSmall, 184, "Panel v1.2.0");
+  rowY += 31;
+  drawFontCentredGlow(FontMedium, rowY, "Panel v1.2.0");
   if (mediaPlayerPoc.mounted()) {
-    drawFontCentredGlowColour(FontSmall, 210, "SD card mounted", uiAccent());
+    rowY += 31;
+    drawFontCentredGlowColour(FontMedium, rowY, "SD card mounted", uiAccent());
   }
 
   flushCanvasLocked();

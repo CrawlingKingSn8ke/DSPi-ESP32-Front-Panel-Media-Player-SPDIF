@@ -49,7 +49,7 @@ class RenderEfficiencyContracts(unittest.TestCase):
         glyphs = re.findall(
             r"\{'[^']',\s*(\d+),\s*(\d+),.*?,\s*(Font\w+)\}", INO
         )
-        self.assertEqual(230, len(glyphs))
+        self.assertEqual(231, len(glyphs))
         for width_text, height_text, array_name in glyphs:
             width = int(width_text)
             total = width * int(height_text)
