@@ -1,5 +1,25 @@
 # DSPi ESP32 Front Panel v1.2.1
 
+## r2 maintenance release (2026-09-22)
+
+Five commits after the original `v1.2.1` tag are included in the new
+`v1.2.1-r2` release while the original release remains available:
+
+- `f30259d`: bound exact JPEG/decoded-artwork caching to PSRAM so repeat
+  artwork can skip JPEG decoding without changing the first-load delay.
+- `27d3435`: cache up to three exact folder pages for repeat navigation;
+  invalidate on mount and Wi-Fi transfer changes.
+- `5305145`: add compatible DSPi beta3 Sub Synth control, enabled-output
+  filtering, Link Pairs, Home symbol, shortcut and on/off notifications.
+- `80781e0`: enlarge menu values, Status and Wi-Fi details, add Analog VU
+  swatches, and space Psy Bass/Sub Synth status symbols.
+- `114c94e`: repair the photographed `h` and `R` menu glyphs and enlarge the
+  Remote Key Map's coloured button label.
+
+The r2 binary passed 137 Python contracts, four native C++ syntax checks and
+the ESP32-S3 production build. The final bitmap changes were previewed; user
+hardware confirmation remains outstanding.
+
 ## S/PDIF transmitter and media-player hardening
 
 This release packages the stable S/PDIF media-player firmware as a clean, traceable build. It preserves the complete front-panel feature set and the earlier SD/FLAC playback work, then adds the BLE, local OTA and interface maintenance listed below.

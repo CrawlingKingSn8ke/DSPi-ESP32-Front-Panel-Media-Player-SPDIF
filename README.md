@@ -7,9 +7,19 @@ Stable ESP32-S3 front-panel firmware with an integrated SD-card music player and
 
 The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 
-## Version 1.2.1
+## Version 1.2.1 — r2 maintenance release
 
 This is the current stable S/PDIF media-player build. It retains the complete VU IMP interface, presets, SD music player and local Wi-Fi transfer/update portal, together with the hardened 24-bit S/PDIF transmitter and continuous same-rate carrier transitions.
+
+### Added since the original v1.2.1 release
+
+- Repeated embedded album artwork can reuse an exact JPEG match and decoded image from a bounded PSRAM cache. The first load, SD read and existing audio-safety delay are unchanged.
+- Repeated folder-page requests can reuse up to three exact pages from a bounded PSRAM cache. New pages still scan the SD card; mount and Wi-Fi transfer changes clear the cache.
+- **Sub Synth** controls on compatible DSPi v1.1.6-beta3 or newer firmware: enable, three bands, selectivity, depth/hold, ceiling, LF boost, enabled matrix outputs and Link Pairs. The Home icon, D-pad shortcut and full-screen on/off notification use the same path as the other DSP features. The panel reads and preserves the DSPi's existing settings.
+- Larger, consistent settings values, Status and Wi-Fi Transfer text; an Analog VU colour swatch selector; and spacing between Psy Bass and Sub Synth icons. The Wi-Fi page now shows the essential connection and transfer status information.
+- Corrected native **Sub Synth** and **Remote** menu glyphs and enlarged the Remote Key Map's coloured button label.
+
+The r2 maintenance tag identifies the current release files. The firmware and build scripts retain version 1.2.1. The original `v1.2.1` release remains available for rollback.
 
 ### Main changes
 
@@ -33,7 +43,7 @@ This is the current stable S/PDIF media-player build. It retains the complete VU
 - Browser firmware updates can start without an SD card; song transfer still requires one.
 - Preserves the v1.1.3 S/PDIF 4 compatibility, Wi-Fi Music Transfer, BLE remote and SD music-player features.
 
-See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [SPDIF-IMPLEMENTATION.md](SPDIF-IMPLEMENTATION.md) for the implementation, compatibility and wiring details. The `SHA256SUMS-v1.2.1.txt` release asset contains the verified firmware checksums.
+See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [SPDIF-IMPLEMENTATION.md](SPDIF-IMPLEMENTATION.md) for the implementation, compatibility and wiring details. The latest release's `SHA256SUMS-v1.2.1-r2.txt` asset contains the verified firmware checksums.
 
 ## Hardware
 
@@ -46,6 +56,7 @@ See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [
 ## DSPi compatibility
 
 - DSPi firmware v1.1.5/V28 and compatible v1.1.6 beta builds: four S/PDIF inputs and verified runtime notifications are supported.
+- Sub Synth requires compatible DSPi v1.1.6-beta3 or newer firmware with the extended control commands. Unsupported firmware will not expose a working Sub Synth control set.
 - Earlier compatible DSPi firmware: the fourth S/PDIF source remains hidden when only three inputs are reported.
 
 ## Wiring
@@ -82,7 +93,7 @@ Power encoder modules from 3.3 V, not 5 V.
 
 ## Flash on Windows
 
-1. Download the v1.2.1 release source or clone `main`.
+1. Download the latest v1.2.1 maintenance release source or clone `main`.
 2. Install Python 3 if `py --version` does not show a version.
 3. Connect the ESP32-S3-LCD-2 by USB.
 4. Close Arduino Serial Monitor and any program using the COM port.
@@ -148,6 +159,8 @@ Supported audio formats:
 
 The player supports folder browsing, artwork, pause/resume, seeking, previous/next track and automatic track advance. Normal playback uses the shared SD interface at 20 MHz, with lower-speed fallbacks when required.
 
+The artwork and folder-page caches use bounded PSRAM and fall back to normal reads when memory is unavailable. They improve repeat visits; they do not remove the initial artwork delay or accelerate the first folder scan.
+
 Restrictions:
 
 - Playback and Wi-Fi Music Transfer cannot use the SD card at the same time.
@@ -161,7 +174,7 @@ Restrictions:
 
 The first installation must use the full USB image. After that, future application updates can be installed from the panel's local Wi-Fi page while preserving BLE bonds, remote mappings, presets and screen settings. An SD card is not required for firmware updates.
 
-1. Download `DSPi-ESP32-Front-Panel-v1.2.1-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
+1. Download `DSPi-ESP32-Front-Panel-v1.2.1-r2-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
 2. Stop or pause local music playback.
 3. Open **System > Wi-Fi Transfer/Update** on the panel and confirm **Start**.
 4. Connect to the network shown on the panel and open its displayed browser address.
@@ -171,7 +184,7 @@ The first installation must use the full USB image. After that, future applicati
 8. After the restart, switch off or disconnect all power for at least 10 seconds, then power the unit back on before using the media player. A software restart does not power-cycle the SD card, so this step is required for a reliable SD remount.
 
 > [!WARNING]
-> Never upload `DSPi-ESP32-Front-Panel-v1.2.1-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
+> Never upload `DSPi-ESP32-Front-Panel-v1.2.1-r2-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
 
 ## Wi-Fi Music Transfer
 
