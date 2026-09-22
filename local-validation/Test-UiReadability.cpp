@@ -25,10 +25,5 @@ int main()
   assert(uiAnalogSwatchX(0) == 65);
   assert(uiAnalogSwatchX(5) == 255);
 
-  assert(uiMenuGlyphAlpha('R', 20, 20, 121) == 0);
-  assert(uiMenuGlyphAlpha('R', 21, 20, 32) == 0);
-  assert(uiMenuGlyphAlpha('R', 20, 21, 231) == 231);
-  assert(uiMenuGlyphAlpha('D', 20, 20, 121) == 121);
-
   std::puts("UI readability layout policy passed");
 }

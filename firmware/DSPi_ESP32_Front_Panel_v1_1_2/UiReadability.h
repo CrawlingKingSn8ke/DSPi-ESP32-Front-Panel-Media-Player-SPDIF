@@ -71,10 +71,3 @@ constexpr int16_t uiAnalogSwatchX(uint8_t index)
 {
   return static_cast<int16_t>(65 + index * 38);
 }
-
-constexpr uint8_t uiMenuGlyphAlpha(char glyph, uint8_t x, uint8_t y,
-                                   uint8_t alpha)
-{
-  // The legacy R bitmap contains two isolated pixels inside its counter.
-  return glyph == 'R' && y == 20 && (x == 20 || x == 21) ? 0 : alpha;
-}
