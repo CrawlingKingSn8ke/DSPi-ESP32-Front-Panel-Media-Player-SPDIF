@@ -5272,7 +5272,8 @@ enum MenuPage {
   PAGE_TUBE,
   PAGE_TUBE_OUTPUTS,
   PAGE_LIMITER,
-  PAGE_LIMITER_OUTPUT
+  PAGE_LIMITER_OUTPUT,
+  PAGE_FEATURES
 };
 
 enum LegacyUiColourChoice : uint8_t {
@@ -5833,7 +5834,7 @@ int editOriginalInt = 0;
 bool editBool = false;
 bool editOriginalBool = false;
 
-uint8_t rememberedMenuIndex[PAGE_LIMITER_OUTPUT + 1] = {};
+uint8_t rememberedMenuIndex[PAGE_FEATURES + 1] = {};
 uint8_t limiterDetailOutput = 0xff;
 uint8_t lastMainMenuIndex = 0;
 
@@ -11189,6 +11190,7 @@ String pageTitle(MenuPage page)
 {
   switch (page) {
     case PAGE_MAIN: return "Menu";
+    case PAGE_FEATURES: return "Features";
     case PAGE_INPUT: return "Input";
     case PAGE_MEDIA: return "Music Library";
     case PAGE_PRESET: return "Preset";
@@ -11304,7 +11306,8 @@ void clampBleMenuIndex()
 uint8_t menuItemCount(MenuPage page)
 {
   switch (page) {
-    case PAGE_MAIN: return 12;
+    case PAGE_MAIN: return 5;
+    case PAGE_FEATURES: return 7;
     case PAGE_INPUT: return 1;
     case PAGE_MEDIA: return mediaBrowserItemCount();
     case PAGE_PRESET: return 10;
@@ -11323,7 +11326,7 @@ uint8_t menuItemCount(MenuPage page)
         dspi.limiter.outputsKnown ? tubeOutputCount(dspi.limiter.enabledOutputs) : 0);
     case PAGE_LIMITER_OUTPUT: return 4;
     case PAGE_BLUETOOTH: return bleMenuItemCount();
-    case PAGE_SYSTEM: return 4;
+    case PAGE_SYSTEM: return 5;
     case PAGE_MEDIA_SETTINGS: return 1;
     case PAGE_SCREEN_SETTINGS: return 4;
     case PAGE_IDLE_SCREEN:
@@ -11336,8 +11339,13 @@ uint8_t menuItemCount(MenuPage page)
 String menuItemName(MenuPage page, uint8_t index)
 {
   if (page == PAGE_MAIN) {
-    const char *items[] = {"Input", "Music", "Preset", "Loudness", "Crossfeed", "Leveller", "Psy Bass", "Sub Synth", "Remote", "System", "Tube", "Limiter"};
-    return items[std::min<uint8_t>(index, 11)];
+    const char *items[] = {"Input", "Music", "Preset", "Features", "System"};
+    return items[std::min<uint8_t>(index, 4)];
+  }
+  if (page == PAGE_FEATURES) {
+    const char *items[] = {"Loudness", "Crossfeed", "Leveller", "Psy Bass",
+                           "Sub Synth", "Tube Modeller", "Output Limiter"};
+    return items[std::min<uint8_t>(index, 6)];
   }
   if (page == PAGE_INPUT) return "Source";
   if (page == PAGE_SUB_SYNTH) {
@@ -11397,9 +11405,9 @@ String menuItemName(MenuPage page, uint8_t index)
   }
   if (page == PAGE_SYSTEM) {
     const char *items[] = {
-      "Status", "Screen Settings", "Volume Limit", "WiFi Transfer/Update"
+      "Status", "Screen Settings", "Volume Limit", "WiFi Transfer/Update", "Remote"
     };
-    return items[std::min<uint8_t>(index, 3)];
+    return items[std::min<uint8_t>(index, 4)];
   }
   if (page == PAGE_MEDIA_SETTINGS) return "Seek Step";
   if (page == PAGE_SCREEN_SETTINGS) {
@@ -13849,7 +13857,10 @@ void drawPresetList()
 
 bool isSystemSettingsListPage(MenuPage page)
 {
-  return page == PAGE_SYSTEM || page == PAGE_SCREEN_SETTINGS ||
+  return page == PAGE_FEATURES || page == PAGE_SYSTEM ||
+         page == PAGE_LOUDNESS || page == PAGE_CROSSFEED ||
+         page == PAGE_LEVELLER || page == PAGE_PSYBASS ||
+         page == PAGE_BLUETOOTH || page == PAGE_SCREEN_SETTINGS ||
          page == PAGE_IDLE_SCREEN || page == PAGE_THEME ||
          isSubSynthPage(page) || isTubeLimiterPage(page);
 }
@@ -14087,19 +14098,20 @@ int8_t mainIndexForPage(MenuPage page)
     case PAGE_INPUT: return 0;
     case PAGE_MEDIA: return 1;
     case PAGE_PRESET: return 2;
-    case PAGE_LOUDNESS: return 3;
-    case PAGE_CROSSFEED: return 4;
-    case PAGE_LEVELLER: return 5;
-    case PAGE_PSYBASS: return 6;
-    case PAGE_SUB_SYNTH: return 7;
-    case PAGE_SUB_SELECT: return 7;
-    case PAGE_SUB_OUTPUTS: return 7;
-    case PAGE_BLUETOOTH: return 8;
-    case PAGE_SYSTEM: return 9;
+    case PAGE_FEATURES:
+    case PAGE_LOUDNESS:
+    case PAGE_CROSSFEED:
+    case PAGE_LEVELLER:
+    case PAGE_PSYBASS:
+    case PAGE_SUB_SYNTH:
+    case PAGE_SUB_SELECT:
+    case PAGE_SUB_OUTPUTS:
     case PAGE_TUBE:
-    case PAGE_TUBE_OUTPUTS: return 10;
+    case PAGE_TUBE_OUTPUTS:
     case PAGE_LIMITER:
-    case PAGE_LIMITER_OUTPUT: return 11;
+    case PAGE_LIMITER_OUTPUT: return 3;
+    case PAGE_BLUETOOTH: return 4;
+    case PAGE_SYSTEM: return 4;
     default: return -1;
   }
 }
@@ -14107,11 +14119,9 @@ int8_t mainIndexForPage(MenuPage page)
 MenuPage pageForMainIndex(uint8_t index)
 {
   const MenuPage pages[] = {
-    PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_LOUDNESS, PAGE_CROSSFEED,
-    PAGE_LEVELLER, PAGE_PSYBASS, PAGE_SUB_SYNTH, PAGE_BLUETOOTH, PAGE_SYSTEM,
-    PAGE_TUBE, PAGE_LIMITER
+    PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_FEATURES, PAGE_SYSTEM
   };
-  return pages[std::min<uint8_t>(index, 11)];
+  return pages[std::min<uint8_t>(index, 4)];
 }
 
 void enterPage(MenuPage page)
@@ -14257,6 +14267,14 @@ void goBack()
   }
   if (menuPage == PAGE_TUBE_OUTPUTS) { enterPage(PAGE_TUBE); return; }
   if (menuPage == PAGE_LIMITER_OUTPUT) { enterPage(PAGE_LIMITER); return; }
+  if (menuPage == PAGE_BLUETOOTH) { enterPage(PAGE_SYSTEM); return; }
+  if (menuPage == PAGE_LOUDNESS || menuPage == PAGE_CROSSFEED ||
+      menuPage == PAGE_LEVELLER || menuPage == PAGE_PSYBASS ||
+      menuPage == PAGE_SUB_SYNTH || menuPage == PAGE_TUBE ||
+      menuPage == PAGE_LIMITER) {
+    enterPage(PAGE_FEATURES);
+    return;
+  }
   if (menuPage != PAGE_MAIN) {
     if (menuPage == PAGE_MEDIA && leaveMediaFolder()) {
       return;
@@ -14719,6 +14737,14 @@ void selectMenuItem()
     return;
   }
 
+  if (menuPage == PAGE_FEATURES) {
+    const MenuPage pages[] = {PAGE_LOUDNESS, PAGE_CROSSFEED, PAGE_LEVELLER,
+                              PAGE_PSYBASS, PAGE_SUB_SYNTH, PAGE_TUBE,
+                              PAGE_LIMITER};
+    enterPage(pages[std::min<uint8_t>(menuIndex, 6)]);
+    return;
+  }
+
   if (menuPage == PAGE_SYSTEM && menuIndex == 0) {
     transitionToStatusScreen();
     return;
@@ -14731,6 +14757,11 @@ void selectMenuItem()
 
   if (menuPage == PAGE_SYSTEM && menuIndex == 3) {
     beginWifiTransferConfirmation();
+    return;
+  }
+
+  if (menuPage == PAGE_SYSTEM && menuIndex == 4) {
+    enterPage(PAGE_BLUETOOTH);
     return;
   }
 

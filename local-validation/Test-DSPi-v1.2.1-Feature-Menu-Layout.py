@@ -78,6 +78,40 @@ static_assert(!uiShowDownArrow(false, false));
             self.assertEqual(function_body(current, signature),
                              function_body(previous, signature), signature)
 
+    def test_top_level_and_feature_order(self):
+        sketch = SKETCH.read_text()
+        counts = function_body(sketch, "uint8_t menuItemCount(MenuPage page)")
+        self.assertIn("case PAGE_MAIN: return 5;", counts)
+        self.assertIn("case PAGE_FEATURES: return 7;", counts)
+        self.assertIn("case PAGE_SYSTEM: return 5;", counts)
+        names = function_body(sketch, "String menuItemName(MenuPage page, uint8_t index)")
+        self.assertIn('"Input", "Music", "Preset", "Features", "System"', names)
+        self.assertIn('"Loudness", "Crossfeed", "Leveller", "Psy Bass",', names)
+        self.assertIn('"Sub Synth", "Tube Modeller", "Output Limiter"', names)
+        self.assertIn('"WiFi Transfer/Update", "Remote"', names)
+        pages = function_body(sketch, "MenuPage pageForMainIndex(uint8_t index)")
+        self.assertIn("PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_FEATURES, PAGE_SYSTEM", pages)
+        main_index = function_body(sketch, "int8_t mainIndexForPage(MenuPage page)")
+        self.assertIn("case PAGE_BLUETOOTH: return 4;", main_index)
+
+    def test_feature_settings_use_medium_list_and_back_to_features(self):
+        sketch = SKETCH.read_text()
+        renderer = function_body(sketch, "bool isSystemSettingsListPage(MenuPage page)")
+        for page in ("PAGE_FEATURES", "PAGE_LOUDNESS", "PAGE_CROSSFEED",
+                     "PAGE_LEVELLER", "PAGE_PSYBASS", "PAGE_BLUETOOTH"):
+            self.assertIn(page, renderer)
+        listing = function_body(sketch, "void drawSystemSettingsList()")
+        self.assertIn("drawFontText(FontMedium", listing)
+        self.assertIn("uiListColumns", listing)
+        selection = function_body(sketch, "void selectMenuItem()")
+        self.assertIn("menuPage == PAGE_FEATURES", selection)
+        self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 4", selection)
+        back = function_body(sketch, "void goBack()")
+        self.assertIn("enterPage(PAGE_FEATURES)", back)
+        self.assertIn("enterPage(PAGE_SYSTEM)", back)
+        self.assertNotIn("enterPage(PAGE_FEATURES)",
+                         function_body(sketch, "void renderMediaBrowser(bool fullFrame)"))
+
 
 if __name__ == "__main__":
     unittest.main()
