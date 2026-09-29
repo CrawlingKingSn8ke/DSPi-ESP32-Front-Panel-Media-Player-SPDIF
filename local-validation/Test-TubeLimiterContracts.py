@@ -30,7 +30,7 @@ class TubeLimiterContracts(unittest.TestCase):
         list_renderer = text.split("void drawSystemSettingsList()", 1)[1].split("void drawMenu()", 1)[0]
         self.assertIn("FontMedium", list_renderer)
         self.assertIn("uiListColumns", list_renderer)
-        self.assertIn("isTubeLimiterPage(menuPage)", list_renderer)
+        self.assertIn("uiPagedWindow(count, menuIndex, 4", list_renderer)
 
     def test_writes_are_indexed_and_verified(self):
         text = SOURCE.read_text()

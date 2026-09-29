@@ -97,6 +97,7 @@
 #include "SubSynth.h"
 #include "TubeLimiter.h"
 #include "UiReadability.h"
+#include "UiMenuLayout.h"
 #include "WifiTransferMode.h"
 
 #define DSPI_HAVE_NIMBLE 1
@@ -13793,6 +13794,14 @@ void serviceMediaUiAnimations()
   flushCanvasRegionLocked(4, 59 + visibleRow * 32, UI_W - 5, 31);
 }
 
+void drawListDownArrow(bool below, bool toastVisible)
+{
+  if (!uiShowDownArrow(below, toastVisible)) return;
+  const int16_t x = UI_W - 12;
+  canvas->drawLine(x - 5, 219, x, 224, uiAccent());
+  canvas->drawLine(x, 224, x + 5, 219, uiAccent());
+}
+
 void drawPresetList()
 {
   static constexpr uint8_t VISIBLE_ROWS = 4;
@@ -13805,14 +13814,12 @@ void drawPresetList()
   drawTaperLine(UI_W / 2, 42, 286, 1, uiAccentDark());
 
   menuIndex = std::min<uint8_t>(menuIndex, 9);
-  if (menuIndex < presetListTopRow) presetListTopRow = menuIndex;
-  if (menuIndex >= presetListTopRow + VISIBLE_ROWS) {
-    presetListTopRow = menuIndex - VISIBLE_ROWS + 1;
-  }
-  presetListTopRow = std::min<uint8_t>(presetListTopRow, 10 - VISIBLE_ROWS);
+  const UiPagedWindow window = uiPagedWindow(10, menuIndex, VISIBLE_ROWS,
+                                              presetListTopRow);
+  presetListTopRow = window.first;
 
   for (uint8_t row = 0; row < VISIBLE_ROWS; row++) {
-    const uint8_t slot = presetListTopRow + row;
+    const uint8_t slot = window.first + row;
     const int16_t y = ROW_Y + row * ROW_HEIGHT;
     const bool selected = slot == menuIndex;
     canvas->fillRect(4, y, UI_W - 8, ROW_HEIGHT - 1, C_BLACK);
@@ -13826,7 +13833,9 @@ void drawPresetList()
     }
   }
 
-  if (toastText.length() && (long)(toastUntil - millis()) > 0) {
+  const bool toastVisible = toastText.length() &&
+      (long)(toastUntil - millis()) > 0;
+  if (toastVisible) {
     drawFontCentredGlowColour(FontSmall, 197, toastText, uiAccent());
   } else {
     drawFontCentredGlowColour(FontSmall, 188,
@@ -13834,6 +13843,7 @@ void drawPresetList()
     drawFontCentredGlowColour(FontSmall, 211,
                               "current preset", uiAccent());
   }
+  drawListDownArrow(window.below, toastVisible);
   flushCanvasLocked();
 }
 
@@ -13863,11 +13873,10 @@ void drawSystemSettingsList()
 
   const uint8_t count = menuItemCount(menuPage);
   menuIndex = count ? std::min<uint8_t>(menuIndex, count - 1) : 0;
-  const bool paged = isSubSynthPage(menuPage) || isTubeLimiterPage(menuPage);
-  const uint8_t firstRow = paged ? (menuIndex / 4) * 4 : 0;
-  const uint8_t endRow = paged ? std::min<int>(count, firstRow + 4) : count;
-  for (uint8_t row = firstRow; row < endRow; row++) {
-    const int16_t y = ROW_Y + (row - firstRow) * ROW_HEIGHT;
+  const UiPagedWindow window = uiPagedWindow(count, menuIndex, 4,
+                                             (menuIndex / 4) * 4);
+  for (uint8_t row = window.first; row < window.end; row++) {
+    const int16_t y = ROW_Y + (row - window.first) * ROW_HEIGHT;
     const bool selected = row == menuIndex;
     canvas->fillRect(4, y, UI_W - 8, ROW_HEIGHT - 1, C_BLACK);
     if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
@@ -13899,11 +13908,14 @@ void drawSystemSettingsList()
     }
   }
 
-  if (toastText.length() && (long)(toastUntil - millis()) > 0) {
+  const bool toastVisible = toastText.length() &&
+      (long)(toastUntil - millis()) > 0;
+  if (toastVisible) {
     canvas->fillRect(8, 210, UI_W - 16, 29, C_BLACK);
     const String toast = ellipsizeFontText(FontMedium, toastText, UI_W - 24);
     drawFontCentredGlowColour(FontMedium, 211, toast, uiAccent());
   }
+  drawListDownArrow(window.below, toastVisible);
   flushCanvasLocked();
 }
 
