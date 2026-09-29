@@ -95,6 +95,7 @@
 #include "Mp3ArtworkPolicy.h"
 #include "ArtworkCache.h"
 #include "SubSynth.h"
+#include "TubeLimiter.h"
 #include "UiReadability.h"
 #include "WifiTransferMode.h"
 
@@ -5266,7 +5267,11 @@ enum MenuPage {
   PAGE_THEME,
   PAGE_SUB_SYNTH,
   PAGE_SUB_SELECT,
-  PAGE_SUB_OUTPUTS
+  PAGE_SUB_OUTPUTS,
+  PAGE_TUBE,
+  PAGE_TUBE_OUTPUTS,
+  PAGE_LIMITER,
+  PAGE_LIMITER_OUTPUT
 };
 
 enum LegacyUiColourChoice : uint8_t {
@@ -5515,6 +5520,8 @@ enum BleMappingKind : uint8_t {
 
 struct DspiState {
   SubSynthState subSynth;
+  TubeState tube;
+  LimiterState limiter;
   bool connected;
   uint8_t platform;
   uint8_t firmwareMajor;
@@ -5825,7 +5832,8 @@ int editOriginalInt = 0;
 bool editBool = false;
 bool editOriginalBool = false;
 
-uint8_t rememberedMenuIndex[PAGE_SUB_OUTPUTS + 1] = {};
+uint8_t rememberedMenuIndex[PAGE_LIMITER_OUTPUT + 1] = {};
+uint8_t limiterDetailOutput = 0xff;
 uint8_t lastMainMenuIndex = 0;
 
 uint8_t brightnessPercent = 80;
@@ -7935,6 +7943,231 @@ bool pollVisibleSubSynthSettings()
   return changed;
 }
 
+bool readEnabledOutputMask(uint16_t &mask)
+{
+  mask = 0;
+  for (uint8_t out = 0; out < std::min<uint8_t>(dspi.outputChannels, 9); ++out) {
+    uint8_t enabled = 0;
+    if (!getExactByte(0x73, enabled, out, false) || enabled > 1) return false;
+    if (enabled) mask |= (1u << out);
+  }
+  return true;
+}
+
+bool readTubeParam(TubeParam p, float &value)
+{
+  if (!tubeBasicWritable(p)) return false;
+  uint8_t data[4] = {};
+  if (!getExact(TUBE_GET_REQUEST, p, 4, data, sizeof(data), false)) return false;
+  memcpy(&value, data, 4);
+  return tubeValid(p, value);
+}
+
+bool probeTube(TubeState &state)
+{
+  uint8_t data[4] = {}; uint16_t length = 0;
+  const DspiTxnResult result = dspiGetResult(
+      TUBE_GET_REQUEST, TUBE_ENABLE, 4, data, sizeof(data), length, false);
+  if (result == DSPI_TXN_ERROR) {
+    state = TubeState{}; state.known = true; return true;
+  }
+  if (result != DSPI_TXN_OK || length != 4) return false;
+  float enabled = 0;
+  memcpy(&enabled, data, 4);
+  if (!tubeValid(TUBE_ENABLE, enabled)) return false;
+  state.known = state.supported = true;
+  state.enabled = enabled;
+  return true;
+}
+
+bool syncTubeDetails(bool outputs)
+{
+  if (!dspi.connected || !dspi.tube.supported) return false;
+  TubeState next = dspi.tube;
+  if (!readTubeParam(TUBE_ENABLE, next.enabled) ||
+      !readTubeParam(TUBE_MASK, next.mask) ||
+      !readTubeParam(TUBE_TYPE, next.type) ||
+      !readTubeParam(TUBE_DRIVE, next.drive) ||
+      !readTubeParam(TUBE_MIX, next.mix)) return false;
+  if (outputs) {
+    dspi.tube.outputsKnown = false;
+    if (!readEnabledOutputMask(next.enabledOutputs)) return false;
+    next.outputsKnown = true;
+  }
+  dspi.tube = next;
+  return true;
+}
+
+bool writeTubeParam(TubeParam p, float value)
+{
+  if (!dspi.connected || !dspi.tube.supported || !tubeBasicWritable(p) ||
+      !tubeValid(p, value)) return false;
+  uint8_t data[4] = {};
+  memcpy(data, &value, 4);
+  if (!dspiSet(TUBE_SET_REQUEST, p, data, sizeof(data))) return false;
+  float readback = 0;
+  if (!readTubeParam(p, readback)) return false;
+  if (!syncTubeDetails(false)) return false;
+  return fabsf(readback - value) < 0.01f;
+}
+
+bool probeLimiter(LimiterState &state)
+{
+  uint8_t status[4] = {}; uint16_t length = 0;
+  const DspiTxnResult result = dspiGetResult(
+      LIMITER_REQUEST, 0x81, 4, status, sizeof(status), length, false);
+  if (result == DSPI_TXN_ERROR) {
+    state = LimiterState{}; state.known = true; return true;
+  }
+  if (result != DSPI_TXN_OK || length != 4 || status[1] != 32 ||
+      status[2] != 16 || status[3] == 0 || status[3] > 9) return false;
+  state.known = state.supported = true;
+  return true;
+}
+
+bool readLimiterParam(uint8_t output, LimiterParam p, float &value)
+{
+  if (output >= dspi.outputChannels || output >= 9 || p > LIMITER_LINK) return false;
+  uint8_t data[4] = {};
+  const uint16_t wValue = (uint16_t(output) << 8) | uint8_t(p);
+  if (!getExact(LIMITER_REQUEST, wValue, 4, data, sizeof(data), false)) return false;
+  memcpy(&value, data, 4);
+  return limiterValid(p, value);
+}
+
+int selectedLimiterOutput()
+{
+  return dspi.limiter.outputsKnown && limiterDetailOutput < dspi.outputChannels &&
+      limiterDetailOutput < 9 &&
+      (dspi.limiter.enabledOutputs & (1u << limiterDetailOutput))
+      ? limiterDetailOutput : -1;
+}
+
+float limiterValue(uint8_t output, LimiterParam p)
+{
+  return dspi.limiter.output[output].value[p];
+}
+
+bool syncLimiterDetails(bool outputs, int selected = -1)
+{
+  if (!dspi.connected || !dspi.limiter.supported) return false;
+  LimiterState next = dspi.limiter;
+  if (outputs) {
+    dspi.limiter.outputsKnown = false;
+    if (!readEnabledOutputMask(next.enabledOutputs)) return false;
+    next.outputsKnown = true;
+  }
+  if (selected >= 0 && selected < dspi.outputChannels && selected < 9) {
+    for (uint8_t i = 0; i < 4; ++i) {
+      auto p = static_cast<LimiterParam>(i);
+      if (!readLimiterParam(selected, p, next.output[selected].value[i])) return false;
+    }
+  }
+  dspi.limiter = next;
+  return true;
+}
+
+bool writeLimiterParam(uint8_t output, LimiterParam p, float value)
+{
+  if (!dspi.connected || !dspi.limiter.supported ||
+      output >= dspi.outputChannels || !limiterValid(p, value)) return false;
+  uint8_t enabled = 0;
+  if (!getExactByte(0x73, enabled, output, false) || enabled != 1) return false;
+  uint8_t data[4] = {};
+  memcpy(data, &value, 4);
+  const uint16_t wValue = (uint16_t(output) << 8) | uint8_t(p);
+  if (!dspiSet(LIMITER_REQUEST, wValue, data, sizeof(data))) return false;
+  float readback = 0;
+  if (!readLimiterParam(output, p, readback)) return false;
+  return syncLimiterDetails(false, output) && fabsf(readback - value) < 0.01f;
+}
+
+bool isTubeLimiterPage(MenuPage page)
+{
+  return page == PAGE_TUBE || page == PAGE_TUBE_OUTPUTS ||
+         page == PAGE_LIMITER || page == PAGE_LIMITER_OUTPUT;
+}
+
+bool pollVisibleTubeLimiterSettings()
+{
+  if (uiView != VIEW_MENU || editActive || !isTubeLimiterPage(menuPage)) return false;
+  bool changed = false;
+  if (menuPage == PAGE_TUBE && dspi.tube.supported) {
+    TubeState next = dspi.tube;
+    if (readTubeParam(TUBE_ENABLE, next.enabled) &&
+        readTubeParam(TUBE_TYPE, next.type) &&
+        readTubeParam(TUBE_DRIVE, next.drive) &&
+        readTubeParam(TUBE_MIX, next.mix)) {
+      changed = next.enabled != dspi.tube.enabled || next.type != dspi.tube.type ||
+          next.drive != dspi.tube.drive || next.mix != dspi.tube.mix;
+      dspi.tube = next;
+    }
+  } else if (menuPage == PAGE_TUBE_OUTPUTS && dspi.tube.supported) {
+    uint16_t enabledOutputs = 0;
+    if (readEnabledOutputMask(enabledOutputs)) {
+      changed = !dspi.tube.outputsKnown ||
+          enabledOutputs != dspi.tube.enabledOutputs;
+      dspi.tube.outputsKnown = true;
+      dspi.tube.enabledOutputs = enabledOutputs;
+    } else {
+      changed = dspi.tube.outputsKnown;
+      dspi.tube.outputsKnown = false;
+    }
+    float mask = 0;
+    if (readTubeParam(TUBE_MASK, mask)) {
+      changed |= mask != dspi.tube.mask;
+      dspi.tube.mask = mask;
+    }
+  } else if (menuPage == PAGE_LIMITER && dspi.limiter.supported) {
+    uint16_t enabledOutputs = 0;
+    if (readEnabledOutputMask(enabledOutputs)) {
+      changed = !dspi.limiter.outputsKnown ||
+          enabledOutputs != dspi.limiter.enabledOutputs;
+      dspi.limiter.outputsKnown = true;
+      dspi.limiter.enabledOutputs = enabledOutputs;
+    } else {
+      changed = dspi.limiter.outputsKnown;
+      dspi.limiter.outputsKnown = false;
+    }
+  } else if (menuPage == PAGE_LIMITER_OUTPUT && dspi.limiter.supported) {
+    const int out = selectedLimiterOutput();
+    if (out >= 0) {
+      uint8_t enabled = 0;
+      if (getExactByte(0x73, enabled, out, false) && enabled == 0) {
+        dspi.limiter.enabledOutputs &= ~(1u << out);
+        return true;
+      }
+      LimiterOutputState next = dspi.limiter.output[out];
+      bool valid = true;
+      for (uint8_t i = 0; i < 4; ++i)
+        valid &= readLimiterParam(out, static_cast<LimiterParam>(i), next.value[i]);
+      if (valid) {
+        for (uint8_t i = 0; i < 4; ++i)
+          changed |= next.value[i] != dspi.limiter.output[out].value[i];
+        dspi.limiter.output[out] = next;
+      }
+    }
+  }
+  return changed;
+}
+
+String tubeValueText(TubeParam p, float value)
+{
+  if (p == TUBE_ENABLE) return value ? "On" : "Off";
+  if (p == TUBE_TYPE) return TUBE_TYPE_NAMES[constrain((int)value, 0, 16)];
+  if (p == TUBE_DRIVE) return String(value, 1) + " dB";
+  if (p == TUBE_MIX) return String((int)value) + " pct";
+  return "Open";
+}
+
+String limiterValueText(LimiterParam p, float value)
+{
+  if (p == LIMITER_ENABLE) return value ? "On" : "Off";
+  if (p == LIMITER_THRESHOLD) return String(value, 1) + " dB";
+  if (p == LIMITER_RELEASE) return String((int)value) + " ms";
+  return value == 0 ? "Off" : String("Group ") + String((int)value);
+}
+
 bool syncPsybassCandidate(DspiState &candidate)
 {
   uint8_t enabledPayload[1] = {0};
@@ -8118,6 +8351,8 @@ bool syncCurrentState(bool includePresetNames)
   if (!syncPsybassCandidate(candidate)) return false;
   // An unsupported optional feature must not take down the established link.
   if (!probeSubSynth(candidate.subSynth)) candidate.subSynth.known = false;
+  if (!probeTube(candidate.tube)) candidate.tube.known = false;
+  if (!probeLimiter(candidate.limiter)) candidate.limiter.known = false;
   if (!syncPresetDirectoryCandidate(candidate, includePresetNames)) return false;
   if (!includePresetNames &&
       (uiView == VIEW_VISUALIZER || pendingPresetOverlay ||
@@ -8335,7 +8570,8 @@ bool pollExternalRuntimeState()
        (isSpdifSource(observedInput) &&
         observedSampleRate != dspi.sampleRate));
   const bool subSynthMenuChanged = pollVisibleSubSynthSettings();
-  const bool anyChanged = subSynthMenuChanged || volumeChanged || presetChanged || sourceChanged ||
+  const bool tubeLimiterMenuChanged = pollVisibleTubeLimiterSettings();
+  const bool anyChanged = tubeLimiterMenuChanged || subSynthMenuChanged || volumeChanged || presetChanged || sourceChanged ||
       loudnessChanged || crossfeedChanged || levellerChanged ||
       psybassChanged || subSynthChanged || spdifStatusChanged;
 
@@ -10962,6 +11198,12 @@ String pageTitle(MenuPage page)
     case PAGE_SUB_SYNTH: return "Sub Synth";
     case PAGE_SUB_SELECT: return "Selectivity";
     case PAGE_SUB_OUTPUTS: return "Sub Outputs";
+    case PAGE_TUBE: return "Tube Modeller";
+    case PAGE_TUBE_OUTPUTS: return "Tube Outputs";
+    case PAGE_LIMITER: return "Output Limiter";
+    case PAGE_LIMITER_OUTPUT:
+      return limiterDetailOutput < 9 ?
+          String("Limiter Out ") + String(limiterDetailOutput + 1) : "Limiter Output";
     case PAGE_BLUETOOTH: return "Remote";
     case PAGE_SYSTEM: return "System";
     case PAGE_MEDIA_SETTINGS: return "Music Settings";
@@ -11061,7 +11303,7 @@ void clampBleMenuIndex()
 uint8_t menuItemCount(MenuPage page)
 {
   switch (page) {
-    case PAGE_MAIN: return 10;
+    case PAGE_MAIN: return 12;
     case PAGE_INPUT: return 1;
     case PAGE_MEDIA: return mediaBrowserItemCount();
     case PAGE_PRESET: return 10;
@@ -11073,6 +11315,12 @@ uint8_t menuItemCount(MenuPage page)
     case PAGE_SUB_SELECT: return dspi.subSynth.value[SUB_SELECT] == 0 ? 1 : 3;
     case PAGE_SUB_OUTPUTS: return std::max<unsigned>(1,
         dspi.subSynth.outputsKnown ? subSynthOutputCount(dspi.subSynth.enabledOutputs) : 0);
+    case PAGE_TUBE: return 5;
+    case PAGE_TUBE_OUTPUTS: return std::max<unsigned>(1,
+        dspi.tube.outputsKnown ? tubeOutputCount(dspi.tube.enabledOutputs) : 0);
+    case PAGE_LIMITER: return std::max<unsigned>(1,
+        dspi.limiter.outputsKnown ? tubeOutputCount(dspi.limiter.enabledOutputs) : 0);
+    case PAGE_LIMITER_OUTPUT: return 4;
     case PAGE_BLUETOOTH: return bleMenuItemCount();
     case PAGE_SYSTEM: return 4;
     case PAGE_MEDIA_SETTINGS: return 1;
@@ -11087,8 +11335,8 @@ uint8_t menuItemCount(MenuPage page)
 String menuItemName(MenuPage page, uint8_t index)
 {
   if (page == PAGE_MAIN) {
-    const char *items[] = {"Input", "Music", "Preset", "Loudness", "Crossfeed", "Leveller", "Psy Bass", "Sub Synth", "Remote", "System"};
-    return items[std::min<uint8_t>(index, 9)];
+    const char *items[] = {"Input", "Music", "Preset", "Loudness", "Crossfeed", "Leveller", "Psy Bass", "Sub Synth", "Remote", "System", "Tube", "Limiter"};
+    return items[std::min<uint8_t>(index, 11)];
   }
   if (page == PAGE_INPUT) return "Source";
   if (page == PAGE_SUB_SYNTH) {
@@ -11104,6 +11352,24 @@ String menuItemName(MenuPage page, uint8_t index)
     if (!dspi.subSynth.outputsKnown) return "Unavailable";
     const int out = subSynthOutputAt(dspi.subSynth.enabledOutputs, index);
     return out < 0 ? String("No enabled outputs") : String("Output ") + String(out + 1);
+  }
+  if (page == PAGE_TUBE) {
+    const char *items[] = {"Enable", "Tube Type", "Drive", "Mix", "Outputs"};
+    return items[std::min<uint8_t>(index, 4)];
+  }
+  if (page == PAGE_TUBE_OUTPUTS) {
+    const int out = dspi.tube.outputsKnown ?
+        tubeOutputAt(dspi.tube.enabledOutputs, index) : -1;
+    return out < 0 ? "No enabled outputs" : String("Output ") + String(out + 1);
+  }
+  if (page == PAGE_LIMITER) {
+    const int out = dspi.limiter.outputsKnown ?
+        tubeOutputAt(dspi.limiter.enabledOutputs, index) : -1;
+    return out < 0 ? "No enabled outputs" : String("Output ") + String(out + 1);
+  }
+  if (page == PAGE_LIMITER_OUTPUT) {
+    const char *items[] = {"Enable", "Threshold", "Release", "Link Group"};
+    return items[std::min<uint8_t>(index, 3)];
   }
   if (page == PAGE_MEDIA) {
     return mediaBrowserItemName(index);
@@ -11206,6 +11472,13 @@ String currentEditValue()
 {
   if (!editActive) return "";
   if (isSubSynthPage(menuPage)) return subSynthValueText(currentSubSynthParam(), editFloat);
+  if (menuPage == PAGE_TUBE) {
+    const TubeParam p = menuIndex == 0 ? TUBE_ENABLE :
+        menuIndex == 1 ? TUBE_TYPE : menuIndex == 2 ? TUBE_DRIVE : TUBE_MIX;
+    return tubeValueText(p, editFloat);
+  }
+  if (menuPage == PAGE_LIMITER_OUTPUT)
+    return limiterValueText(static_cast<LimiterParam>(menuIndex), editFloat);
   if (menuPage == PAGE_INPUT) return sourceMenuText((InputSource)editInt);
   if (menuPage == PAGE_LOUDNESS) {
     if (menuIndex == 0) return editBool ? "On" : "Off";
@@ -11260,6 +11533,30 @@ String menuItemValue(MenuPage page, uint8_t index)
     }
     SubSynthParam p = subSynthParameter(page == PAGE_SUB_SYNTH ? 0 : 1, index);
     return subSynthValueText(p, p == SUB_INVALID ? 0 : dspi.subSynth.value[p]);
+  }
+  if (page == PAGE_TUBE || page == PAGE_TUBE_OUTPUTS) {
+    if (!dspi.tube.known || !dspi.tube.supported) return "Unavailable";
+    if (page == PAGE_TUBE_OUTPUTS) {
+      const int out = dspi.tube.outputsKnown ?
+          tubeOutputAt(dspi.tube.enabledOutputs, index) : -1;
+      return out < 0 ? "" : (((uint16_t)dspi.tube.mask & (1u << out)) ? "On" : "Off");
+    }
+    if (index == 4) return "Open";
+    const TubeParam p = index == 0 ? TUBE_ENABLE :
+        index == 1 ? TUBE_TYPE : index == 2 ? TUBE_DRIVE : TUBE_MIX;
+    const float value = index == 0 ? dspi.tube.enabled :
+        index == 1 ? dspi.tube.type : index == 2 ? dspi.tube.drive : dspi.tube.mix;
+    return tubeValueText(p, value);
+  }
+  if (page == PAGE_LIMITER || page == PAGE_LIMITER_OUTPUT) {
+    if (!dspi.limiter.known || !dspi.limiter.supported) return "Unavailable";
+    const int out = page == PAGE_LIMITER ?
+        (dspi.limiter.outputsKnown ? tubeOutputAt(dspi.limiter.enabledOutputs, index) : -1) :
+        selectedLimiterOutput();
+    if (out < 0) return "Unavailable";
+    if (page == PAGE_LIMITER) return "Open";
+    const auto p = static_cast<LimiterParam>(index);
+    return limiterValueText(p, limiterValue(out, p));
   }
   if (page == PAGE_MAIN) {
     if (index == 1 && !mediaPlayerPoc.mounted()) return "NO SD";
@@ -13543,7 +13840,8 @@ void drawPresetList()
 bool isSystemSettingsListPage(MenuPage page)
 {
   return page == PAGE_SYSTEM || page == PAGE_SCREEN_SETTINGS ||
-         page == PAGE_IDLE_SCREEN || page == PAGE_THEME || isSubSynthPage(page);
+         page == PAGE_IDLE_SCREEN || page == PAGE_THEME ||
+         isSubSynthPage(page) || isTubeLimiterPage(page);
 }
 
 uint8_t themePaletteIndexForRow(uint8_t row)
@@ -13565,8 +13863,9 @@ void drawSystemSettingsList()
 
   const uint8_t count = menuItemCount(menuPage);
   menuIndex = count ? std::min<uint8_t>(menuIndex, count - 1) : 0;
-  const uint8_t firstRow = isSubSynthPage(menuPage) ? (menuIndex / 4) * 4 : 0;
-  const uint8_t endRow = isSubSynthPage(menuPage) ? std::min<int>(count, firstRow + 4) : count;
+  const bool paged = isSubSynthPage(menuPage) || isTubeLimiterPage(menuPage);
+  const uint8_t firstRow = paged ? (menuIndex / 4) * 4 : 0;
+  const uint8_t endRow = paged ? std::min<int>(count, firstRow + 4) : count;
   for (uint8_t row = firstRow; row < endRow; row++) {
     const int16_t y = ROW_Y + (row - firstRow) * ROW_HEIGHT;
     const bool selected = row == menuIndex;
@@ -13785,6 +14084,10 @@ int8_t mainIndexForPage(MenuPage page)
     case PAGE_SUB_OUTPUTS: return 7;
     case PAGE_BLUETOOTH: return 8;
     case PAGE_SYSTEM: return 9;
+    case PAGE_TUBE:
+    case PAGE_TUBE_OUTPUTS: return 10;
+    case PAGE_LIMITER:
+    case PAGE_LIMITER_OUTPUT: return 11;
     default: return -1;
   }
 }
@@ -13793,9 +14096,10 @@ MenuPage pageForMainIndex(uint8_t index)
 {
   const MenuPage pages[] = {
     PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_LOUDNESS, PAGE_CROSSFEED,
-    PAGE_LEVELLER, PAGE_PSYBASS, PAGE_SUB_SYNTH, PAGE_BLUETOOTH, PAGE_SYSTEM
+    PAGE_LEVELLER, PAGE_PSYBASS, PAGE_SUB_SYNTH, PAGE_BLUETOOTH, PAGE_SYSTEM,
+    PAGE_TUBE, PAGE_LIMITER
   };
-  return pages[std::min<uint8_t>(index, 9)];
+  return pages[std::min<uint8_t>(index, 11)];
 }
 
 void enterPage(MenuPage page)
@@ -13807,6 +14111,17 @@ void enterPage(MenuPage page)
     if (dspi.subSynth.supported && !syncSubSynthDetails(page == PAGE_SUB_OUTPUTS)) {
       showToast("Sub Synth read failed");
     }
+  }
+  if ((page == PAGE_TUBE || page == PAGE_TUBE_OUTPUTS) && dspi.connected) {
+    if (!dspi.tube.supported) probeTube(dspi.tube);
+    if (dspi.tube.supported && !syncTubeDetails(page == PAGE_TUBE_OUTPUTS))
+      showToast("Tube read failed");
+  }
+  if ((page == PAGE_LIMITER || page == PAGE_LIMITER_OUTPUT) && dspi.connected) {
+    if (!dspi.limiter.supported) probeLimiter(dspi.limiter);
+    const int out = page == PAGE_LIMITER_OUTPUT ? selectedLimiterOutput() : -1;
+    if (dspi.limiter.supported && !syncLimiterDetails(page == PAGE_LIMITER, out))
+      showToast("Limiter read failed");
   }
   // Preset names are Console-owned metadata. Refresh them on demand so a
   // rename made on the PC appears without requiring a front-panel reboot.
@@ -13928,6 +14243,8 @@ void goBack()
     enterPage(PAGE_SUB_SYNTH);
     return;
   }
+  if (menuPage == PAGE_TUBE_OUTPUTS) { enterPage(PAGE_TUBE); return; }
+  if (menuPage == PAGE_LIMITER_OUTPUT) { enterPage(PAGE_LIMITER); return; }
   if (menuPage != PAGE_MAIN) {
     if (menuPage == PAGE_MEDIA && leaveMediaFolder()) {
       return;
@@ -13951,6 +14268,23 @@ void beginEdit()
       showToast("Unavailable"); drawMenu(); return;
     }
     dspi.subSynth.value[p] = current;
+    editFloat = current;
+  }
+  if (menuPage == PAGE_TUBE) {
+    const TubeParam p = menuIndex == 0 ? TUBE_ENABLE :
+        menuIndex == 1 ? TUBE_TYPE : menuIndex == 2 ? TUBE_DRIVE : TUBE_MIX;
+    float current = 0;
+    if (menuIndex == 4 || !readTubeParam(p, current)) {
+      showToast("Unavailable"); drawMenu(); return;
+    }
+    editFloat = current;
+  }
+  if (menuPage == PAGE_LIMITER_OUTPUT) {
+    const int out = selectedLimiterOutput();
+    float current = 0;
+    if (out < 0 || !readLimiterParam(out, static_cast<LimiterParam>(menuIndex), current)) {
+      showToast("Unavailable"); drawMenu(); return;
+    }
     editFloat = current;
   }
   editActive = true;
@@ -14039,6 +14373,24 @@ void adjustEdit(int direction)
     drawMenu();
     return;
   }
+  if (menuPage == PAGE_TUBE) {
+    if (menuIndex == 0) editFloat = editFloat ? 0 : 1;
+    else if (menuIndex == 1)
+      editFloat = wrapEditInt((int)editFloat, direction, 1, 1, 16);
+    else if (menuIndex == 2)
+      editFloat = wrapEditFloat(editFloat, direction, 0.5f, -30, 24);
+    else editFloat = wrapEditFloat(editFloat, direction, 5, 0, 100);
+    drawMenu(); return;
+  }
+  if (menuPage == PAGE_LIMITER_OUTPUT) {
+    if (menuIndex == LIMITER_ENABLE) editFloat = editFloat ? 0 : 1;
+    else if (menuIndex == LIMITER_THRESHOLD)
+      editFloat = wrapEditFloat(editFloat, direction, 0.5f, -30, 0);
+    else if (menuIndex == LIMITER_RELEASE)
+      editFloat = wrapEditFloat(editFloat, direction, 10, 10, 1000);
+    else editFloat = wrapEditInt((int)editFloat, direction, 1, 0, 4);
+    drawMenu(); return;
+  }
   if (menuPage == PAGE_INPUT) {
     editInt = (int)nextInputSourceChoice((InputSource)editInt, direction);
   } else if (menuPage == PAGE_LOUDNESS) {
@@ -14118,6 +14470,14 @@ void applyEdit()
       float headroom = 0;
       if (readSubSynthParam(SUB_HEADROOM, headroom)) dspi.subSynth.value[SUB_HEADROOM] = headroom;
     }
+  } else if (menuPage == PAGE_TUBE) {
+    const TubeParam p = menuIndex == 0 ? TUBE_ENABLE :
+        menuIndex == 1 ? TUBE_TYPE : menuIndex == 2 ? TUBE_DRIVE : TUBE_MIX;
+    ok = writeTubeParam(p, editFloat);
+  } else if (menuPage == PAGE_LIMITER_OUTPUT) {
+    const int out = selectedLimiterOutput();
+    ok = out >= 0 && writeLimiterParam(out,
+        static_cast<LimiterParam>(menuIndex), editFloat);
   } else if (menuPage == PAGE_INPUT) {
     InputSource selectedSource = (InputSource)editInt;
     // Any genuine input change takes ownership from the ESP S/PDIF player.
@@ -14475,6 +14835,44 @@ void selectMenuItem()
                 writeSubSynthParam(SUB_MASK, subSynthToggleOutput((uint16_t)mask, out));
       if (!syncSubSynthDetails(true)) dspi.subSynth.outputsKnown = false;
       showToast(ok ? "Applied" : "Output unavailable"); drawMenu(); return;
+    }
+  }
+
+  if (menuPage == PAGE_TUBE || menuPage == PAGE_TUBE_OUTPUTS) {
+    if (!dspi.tube.known || !dspi.tube.supported) {
+      showToast("Unavailable"); drawMenu(); return;
+    }
+    if (menuPage == PAGE_TUBE && menuIndex == 4) {
+      enterPage(PAGE_TUBE_OUTPUTS); return;
+    }
+    if (menuPage == PAGE_TUBE_OUTPUTS) {
+      const int out = dspi.tube.outputsKnown ?
+          tubeOutputAt(dspi.tube.enabledOutputs, menuIndex) : -1;
+      uint8_t enabled = 0; float mask = 0;
+      const bool ok = out >= 0 && getExactByte(0x73, enabled, out, false) &&
+          enabled == 1 && readTubeParam(TUBE_MASK, mask) &&
+          writeTubeParam(TUBE_MASK, (uint16_t)mask ^ (1u << out));
+      if (!syncTubeDetails(true)) dspi.tube.outputsKnown = false;
+      showToast(ok ? "Applied" : "Output unavailable"); drawMenu(); return;
+    }
+  }
+  if (menuPage == PAGE_LIMITER || menuPage == PAGE_LIMITER_OUTPUT) {
+    if (!dspi.limiter.known || !dspi.limiter.supported) {
+      showToast("Unavailable"); drawMenu(); return;
+    }
+    if (menuPage == PAGE_LIMITER) {
+      const int out = dspi.limiter.outputsKnown ?
+          tubeOutputAt(dspi.limiter.enabledOutputs, menuIndex) : -1;
+      uint8_t enabled = 0;
+      if (out < 0 || !getExactByte(0x73, enabled, out, false) || enabled != 1) {
+        showToast("Output unavailable"); drawMenu(); return;
+      }
+      rememberedMenuIndex[PAGE_LIMITER] = menuIndex;
+      limiterDetailOutput = out;
+      enterPage(PAGE_LIMITER_OUTPUT); return;
+    }
+    if (selectedLimiterOutput() < 0) {
+      showToast("Output unavailable"); drawMenu(); return;
     }
   }
 
