@@ -6219,6 +6219,7 @@ bool packetMatchesHeldFingerprint(const BleReportPacket &packet);
 void processBleReport(const BleReportPacket &packet);
 
 QueueHandle_t bleReportQueue = nullptr;
+BleReportPacket bleLearningPacket = {};
 NimBLEClient *bleClient = nullptr;
 volatile uint32_t bleReportOverflowCount = 0;
 volatile bool bleReportOverflowPending = false;
@@ -6276,6 +6277,7 @@ bool blePairingUiCompleted = false;
 bool blePairingSlowShown = false;
 unsigned long lastBleScanAt = 0;
 bool bleLearningAwaitRelease = false;
+bool bleLearningPacketReady = false;
 String bleLearningMessage;
 unsigned long bleLearningMessageUntil = 0;
 
@@ -11261,10 +11263,12 @@ BleMenuAction bleMenuActionForIndex(uint8_t index)
 String bleMenuItemName(uint8_t index)
 {
   switch (bleMenuActionForIndex(index)) {
-    case BLE_MENU_DEVICE: return "Device";
+    case BLE_MENU_DEVICE:
+      return !bleProfileValid ? "Not paired" :
+          (bleConnected ? "Connected" : "Reconnecting");
     case BLE_MENU_FIND_REMOTE: return "Find Remote";
     case BLE_MENU_KEY_MAP: return "Key Map";
-    case BLE_MENU_SHORTCUTS: return "Home Screen D-pad shortcuts";
+    case BLE_MENU_SHORTCUTS: return "D-pad Shortcuts";
     case BLE_MENU_RESTORE_DEFAULTS: return "Restore Defaults";
     case BLE_MENU_REMOVE_REMOTE: return "Remove Remote";
     default: return "Remote";
@@ -11275,7 +11279,8 @@ String bleMenuItemValue(uint8_t index)
 {
   switch (bleMenuActionForIndex(index)) {
     case BLE_MENU_DEVICE:
-      return bleProfileValid ? String(bleSavedName) : "None";
+      return bleProfileValid ?
+          (bleSavedName[0] ? String(bleSavedName) : "Remote") : "None";
     case BLE_MENU_FIND_REMOTE:
       return "Search";
     case BLE_MENU_KEY_MAP: {
@@ -11290,7 +11295,7 @@ String bleMenuItemValue(uint8_t index)
     case BLE_MENU_RESTORE_DEFAULTS:
       return "Reset";
     case BLE_MENU_REMOVE_REMOTE:
-      return "Ready";
+      return "Confirm";
     default:
       return "";
   }
@@ -13941,7 +13946,10 @@ void drawSystemSettingsList()
         canvas->setCursor(columns.valueRight - unitWidth + 4, y + 12);
         canvas->print(unit);
       } else {
-        drawFontRight(FontMedium, columns.valueRight, y + 4, value, uiAccent());
+        const uint16_t valueColour = menuPage == PAGE_BLUETOOTH &&
+            bleMenuActionForIndex(row) == BLE_MENU_DEVICE && !bleProfileValid
+            ? uiDimText() : uiAccent();
+        drawFontRight(FontMedium, columns.valueRight, y + 4, value, valueColour);
       }
     }
     if (paletteSwatch) {
@@ -15821,7 +15829,7 @@ UiAction lookupRemoteMapping(const BleReportPacket &packet);
 
 String remoteLabelForAction(uint8_t mappingIndex)
 {
-  if (mappingIndex >= BLE_MAPPING_COUNT || !remoteMapEntrySet(remoteMap[mappingIndex])) return "Not set";
+  if (mappingIndex >= BLE_MAPPING_COUNT || !remoteMapEntrySet(remoteMap[mappingIndex])) return "None";
   if (remoteMap[mappingIndex].label[0]) return String(remoteMap[mappingIndex].label);
   return "Mapped";
 }
@@ -15829,6 +15837,21 @@ String remoteLabelForAction(uint8_t mappingIndex)
 // -----------------------------------------------------------------------------
 // BLE Remote menu screens
 // -----------------------------------------------------------------------------
+
+void drawBleListRow(uint8_t visibleRow, bool selected, const String &label,
+                    const String &value, bool mapped)
+{
+  const int16_t y = 52 + visibleRow * 36;
+  canvas->fillRect(4, y, UI_W - 8, 35, C_BLACK);
+  if (selected) canvas->fillRect(4, y, 3, 35, uiMainText());
+  const UiListColumns columns = uiListColumns(UI_W,
+      fontTextWidth(FontMedium, value));
+  drawFontText(FontMedium, columns.labelX, y + 4,
+      ellipsizeFontText(FontMedium, label, columns.labelWidth), uiMainText());
+  drawFontRight(FontMedium, columns.valueRight, y + 4,
+      ellipsizeFontText(FontMedium, value, columns.valueWidth),
+      mapped ? uiAccent() : uiDimText());
+}
 
 void drawBleSpinner(int16_t cx, int16_t cy, uint8_t phase)
 {
@@ -15904,58 +15927,52 @@ void drawBleScreen()
       drawMenuDots(count, bleResultIndex);
     }
   } else if (bleUiMode == BLE_UI_MAPPING) {
-    drawMenuOptionCentredGlow(53, "Key Map");
-    String actionName = bleMappingNames[bleMappingIndex];
-    if (fontTextWidth(FontMedium, actionName) <= UI_W - 20) {
-      drawFontCentredGlowColour(FontMedium, 100, actionName, uiMainText());
-    } else {
-      drawFontCentredGlowColour(FontSmall, 120, actionName, uiMainText());
+    const UiPagedWindow window = uiPagedWindow(BLE_MAPPING_COUNT,
+        bleMappingIndex, 4, (bleMappingIndex / 4) * 4);
+    for (uint8_t entry = window.first; entry < window.end; entry++) {
+      drawBleListRow(entry - window.first, entry == bleMappingIndex,
+          bleMappingNames[entry], remoteLabelForAction(entry),
+          remoteMapEntrySet(remoteMap[entry]));
     }
-    String label = remoteLabelForAction(bleMappingIndex);
-    label = ellipsizeFontText(FontMedium, label, UI_W - 20);
-    drawFontCentredGlowColour(FontMedium, 166, label,
-                              remoteMapEntrySet(remoteMap[bleMappingIndex])
-                                  ? uiAccent() : uiDimText());
-    drawFontCentred(FontSmall, 214,
-                    String((int)bleMappingIndex + 1) + " / " +
-                    String(BLE_MAPPING_COUNT), uiDimText());
+    drawListDownArrow(window.below, false);
   } else if (bleUiMode == BLE_UI_LEARNING) {
     drawMenuOptionCentredGlow(53, bleMappingNames[bleMappingIndex]);
     String prompt = bleLearningMessage.length() ? bleLearningMessage :
-                    (bleLearningAwaitRelease ? "Release buttons" : "Press remote");
+                    (bleLearningPacketReady ? "Release button" : "Press button");
     const FontDef &promptFont = fontTextWidth(FontMedium, prompt) <= UI_W - 20 ? FontMedium : FontSmall;
     drawFontCentredGlowColour(promptFont, promptFont.lineHeight > 30 ? 112 : 126,
                               prompt, uiAccent());
   } else if (bleUiMode == BLE_UI_SHORTCUTS) {
-    drawMenuOptionCentredGlow(53, "Home Screen D-pad shortcuts");
-    drawFontCentredGlowColour(FontMedium, 98,
-                              homeShortcutKeyNames[bleShortcutIndex], uiMainText());
-    uint8_t option = homeShortcutOptionIndex(homeShortcuts[bleShortcutIndex]);
-    String value = homeShortcutOptionNames[option];
-    if (fontTextWidth(FontMedium, value) <= UI_W - 24) {
-      drawFontCentredGlowColour(FontMedium, 145, value, uiAccent());
-    } else {
-      drawFontCentredGlowColour(FontSmall, 161, value, uiAccent());
+    const UiPagedWindow window = uiPagedWindow(HOME_SHORTCUT_COUNT,
+        bleShortcutIndex, 4, (bleShortcutIndex / 4) * 4);
+    for (uint8_t entry = window.first; entry < window.end; entry++) {
+      const uint8_t option = homeShortcutOptionIndex(homeShortcuts[entry]);
+      drawBleListRow(entry - window.first, entry == bleShortcutIndex,
+          homeShortcutKeyNames[entry], homeShortcutOptionNames[option],
+          homeShortcuts[entry] != ACT_NONE);
     }
-    drawMenuDots(HOME_SHORTCUT_COUNT, bleShortcutIndex);
+    drawListDownArrow(window.below, false);
   } else if (bleUiMode == BLE_UI_SHORTCUT_EDIT) {
-    String heading = String(homeShortcutKeyNames[bleShortcutIndex]) + " Shortcut";
-    drawMenuOptionCentredGlow(53, heading);
-    String value = homeShortcutOptionNames[bleShortcutOptionIndex];
-    if (fontTextWidth(FontMedium, value) <= UI_W - 24) {
-      drawFontCentredGlowColour(FontMedium, 112, value, uiAccent());
-    } else {
-      drawFontCentredGlowColour(FontSmall, 133, value, uiAccent());
+    const UiPagedWindow window = uiPagedWindow(HOME_SHORTCUT_OPTION_COUNT,
+        bleShortcutOptionIndex, 4, (bleShortcutOptionIndex / 4) * 4);
+    for (uint8_t entry = window.first; entry < window.end; entry++) {
+      drawBleListRow(entry - window.first,
+          entry == bleShortcutOptionIndex, homeShortcutOptionNames[entry],
+          entry == homeShortcutOptionIndex(homeShortcuts[bleShortcutIndex])
+              ? "Current" : "",
+          entry != 0);
     }
-    drawMenuDots(HOME_SHORTCUT_OPTION_COUNT, bleShortcutOptionIndex);
+    drawListDownArrow(window.below, false);
   } else if (bleUiMode == BLE_UI_CONFIRM_DEFAULTS) {
     drawMenuOptionCentredGlow(53, "Restore Defaults");
     drawFontCentredGlowColour(FontLarge, 88,
                               bleDefaultsYes ? "Yes" : "No", uiAccent());
   } else if (bleUiMode == BLE_UI_CONFIRM_REMOVE) {
     drawMenuOptionCentredGlow(53, "Remove remote?");
-    drawFontCentredGlowColour(FontLarge, 88,
-                              bleRemoveYes ? "Yes" : "No", uiAccent());
+    drawFontCentredGlowColour(FontMedium, 100,
+        ellipsizeFontText(FontMedium, String(bleSavedName), UI_W - 24), uiMainText());
+    drawFontCentredGlowColour(FontLarge, 150,
+                              bleRemoveYes ? "Remove" : "Cancel", uiAccent());
   } else if (bleUiMode == BLE_UI_MESSAGE && bleMessage == "Pairing") {
     // Pairing is shown only once. The animated spinner supplies the activity cue.
     drawMenuOptionCentredGlow(53, "Pairing");
@@ -16024,6 +16041,7 @@ void bleBack()
   if (bleUiMode == BLE_UI_LEARNING) {
     clearBleHeldState();
     bleLearningAwaitRelease = false;
+    bleLearningPacketReady = false;
     bleLearningMessage = "";
     bleUiMode = BLE_UI_MAPPING;
     transitionToBleScreen();
@@ -16067,9 +16085,11 @@ void bleSelect()
       bleMessage = "Remote asleep";
       bleMessageUntil = millis() + 1600;
     } else {
+      const bool awaitSelectRelease = bleButtonHeld;
       clearBleHeldState();
       bleUiMode = BLE_UI_LEARNING;
-      bleLearningAwaitRelease = true;
+      bleLearningAwaitRelease = awaitSelectRelease;
+      bleLearningPacketReady = false;
       bleLearningMessage = "";
       bleLearningMessageUntil = 0;
     }
@@ -17443,17 +17463,30 @@ void processBleReport(const BleReportPacket &packet)
     }
     else clearBleHeldState();
     if (bleUiMode == BLE_UI_LEARNING) {
-      bleLearningAwaitRelease = false;
-      bleLearningMessage = "";
-      bleLearningMessageUntil = 0;
-      drawBleScreen();
+      if (bleLearningAwaitRelease) {
+        // The Select key that opened capture must be released first.
+        bleLearningAwaitRelease = false;
+        bleLearningMessage = "";
+        bleLearningMessageUntil = 0;
+        drawBleScreen();
+      } else if (bleLearningPacketReady &&
+                 packet.sourceKey == bleLearningPacket.sourceKey &&
+                 packet.reportId == bleLearningPacket.reportId) {
+        bleLearningPacketReady = false;
+        learnRemoteReport(bleLearningPacket);
+      }
     }
     return;
   }
 
   if (uiView == VIEW_BLE && bleUiMode == BLE_UI_LEARNING) {
     if (bleLearningAwaitRelease) return;
-    learnRemoteReport(packet);
+    if (!bleLearningPacketReady) {
+      bleLearningPacket = packet;
+      bleLearningPacketReady = true;
+      bleLearningMessage = "";
+      drawBleScreen();
+    }
     return;
   }
 
@@ -17700,6 +17733,10 @@ void pollBleRemote()
 
   if (bleConnectionChanged) {
     bleConnectionChanged = false;
+    if (!bleConnected && bleUiMode == BLE_UI_LEARNING) {
+      // A lost remote cannot complete capture; keep its previous mapping.
+      bleBack();
+    }
     if (menuPage == PAGE_BLUETOOTH || uiView == VIEW_BLE) {
       if (mediaTrackTransitionActive() || mediaPlaybackBufferLow()) {
         mediaUiDeferredFullRedraw = true;

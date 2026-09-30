@@ -48,9 +48,12 @@ class GlyphKeyMapContracts(unittest.TestCase):
         start = SOURCE.index("} else if (bleUiMode == BLE_UI_MAPPING) {")
         end = SOURCE.index("} else if (bleUiMode == BLE_UI_LEARNING) {", start)
         body = SOURCE[start:end]
-        self.assertIn("remoteLabelForAction(bleMappingIndex)", body)
-        self.assertIn("drawFontCentredGlowColour(FontMedium, 166, label", body)
-        self.assertNotIn("drawFontCentredGlowColour(FontSmall, 166, label", body)
+        self.assertIn("remoteLabelForAction(entry)", body)
+        self.assertIn("drawBleListRow(", body)
+        row = SOURCE[SOURCE.index("void drawBleListRow("):]
+        row = row[:row.index("void drawBleSpinner(")]
+        self.assertIn("drawFontRight(FontMedium", row)
+        self.assertIn("mapped ? uiAccent() : uiDimText()", row)
 
 
 if __name__ == "__main__":

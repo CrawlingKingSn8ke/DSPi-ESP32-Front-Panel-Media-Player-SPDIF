@@ -12,6 +12,9 @@ SKETCH = FIRMWARE / "DSPi_ESP32_Front_Panel_v1_1_2.ino"
 def function_body(source, signature):
     start = source.index(signature)
     opening = source.index("{", start)
+    while ";" in source[start:opening]:
+        start = source.index(signature, start + len(signature))
+        opening = source.index("{", start)
     depth = 0
     for offset in range(opening, len(source)):
         if source[offset] == "{":
@@ -130,6 +133,59 @@ static_assert(!uiShowDownArrow(false, false));
         listing = function_body(sketch, "void drawSystemSettingsList()")
         self.assertIn('const bool tubeUnit', listing)
         self.assertIn('canvas->setTextSize(2)', listing)
+
+    def test_remote_landing_reports_real_connection_state(self):
+        sketch = SKETCH.read_text()
+        names = function_body(sketch, "String bleMenuItemName(uint8_t index)")
+        self.assertIn('bleConnected ? "Connected" : "Reconnecting"', names)
+        self.assertIn('"Not paired"', names)
+        self.assertIn('"D-pad Shortcuts"', names)
+        self.assertIn('BLE_MENU_RESTORE_DEFAULTS', names)
+        values = function_body(sketch, "String bleMenuItemValue(uint8_t index)")
+        self.assertIn('bleSavedName', values)
+        listing = function_body(sketch, "void drawSystemSettingsList()")
+        self.assertIn('menuPage == PAGE_BLUETOOTH', listing)
+        self.assertIn('uiDimText()', listing)
+
+    def test_remote_mapping_and_shortcuts_are_four_row_lists(self):
+        sketch = SKETCH.read_text()
+        self.assertIn('#define BLE_MAPPING_COUNT 21', sketch)
+        renderer = function_body(sketch, "void drawBleScreen()")
+        self.assertIn('bleUiMode == BLE_UI_MAPPING', renderer)
+        self.assertIn('bleUiMode == BLE_UI_SHORTCUTS', renderer)
+        self.assertIn('bleUiMode == BLE_UI_SHORTCUT_EDIT', renderer)
+        self.assertGreaterEqual(renderer.count('uiPagedWindow('), 3)
+        self.assertGreaterEqual(renderer.count('drawListDownArrow('), 3)
+        self.assertIn('remoteMapEntrySet(remoteMap[entry])', renderer)
+        row = function_body(sketch, "void drawBleListRow(")
+        self.assertIn('uiListColumns(', row)
+        self.assertIn('uiDimText()', row)
+        self.assertIn('ellipsizeFontText(FontMedium', row)
+        self.assertIn('return "None"',
+                      function_body(sketch, "String remoteLabelForAction("))
+
+    def test_remote_learning_and_removal_are_cancel_safe(self):
+        sketch = SKETCH.read_text()
+        renderer = function_body(sketch, "void drawBleScreen()")
+        self.assertIn('"Press button"', renderer)
+        self.assertIn('"Release button"', renderer)
+        self.assertIn('bleSavedName', renderer)
+        self.assertIn('bleRemoveYes ? "Remove" : "Cancel"', renderer)
+        selection = function_body(sketch, "void bleSelect()")
+        self.assertIn('bleRemoveYes', selection)
+        self.assertIn('bleUiMode == BLE_UI_SHORTCUT_EDIT', selection)
+        self.assertIn('const bool awaitSelectRelease = bleButtonHeld', selection)
+        back = function_body(sketch, "void bleBack()")
+        self.assertIn('bleUiMode == BLE_UI_LEARNING', back)
+        self.assertIn('bleUiMode == BLE_UI_SHORTCUT_EDIT', back)
+        self.assertIn('bleLearningPacketReady = false', back)
+        self.assertNotIn('saveHomeShortcuts()', back)
+        self.assertNotIn('saveRemoteMappings()', back)
+        report = function_body(sketch, "void processBleReport(const BleReportPacket &packet)")
+        self.assertIn('bleLearningPacketReady', report)
+        self.assertIn('learnRemoteReport(bleLearningPacket)', report)
+        polling = function_body(sketch, "void pollBleRemote()")
+        self.assertIn('!bleConnected && bleUiMode == BLE_UI_LEARNING', polling)
 
 
 if __name__ == "__main__":
