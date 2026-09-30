@@ -59,19 +59,20 @@ class UiPolishR2Contracts(unittest.TestCase):
             self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 1",
                           body(signature), signature)
 
-    def test_dsp_config_fits_font_and_icons_share_meter_colour(self):
+    def test_dsp_setup_uses_native_font_and_icons_share_meter_colour(self):
         names = body("String menuItemName(MenuPage page, uint8_t index)")
-        self.assertIn('"Input", "Music", "Preset", "DSP Config", "System"', names)
+        self.assertIn('"Input", "Music", "Preset", "DSP Setup", "System"', names)
         title = body("String pageTitle(MenuPage page)")
-        self.assertIn('case PAGE_FEATURES: return "DSP Config"', title)
+        self.assertIn('case PAGE_FEATURES: return "DSP Setup"', title)
         menu = body("void drawMenu()")
-        self.assertIn('selected == "DSP Config"', menu)
-        self.assertIn("fontTextWidthScaledKerned(FontMenu", menu)
+        self.assertIn("drawMenuTextNative(80, selected, uiMainText())", menu)
+        self.assertNotIn("drawFontTextScaledKerned(FontMenu", menu)
         home = body("void drawTopStatus()")
         self.assertIn("uiVolumeMeterColour()", home)
         self.assertIn("sourceRight", home)
         self.assertIn("presetLeft", home)
-        self.assertIn("const int16_t iconY = 22", home)
+        self.assertIn("const int16_t iconY = 20", home)
+        self.assertIn("uiFeatureIconScaledSpan(", home)
         features = body("void drawSystemSettingsList()")
         self.assertIn("menuPage == PAGE_FEATURES", features)
         self.assertIn("drawFeatureIconForIndex(", features)

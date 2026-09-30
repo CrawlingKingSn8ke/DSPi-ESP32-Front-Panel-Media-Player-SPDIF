@@ -74,6 +74,41 @@ constexpr int16_t uiFeatureIconOffset(uint8_t activeMask, uint8_t target)
   return offset;
 }
 
+constexpr int16_t uiFeatureIconScaledWidth(uint8_t feature,
+                                            uint8_t scalePercent)
+{
+  return static_cast<int16_t>((uiFeatureIconWidth(feature) * scalePercent + 50) / 100);
+}
+
+constexpr int16_t uiFeatureIconScaledSpan(uint8_t activeMask,
+                                           uint8_t scalePercent,
+                                           int16_t gap)
+{
+  int16_t span = 0;
+  uint8_t count = 0;
+  for (uint8_t bit = 1; bit <= UI_FEATURE_LIMITER; bit <<= 1) {
+    if (!(activeMask & bit)) continue;
+    span += uiFeatureIconScaledWidth(bit, scalePercent);
+    ++count;
+  }
+  return count ? static_cast<int16_t>(span + (count - 1) * gap) : 0;
+}
+
+constexpr int16_t uiFeatureIconScaledOffset(uint8_t activeMask,
+                                             uint8_t target,
+                                             uint8_t scalePercent,
+                                             int16_t gap)
+{
+  int16_t offset = 0;
+  for (uint8_t bit = 1; bit < target; bit <<= 1) {
+    if (activeMask & bit) offset += uiFeatureIconScaledWidth(bit, scalePercent) + gap;
+  }
+  return offset;
+}
+
+static_assert(uiFeatureIconScaledSpan(UI_FEATURE_ALL, 125, 7) == 178,
+              "Enlarged Home icons must fit between bounded source and preset labels");
+
 constexpr int16_t uiAnalogSwatchX(uint8_t index)
 {
   return static_cast<int16_t>(65 + index * 38);

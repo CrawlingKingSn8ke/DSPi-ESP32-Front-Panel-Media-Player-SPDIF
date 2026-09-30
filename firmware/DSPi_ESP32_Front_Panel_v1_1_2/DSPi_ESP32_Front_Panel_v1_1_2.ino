@@ -11230,7 +11230,7 @@ String pageTitle(MenuPage page)
 {
   switch (page) {
     case PAGE_MAIN: return "Menu";
-    case PAGE_FEATURES: return "DSP Config";
+    case PAGE_FEATURES: return "DSP Setup";
     case PAGE_INPUT: return "Input";
     case PAGE_MEDIA: return "Music Library";
     case PAGE_PRESET: return "Preset";
@@ -11382,7 +11382,7 @@ uint8_t menuItemCount(MenuPage page)
 String menuItemName(MenuPage page, uint8_t index)
 {
   if (page == PAGE_MAIN) {
-    const char *items[] = {"Input", "Music", "Preset", "DSP Config", "System"};
+    const char *items[] = {"Input", "Music", "Preset", "DSP Setup", "System"};
     return items[std::min<uint8_t>(index, 4)];
   }
   if (page == PAGE_FEATURES) {
@@ -12025,95 +12025,147 @@ void drawTaperLine(int16_t centerX, int16_t y, int16_t length, int16_t maxThickn
   }
 }
 
-void drawEarIcon(int16_t x, int16_t y, uint16_t colour)
+struct FeatureIconPainter {
+  int16_t x;
+  int16_t y;
+  uint8_t scalePercent;
+
+  int16_t px(int16_t v) const { return x + (v * scalePercent + 50) / 100; }
+  int16_t py(int16_t v) const { return y + (v * scalePercent + 50) / 100; }
+  int16_t size(int16_t v) const {
+    return std::max<int16_t>(1, (v * scalePercent + 50) / 100);
+  }
+  void line(int16_t x1, int16_t y1, int16_t x2, int16_t y2,
+            uint16_t colour) const {
+    canvas->drawLine(px(x1), py(y1), px(x2), py(y2), colour);
+  }
+  void hLine(int16_t left, int16_t top, int16_t width,
+             uint16_t colour) const {
+    canvas->drawFastHLine(px(left), py(top), size(width), colour);
+  }
+  void vLine(int16_t left, int16_t top, int16_t height,
+             uint16_t colour) const {
+    canvas->drawFastVLine(px(left), py(top), size(height), colour);
+  }
+  void fillCircle(int16_t cx, int16_t cy, int16_t radius,
+                  uint16_t colour) const {
+    canvas->fillCircle(px(cx), py(cy), size(radius), colour);
+  }
+  void roundRect(int16_t left, int16_t top, int16_t width, int16_t height,
+                 int16_t radius, uint16_t colour, bool filled = false) const {
+    if (filled) {
+      canvas->fillRoundRect(px(left), py(top), size(width), size(height),
+                            size(radius), colour);
+    } else {
+      canvas->drawRoundRect(px(left), py(top), size(width), size(height),
+                            size(radius), colour);
+    }
+  }
+};
+
+void drawEarIcon(int16_t x, int16_t y, uint16_t colour,
+                 uint8_t scalePercent = 100)
 {
-  // Compact white interpretation of the macOS Console "ear.fill" symbol.
-  canvas->drawLine(x + 8, y + 1, x + 4, y + 2, colour);
-  canvas->drawLine(x + 4, y + 2, x + 2, y + 6, colour);
-  canvas->drawLine(x + 2, y + 6, x + 2, y + 11, colour);
-  canvas->drawLine(x + 2, y + 11, x + 5, y + 15, colour);
-  canvas->drawLine(x + 5, y + 15, x + 8, y + 15, colour);
-  canvas->drawLine(x + 8, y + 15, x + 10, y + 12, colour);
-  canvas->drawLine(x + 10, y + 12, x + 10, y + 9, colour);
-  canvas->drawLine(x + 10, y + 9, x + 7, y + 8, colour);
-  canvas->drawLine(x + 7, y + 8, x + 5, y + 10, colour);
-  canvas->fillCircle(x + 5, y + 10, 1, colour);
+  // Compact interpretation of the macOS Console "ear.fill" symbol.
+  const FeatureIconPainter p{x, y, scalePercent};
+  p.line(8, 1, 4, 2, colour);
+  p.line(4, 2, 2, 6, colour);
+  p.line(2, 6, 2, 11, colour);
+  p.line(2, 11, 5, 15, colour);
+  p.line(5, 15, 8, 15, colour);
+  p.line(8, 15, 10, 12, colour);
+  p.line(10, 12, 10, 9, colour);
+  p.line(10, 9, 7, 8, colour);
+  p.line(7, 8, 5, 10, colour);
+  p.fillCircle(5, 10, 1, colour);
 }
 
-void drawHeadphonesIcon(int16_t x, int16_t y, uint16_t colour)
+void drawHeadphonesIcon(int16_t x, int16_t y, uint16_t colour,
+                        uint8_t scalePercent = 100)
 {
-  // Compact white interpretation of the macOS Console "headphones" symbol.
-  canvas->drawLine(x + 2, y + 8, x + 3, y + 4, colour);
-  canvas->drawLine(x + 3, y + 4, x + 6, y + 2, colour);
-  canvas->drawLine(x + 6, y + 2, x + 10, y + 2, colour);
-  canvas->drawLine(x + 10, y + 2, x + 13, y + 4, colour);
-  canvas->drawLine(x + 13, y + 4, x + 14, y + 8, colour);
-  canvas->fillRoundRect(x + 1, y + 8, 4, 7, 1, colour);
-  canvas->fillRoundRect(x + 11, y + 8, 4, 7, 1, colour);
+  // Compact interpretation of the macOS Console "headphones" symbol.
+  const FeatureIconPainter p{x, y, scalePercent};
+  p.line(2, 8, 3, 4, colour);
+  p.line(3, 4, 6, 2, colour);
+  p.line(6, 2, 10, 2, colour);
+  p.line(10, 2, 13, 4, colour);
+  p.line(13, 4, 14, 8, colour);
+  p.roundRect(1, 8, 4, 7, 1, colour, true);
+  p.roundRect(11, 8, 4, 7, 1, colour, true);
 }
 
-void drawLevellerIcon(int16_t x, int16_t y, uint16_t colour)
+void drawLevellerIcon(int16_t x, int16_t y, uint16_t colour,
+                      uint8_t scalePercent = 100)
 {
   // Compact white interpretation of the Console "waveform.path.ecg" symbol.
-  canvas->drawLine(x, y + 9, x + 3, y + 9, colour);
-  canvas->drawLine(x + 3, y + 9, x + 5, y + 5, colour);
-  canvas->drawLine(x + 5, y + 5, x + 7, y + 13, colour);
-  canvas->drawLine(x + 7, y + 13, x + 10, y + 3, colour);
-  canvas->drawLine(x + 10, y + 3, x + 12, y + 9, colour);
-  canvas->drawLine(x + 12, y + 9, x + 16, y + 9, colour);
+  const FeatureIconPainter p{x, y, scalePercent};
+  p.line(0, 9, 3, 9, colour);
+  p.line(3, 9, 5, 5, colour);
+  p.line(5, 5, 7, 13, colour);
+  p.line(7, 13, 10, 3, colour);
+  p.line(10, 3, 12, 9, colour);
+  p.line(12, 9, 16, 9, colour);
 }
 
-void drawPsybassIcon(int16_t x, int16_t y, uint16_t colour)
+void drawPsybassIcon(int16_t x, int16_t y, uint16_t colour,
+                     uint8_t scalePercent = 100)
 {
   // Native compact interpretation of the macOS Console U+1D122 MUSICAL
   // SYMBOL F CLEF glyph (ContentView.swift). The two right-hand dots and
   // curled bass-clef stroke remain legible in the 16-pixel feature row.
-  canvas->fillCircle(x + 4, y + 5, 2, colour);
-  canvas->drawLine(x + 5, y + 3, x + 8, y + 3, colour);
-  canvas->drawLine(x + 8, y + 3, x + 10, y + 5, colour);
-  canvas->drawLine(x + 10, y + 5, x + 10, y + 9, colour);
-  canvas->drawLine(x + 10, y + 9, x + 8, y + 12, colour);
-  canvas->drawLine(x + 8, y + 12, x + 5, y + 14, colour);
-  canvas->drawLine(x + 5, y + 14, x + 2, y + 15, colour);
-  canvas->fillCircle(x + 14, y + 5, 1, colour);
-  canvas->fillCircle(x + 14, y + 10, 1, colour);
+  const FeatureIconPainter p{x, y, scalePercent};
+  p.fillCircle(4, 5, 2, colour);
+  p.line(5, 3, 8, 3, colour);
+  p.line(8, 3, 10, 5, colour);
+  p.line(10, 5, 10, 9, colour);
+  p.line(10, 9, 8, 12, colour);
+  p.line(8, 12, 5, 14, colour);
+  p.line(5, 14, 2, 15, colour);
+  p.fillCircle(14, 5, 1, colour);
+  p.fillCircle(14, 10, 1, colour);
 }
 
-void drawSubSynthIcon(int16_t x, int16_t y, uint16_t colour)
+void drawSubSynthIcon(int16_t x, int16_t y, uint16_t colour,
+                      uint8_t scalePercent = 100)
 {
   // Compact original rendering of Console's waveform.path.badge.minus motif.
+  const FeatureIconPainter p{x, y, scalePercent};
   const int8_t points[][2] = {{4,8},{6,8},{7,3},{9,13},{11,0},
                             {13,15},{15,5},{17,10},{19,8}};
   for (uint8_t i = 1; i < sizeof(points) / sizeof(points[0]); ++i) {
-    canvas->drawLine(x + points[i-1][0], y + points[i-1][1],
-                     x + points[i][0], y + points[i][1], colour);
+    p.line(points[i-1][0], points[i-1][1],
+           points[i][0], points[i][1], colour);
   }
-  canvas->fillCircle(x + 3, y + 12, 3, colour);
-  canvas->drawFastHLine(x + 1, y + 12, 5, C_BLACK);
+  p.fillCircle(3, 12, 3, colour);
+  p.hLine(1, 12, 5, C_BLACK);
 }
 
-void drawTubeIcon(int16_t x, int16_t y, uint16_t colour)
+void drawTubeIcon(int16_t x, int16_t y, uint16_t colour,
+                  uint8_t scalePercent = 100)
 {
   // A narrow glass envelope with a filament in the same meter colour.
-  canvas->drawRoundRect(x + 2, y + 1, 11, 12, 4, colour);
-  canvas->drawFastHLine(x + 3, y + 13, 9, colour);
-  canvas->drawFastVLine(x + 5, y + 13, 3, colour);
-  canvas->drawFastVLine(x + 9, y + 13, 3, colour);
-  canvas->drawLine(x + 5, y + 10, x + 7, y + 5, colour);
-  canvas->drawLine(x + 7, y + 5, x + 9, y + 10, colour);
+  const FeatureIconPainter p{x, y, scalePercent};
+  p.roundRect(2, 1, 11, 12, 4, colour);
+  p.hLine(3, 13, 9, colour);
+  p.vLine(5, 13, 3, colour);
+  p.vLine(9, 13, 3, colour);
+  p.line(5, 10, 7, 5, colour);
+  p.line(7, 5, 9, 10, colour);
 }
 
-void drawLimiterIcon(int16_t x, int16_t y, uint16_t colour)
+void drawLimiterIcon(int16_t x, int16_t y, uint16_t colour,
+                     uint8_t scalePercent = 100)
 {
   // A fixed ceiling over a bounded waveform, distinct from the tube outline.
-  canvas->drawFastHLine(x + 1, y + 2, 12, colour);
-  canvas->drawFastVLine(x + 1, y + 2, 4, colour);
-  canvas->drawFastVLine(x + 12, y + 2, 4, colour);
-  canvas->drawLine(x + 1, y + 11, x + 4, y + 11, colour);
-  canvas->drawLine(x + 4, y + 11, x + 6, y + 7, colour);
-  canvas->drawLine(x + 6, y + 7, x + 8, y + 13, colour);
-  canvas->drawLine(x + 8, y + 13, x + 10, y + 11, colour);
-  canvas->drawLine(x + 10, y + 11, x + 13, y + 11, colour);
+  const FeatureIconPainter p{x, y, scalePercent};
+  p.hLine(1, 2, 12, colour);
+  p.vLine(1, 2, 4, colour);
+  p.vLine(12, 2, 4, colour);
+  p.line(1, 11, 4, 11, colour);
+  p.line(4, 11, 6, 7, colour);
+  p.line(6, 7, 8, 13, colour);
+  p.line(8, 13, 10, 11, colour);
+  p.line(10, 11, 13, 11, colour);
 }
 
 void drawFeatureIconForIndex(uint8_t index, int16_t centerX, int16_t y)
@@ -12153,7 +12205,10 @@ void drawTopStatus()
       dspi.limiter.engagedKnown && dspi.limiter.engaged) {
     iconMask |= UI_FEATURE_LIMITER;
   }
-  const int16_t iconSpan = uiFeatureIconSpan(iconMask);
+  static constexpr uint8_t ICON_SCALE_PERCENT = 125;
+  static constexpr int16_t ICON_GAP = 7;
+  const int16_t iconSpan = uiFeatureIconScaledSpan(
+      iconMask, ICON_SCALE_PERCENT, ICON_GAP);
   // Reserve space between source and preset, so the icons occupy the same
   // header line instead of a second row over the volume readout.
   const int16_t sourceBudget = std::max<int16_t>(0,
@@ -12165,28 +12220,35 @@ void drawTopStatus()
   drawFontRight(FontMedium, 302, 18, preset, uiMainText());
   const int16_t iconX = std::max<int16_t>(sourceRight + 8,
       std::min<int16_t>((UI_W - iconSpan) / 2, presetLeft - iconSpan - 8));
-  const int16_t iconY = 22;
+  const int16_t iconY = 20;
   const uint16_t iconColour = uiVolumeMeterColour();
   if (dspi.loudnessEnabled) {
-    drawEarIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LOUDNESS), iconY, iconColour);
+    drawEarIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_LOUDNESS,
+        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
   }
   if (dspi.crossfeedEnabled) {
-    drawHeadphonesIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_CROSSFEED), iconY, iconColour);
+    drawHeadphonesIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_CROSSFEED,
+        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
   }
   if (dspi.levellerEnabled) {
-    drawLevellerIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LEVELLER), iconY, iconColour);
+    drawLevellerIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_LEVELLER,
+        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
   }
   if (dspi.psybassSupported && dspi.psybassEnabled) {
-    drawPsybassIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_PSY_BASS), iconY, iconColour);
+    drawPsybassIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_PSY_BASS,
+        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
   }
   if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
-    drawSubSynthIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_SUB_SYNTH), iconY, iconColour);
+    drawSubSynthIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_SUB_SYNTH,
+        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
   }
   if (iconMask & UI_FEATURE_TUBE) {
-    drawTubeIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_TUBE), iconY, iconColour);
+    drawTubeIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_TUBE,
+        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
   }
   if (iconMask & UI_FEATURE_LIMITER) {
-    drawLimiterIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LIMITER), iconY, iconColour);
+    drawLimiterIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_LIMITER,
+        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
   }
 }
 
@@ -14118,16 +14180,7 @@ void drawMenu()
     // retains the accepted native 62 px font; adjacent categories provide a
     // restrained visual cue that Left/Right or encoder rotation move across.
     String selected = menuItemName(menuPage, menuIndex);
-    if (selected == "DSP Config") {
-      // The native glyphs exist, but the complete title spans the full panel.
-      // Fit it with a measured 88% rendering instead of clipping its first D.
-      const uint8_t scale = 88;
-      const int16_t width = fontTextWidthScaledKerned(FontMenu, selected, scale);
-      drawFontTextScaledKerned(FontMenu, (UI_W - width) / 2, 80,
-                               selected, uiMainText(), scale);
-    } else {
-      drawMenuTextNative(80, selected, uiMainText());
-    }
+    drawMenuTextNative(80, selected, uiMainText());
     uint8_t count = menuItemCount(PAGE_MAIN);
     uint8_t previous = (uint8_t)((menuIndex + count - 1) % count);
     uint8_t next = (uint8_t)((menuIndex + 1) % count);
