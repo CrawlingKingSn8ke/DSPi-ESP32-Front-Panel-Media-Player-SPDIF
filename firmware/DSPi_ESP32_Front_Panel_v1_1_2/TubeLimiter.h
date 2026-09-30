@@ -69,6 +69,7 @@ struct LimiterOutputState {
 };
 struct LimiterState {
   bool known = false, supported = false, outputsKnown = false;
+  bool engagedKnown = false, engaged = false;
   uint16_t enabledOutputs = 0;
   LimiterOutputState output[9];
 };

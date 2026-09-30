@@ -187,6 +187,66 @@ static_assert(!uiShowDownArrow(false, false));
         polling = function_body(sketch, "void pollBleRemote()")
         self.assertIn('!bleConnected && bleUiMode == BLE_UI_LEARNING', polling)
 
+    def test_all_feature_icons_fit_and_keep_source_preset_separate(self):
+        source = """
+#include "UiReadability.h"
+static_assert(UI_FEATURE_ALL == 0x7f);
+static_assert(uiFeatureIconSpan(UI_FEATURE_ALL) == 138);
+static_assert(uiFeatureIconOffset(UI_FEATURE_ALL, UI_FEATURE_LIMITER) == 124);
+static_assert(uiFeatureIconSpan(UI_FEATURE_TUBE | UI_FEATURE_LIMITER) == 34);
+"""
+        result = compile_assertions(source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sketch = SKETCH.read_text()
+        top = function_body(sketch, "void drawTopStatus()")
+        self.assertIn('UI_FEATURE_TUBE', top)
+        self.assertIn('UI_FEATURE_LIMITER', top)
+        self.assertIn('const int16_t iconX = (UI_W - iconSpan) / 2', top)
+        self.assertIn('drawTubeIcon(', top)
+        self.assertIn('drawLimiterIcon(', top)
+        self.assertNotIn('presetLeft', top)
+        self.assertIn('drawTaperLine((UI_W / 2) - 2, 72',
+                      function_body(sketch, "void drawHome()"))
+
+    def test_tube_shortcut_is_append_only_and_confirmed(self):
+        sketch = SKETCH.read_text()
+        previous = subprocess.run(
+            ["git", "show", "8c6664a:" +
+             "firmware/DSPi_ESP32_Front_Panel_v1_1_2/"
+             "DSPi_ESP32_Front_Panel_v1_1_2.ino"],
+            cwd=ROOT, text=True, capture_output=True, check=True).stdout
+        actions = sketch[sketch.index("enum UiAction : uint8_t {"):
+                         sketch.index("enum BleMappingKind", sketch.index("enum UiAction : uint8_t {"))]
+        old_actions = previous[previous.index("enum UiAction : uint8_t {"):
+                               previous.index("enum BleMappingKind", previous.index("enum UiAction : uint8_t {"))]
+        old_ids = [entry.strip() for entry in
+                   old_actions.split("{")[1].split("}")[0].split(",")]
+        new_ids = [entry.strip() for entry in
+                   actions.split("{")[1].split("}")[0].split(",")]
+        self.assertEqual(new_ids[:-1], old_ids)
+        self.assertIn('ACT_SUB_SYNTH_TOGGLE,\n  ACT_TUBE_TOGGLE', actions)
+        self.assertIn('#define HOME_SHORTCUT_OPTION_COUNT 15', sketch)
+        self.assertIn('"Toggle Sub Synth",\n  "Toggle Tube"', sketch)
+        dispatch = function_body(sketch, "void dispatchUiAction(UiAction action)")
+        self.assertIn('case ACT_TUBE_TOGGLE:', dispatch)
+        self.assertIn('readTubeParam(TUBE_ENABLE, current)', dispatch)
+        self.assertIn('writeTubeParam(TUBE_ENABLE, target ? 1 : 0)', dispatch)
+        self.assertIn('showFeatureStateNotification("Tube Modeller", target)', dispatch)
+
+    def test_runtime_watcher_uses_exact_tube_and_limiter_readback(self):
+        sketch = SKETCH.read_text()
+        poll = function_body(sketch, "bool pollExternalRuntimeState()")
+        self.assertIn('readTubeParam(TUBE_ENABLE, observedTube)', poll)
+        self.assertIn('LIMITER_REQUEST, 0x81, 4', poll)
+        self.assertIn('limiterStatus[0] <= 1', poll)
+        self.assertIn('dspi.limiter.engagedKnown', poll)
+        self.assertIn('if (presetChanged)', poll)
+        self.assertIn('dspi.tube.known = false;', poll)
+        self.assertIn('dspi.limiter.engagedKnown = false;', poll)
+        self.assertIn('const bool notificationsAllowed = externalRuntimeStateReady;', poll)
+        self.assertIn('showFeatureStateNotification("Tube Modeller"', poll)
+        self.assertNotIn('showFeatureStateNotification("Limiter"', poll)
+
 
 if __name__ == "__main__":
     unittest.main()

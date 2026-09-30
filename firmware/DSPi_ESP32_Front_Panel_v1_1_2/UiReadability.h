@@ -34,7 +34,9 @@ enum UiFeatureIcon : uint8_t {
   UI_FEATURE_LEVELLER = 1u << 2,
   UI_FEATURE_PSY_BASS = 1u << 3,
   UI_FEATURE_SUB_SYNTH = 1u << 4,
-  UI_FEATURE_ALL = 0x1f
+  UI_FEATURE_TUBE = 1u << 5,
+  UI_FEATURE_LIMITER = 1u << 6,
+  UI_FEATURE_ALL = 0x7f
 };
 
 constexpr uint8_t uiFeatureIconWidth(uint8_t feature)
@@ -43,20 +45,25 @@ constexpr uint8_t uiFeatureIconWidth(uint8_t feature)
          feature == UI_FEATURE_CROSSFEED ? 15 :
          feature == UI_FEATURE_LEVELLER ? 17 :
          feature == UI_FEATURE_PSY_BASS ? 16 :
-         feature == UI_FEATURE_SUB_SYNTH ? 20 : 0;
+         feature == UI_FEATURE_SUB_SYNTH ? 20 :
+         feature == UI_FEATURE_TUBE ? 15 :
+         feature == UI_FEATURE_LIMITER ? 14 : 0;
 }
 
 constexpr int16_t uiFeatureIconSpan(uint8_t activeMask)
 {
   int16_t span = 0;
   uint8_t count = 0;
-  for (uint8_t bit = 1; bit <= UI_FEATURE_SUB_SYNTH; bit <<= 1) {
+  for (uint8_t bit = 1; bit <= UI_FEATURE_LIMITER; bit <<= 1) {
     if (!(activeMask & bit)) continue;
     span += uiFeatureIconWidth(bit);
     ++count;
   }
   return count ? static_cast<int16_t>(span + (count - 1) * 5) : 0;
 }
+
+static_assert(uiFeatureIconSpan(UI_FEATURE_ALL) == 138,
+              "All seven feature icons must fit the Home header");
 
 constexpr int16_t uiFeatureIconOffset(uint8_t activeMask, uint8_t target)
 {

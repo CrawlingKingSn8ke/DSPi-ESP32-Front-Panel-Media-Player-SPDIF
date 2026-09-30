@@ -214,7 +214,7 @@
 #define BLE_PROFILE_VERSION 3
 #define BLE_MAPPING_VERSION 5
 #define HOME_SHORTCUT_COUNT 5
-#define HOME_SHORTCUT_OPTION_COUNT 14
+#define HOME_SHORTCUT_OPTION_COUNT 15
 #define HOME_SHORTCUT_VERSION 2
 #define BLE_REPEAT_DELAY_MS 350
 #define BLE_REPEAT_INTERVAL_MS 120
@@ -5510,7 +5510,8 @@ enum UiAction : uint8_t {
   ACT_MEDIA_STOP,
   ACT_MEDIA_OPEN,
   ACT_MEDIA_SETTINGS,
-  ACT_SUB_SYNTH_TOGGLE
+  ACT_SUB_SYNTH_TOGGLE,
+  ACT_TUBE_TOGGLE
 };
 
 
@@ -5922,7 +5923,8 @@ const UiAction homeShortcutOptions[HOME_SHORTCUT_OPTION_COUNT] = {
   ACT_MENU_TOGGLE,
   ACT_VISUALIZER_TOGGLE,
   ACT_MUTE,
-  ACT_SUB_SYNTH_TOGGLE
+  ACT_SUB_SYNTH_TOGGLE,
+  ACT_TUBE_TOGGLE
 };
 
 const char *homeShortcutOptionNames[HOME_SHORTCUT_OPTION_COUNT] = {
@@ -5939,7 +5941,8 @@ const char *homeShortcutOptionNames[HOME_SHORTCUT_OPTION_COUNT] = {
   "Open Menu",
   "VU meter",
   "Mute",
-  "Toggle Sub Synth"
+  "Toggle Sub Synth",
+  "Toggle Tube"
 };
 
 const UiAction homeShortcutDefaults[HOME_SHORTCUT_COUNT] = {
@@ -8023,9 +8026,11 @@ bool probeLimiter(LimiterState &state)
   if (result == DSPI_TXN_ERROR) {
     state = LimiterState{}; state.known = true; return true;
   }
-  if (result != DSPI_TXN_OK || length != 4 || status[1] != 32 ||
+  if (result != DSPI_TXN_OK || length != 4 || status[0] > 1 || status[1] != 32 ||
       status[2] != 16 || status[3] == 0 || status[3] > 9) return false;
   state.known = state.supported = true;
+  state.engagedKnown = true;
+  state.engaged = status[0] == 1;
   return true;
 }
 
@@ -8486,6 +8491,8 @@ bool pollExternalRuntimeState()
   uint8_t observedLeveller = dspi.levellerEnabled ? 1 : 0;
   uint8_t observedPsybass = dspi.psybassEnabled ? 1 : 0;
   float observedSubSynth = dspi.subSynth.value[SUB_ENABLE];
+  float observedTube = dspi.tube.enabled;
+  uint8_t limiterStatus[4] = {};
   uint8_t observedSpdifState = dspi.spdifState;
   uint32_t observedSampleRate = dspi.sampleRate;
   bool observedSpdifNonAudio = dspi.spdifNonAudio;
@@ -8516,6 +8523,14 @@ bool pollExternalRuntimeState()
       observedPsybass <= 1;
   const bool subSynthValidRead = dspi.subSynth.known && dspi.subSynth.supported &&
       readSubSynthParam(SUB_ENABLE, observedSubSynth);
+  const bool tubeValidRead = dspi.tube.supported &&
+      readTubeParam(TUBE_ENABLE, observedTube);
+  const bool limiterStatusValid = dspi.limiter.supported &&
+      getExact(LIMITER_REQUEST, 0x81, 4, limiterStatus,
+               sizeof(limiterStatus), false) &&
+      limiterStatus[0] <= 1 && limiterStatus[1] == 32 &&
+      limiterStatus[2] == 16 && limiterStatus[3] > 0 &&
+      limiterStatus[3] <= 9;
 
   // The normal runtime watcher is also used while the SD decoder is active.
   // Keep S/PDIF lock metadata in that lightweight path: activateMediaRoute()
@@ -8568,6 +8583,11 @@ bool pollExternalRuntimeState()
       (observedPsybass != 0) != dspi.psybassEnabled;
   const bool subSynthChanged = subSynthValidRead &&
       observedSubSynth != dspi.subSynth.value[SUB_ENABLE];
+  const bool tubeChanged = tubeValidRead && dspi.tube.known &&
+      observedTube != dspi.tube.enabled;
+  const bool limiterChanged = limiterStatusValid &&
+      (!dspi.limiter.engagedKnown ||
+       (limiterStatus[0] != 0) != dspi.limiter.engaged);
   const bool spdifStatusChanged = spdifStatusValid &&
       (observedSpdifState != dspi.spdifState ||
        observedSpdifNonAudio != dspi.spdifNonAudio ||
@@ -8575,7 +8595,8 @@ bool pollExternalRuntimeState()
         observedSampleRate != dspi.sampleRate));
   const bool subSynthMenuChanged = pollVisibleSubSynthSettings();
   const bool tubeLimiterMenuChanged = pollVisibleTubeLimiterSettings();
-  const bool anyChanged = tubeLimiterMenuChanged || subSynthMenuChanged || volumeChanged || presetChanged || sourceChanged ||
+  const bool anyChanged = tubeLimiterMenuChanged || subSynthMenuChanged ||
+      tubeChanged || limiterChanged || volumeChanged || presetChanged || sourceChanged ||
       loudnessChanged || crossfeedChanged || levellerChanged ||
       psybassChanged || subSynthChanged || spdifStatusChanged;
 
@@ -8587,6 +8608,21 @@ bool pollExternalRuntimeState()
   if (levellerValid) dspi.levellerEnabled = observedLeveller != 0;
   if (psybassValid) dspi.psybassEnabled = observedPsybass != 0;
   if (subSynthValidRead) dspi.subSynth.value[SUB_ENABLE] = observedSubSynth;
+  if (tubeValidRead) {
+    dspi.tube.enabled = observedTube;
+    dspi.tube.known = true;
+  }
+  if (limiterStatusValid) {
+    dspi.limiter.engagedKnown = true;
+    dspi.limiter.engaged = limiterStatus[0] == 1;
+  }
+  if (presetChanged) {
+    // The DSPi may still be applying the new preset during this GET sweep.
+    // Require a later confirmed read before showing its Tube/Limiter icons or
+    // treating the change as a separate Console notification.
+    dspi.tube.known = false;
+    dspi.limiter.engagedKnown = false;
+  }
   if (spdifStatusValid) {
     dspi.spdifState = observedSpdifState;
     dspi.spdifNonAudio = observedSpdifNonAudio;
@@ -8630,6 +8666,8 @@ bool pollExternalRuntimeState()
     showFeatureStateNotification("Psy Bass", dspi.psybassEnabled);
   } else if (subSynthChanged) {
     showFeatureStateNotification("Sub Synth", observedSubSynth != 0);
+  } else if (tubeChanged) {
+    showFeatureStateNotification("Tube Modeller", observedTube != 0);
   }
 
   if (presetChanged && menuPage == PAGE_PRESET && !editActive) {
@@ -12053,11 +12091,39 @@ void drawSubSynthIcon(int16_t x, int16_t y, uint16_t colour)
   canvas->drawFastHLine(x + 1, y + 12, 5, C_BLACK);
 }
 
+void drawTubeIcon(int16_t x, int16_t y, uint16_t colour)
+{
+  // A narrow glass envelope with an accent-coloured glowing filament.
+  canvas->drawRoundRect(x + 2, y + 1, 11, 12, 4, colour);
+  canvas->drawFastHLine(x + 3, y + 13, 9, colour);
+  canvas->drawFastVLine(x + 5, y + 13, 3, colour);
+  canvas->drawFastVLine(x + 9, y + 13, 3, colour);
+  canvas->drawLine(x + 5, y + 10, x + 7, y + 5, uiAccent());
+  canvas->drawLine(x + 7, y + 5, x + 9, y + 10, uiAccent());
+}
+
+void drawLimiterIcon(int16_t x, int16_t y, uint16_t colour)
+{
+  // A fixed ceiling over a bounded waveform, distinct from the tube outline.
+  canvas->drawFastHLine(x + 1, y + 2, 12, uiAccent());
+  canvas->drawFastVLine(x + 1, y + 2, 4, uiAccent());
+  canvas->drawFastVLine(x + 12, y + 2, 4, uiAccent());
+  canvas->drawLine(x + 1, y + 11, x + 4, y + 11, colour);
+  canvas->drawLine(x + 4, y + 11, x + 6, y + 7, colour);
+  canvas->drawLine(x + 6, y + 7, x + 8, y + 13, colour);
+  canvas->drawLine(x + 8, y + 13, x + 10, y + 11, colour);
+  canvas->drawLine(x + 10, y + 11, x + 13, y + 11, colour);
+}
+
 void drawTopStatus()
 {
   String src = sourceText();
   String preset = presetText();
-  drawFontRight(FontMedium, 302, 18, preset, uiMainText());
+  const int16_t presetWidth = fontTextWidth(FontMedium, preset);
+  drawFontRight(FontMedium, 302, 7, preset, uiMainText());
+  drawFontText(FontMedium, 18, 7,
+      ellipsizeFontText(FontMedium, src,
+          std::max<int16_t>(0, 302 - presetWidth - 18 - 12)), uiMainText());
 
   uint8_t iconMask = 0;
   if (dspi.loudnessEnabled) iconMask |= UI_FEATURE_LOUDNESS;
@@ -12067,14 +12133,16 @@ void drawTopStatus()
   if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
     iconMask |= UI_FEATURE_SUB_SYNTH;
   }
+  if (dspi.tube.known && dspi.tube.supported && dspi.tube.enabled != 0) {
+    iconMask |= UI_FEATURE_TUBE;
+  }
+  if (dspi.limiter.known && dspi.limiter.supported &&
+      dspi.limiter.engagedKnown && dspi.limiter.engaged) {
+    iconMask |= UI_FEATURE_LIMITER;
+  }
   const int16_t iconSpan = uiFeatureIconSpan(iconMask);
-  int16_t presetLeft = 302 - fontTextWidth(FontMedium, preset);
-  bool useSmall = 18 + fontTextWidth(FontMedium, src) + 12 + iconSpan > presetLeft - 8;
-  const FontDef &sourceFont = useSmall ? FontSmall : FontMedium;
-  drawFontText(sourceFont, 18, useSmall ? 22 : 18, src, uiMainText());
-
-  int16_t iconX = 18 + fontTextWidth(sourceFont, src) + 12;
-  int16_t iconY = 22;
+  const int16_t iconX = (UI_W - iconSpan) / 2;
+  const int16_t iconY = 45;
   if (dspi.loudnessEnabled) {
     drawEarIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LOUDNESS), iconY, uiMainText());
   }
@@ -12089,6 +12157,12 @@ void drawTopStatus()
   }
   if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
     drawSubSynthIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_SUB_SYNTH), iconY, uiMainText());
+  }
+  if (iconMask & UI_FEATURE_TUBE) {
+    drawTubeIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_TUBE), iconY, uiMainText());
+  }
+  if (iconMask & UI_FEATURE_LIMITER) {
+    drawLimiterIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LIMITER), iconY, uiMainText());
   }
 }
 
@@ -15364,6 +15438,21 @@ void dispatchUiAction(UiAction action)
       if (ok && fullScreen) showFeatureStateNotification("Sub Synth", target);
       else {
         showToast(ok ? (String("Sub Synth ") + (target ? "On" : "Off")) :
+                       (dspi.connected ? "Unavailable" : "NO DSPi"), 900);
+        redrawCurrentView();
+      }
+      break;
+    }
+    case ACT_TUBE_TOGGLE: {
+      const bool fullScreen = uiView == VIEW_HOME;
+      float current = 0;
+      const bool ready = dspi.connected && dspi.tube.known &&
+          dspi.tube.supported && readTubeParam(TUBE_ENABLE, current);
+      const bool target = current == 0;
+      const bool ok = ready && writeTubeParam(TUBE_ENABLE, target ? 1 : 0);
+      if (ok && fullScreen) showFeatureStateNotification("Tube Modeller", target);
+      else {
+        showToast(ok ? (String("Tube Modeller ") + (target ? "On" : "Off")) :
                        (dspi.connected ? "Unavailable" : "NO DSPi"), 900);
         redrawCurrentView();
       }
