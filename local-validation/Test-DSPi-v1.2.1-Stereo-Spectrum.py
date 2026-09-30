@@ -84,13 +84,26 @@ class StereoSpectrumContracts(unittest.TestCase):
         display = body("bool drawSpectrumVisualizer()")
         self.assertIn("sourceText()", display)
         self.assertIn("presetText()", display)
-        self.assertIn('"Spectrum"', display)
+        self.assertNotIn('"Spectrum"', display)
+        self.assertNotIn("drawTaperLine", display)
+        self.assertIn("drawSpectrumChannel(0, 131", display)
+        self.assertIn("drawSpectrumChannel(1, 214", display)
         channel = body("void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)")
+        self.assertIn("firstBand = 3", channel)
+        self.assertIn("plotH = 74", channel)
         self.assertIn('"-20"', channel)
         self.assertIn('"-40"', channel)
         self.assertIn('"-60"', channel)
         self.assertIn("FontMedium", channel)
-        self.assertIn("uiAccentSoft()", display)
+        self.assertIn("uiMainText()", display)
+        self.assertIn("uiMainText()", channel)
+
+    def test_faster_pair_cadence_and_short_tube_notification(self):
+        self.assertIn("#define SPECTRUM_POLL_MS 80", SKETCH)
+        self.assertIn("wire[6] = 120", PROTOCOL)
+        self.assertNotIn('showFeatureStateNotification("Tube Modeller"', SKETCH)
+        self.assertIn('showFeatureStateNotification("Tube", target)', SKETCH)
+        self.assertIn('showFeatureStateNotification("Tube", observedTube != 0)', SKETCH)
 
     def test_manual_visualizers_do_not_dim(self):
         power = body("void serviceScreenPower()")

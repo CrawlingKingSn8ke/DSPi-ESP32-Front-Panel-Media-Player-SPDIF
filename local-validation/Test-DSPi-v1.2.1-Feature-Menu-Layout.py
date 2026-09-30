@@ -236,7 +236,7 @@ static_assert(uiFeatureIconSpan(UI_FEATURE_TUBE | UI_FEATURE_LIMITER) == 34);
         self.assertIn('case ACT_TUBE_TOGGLE:', dispatch)
         self.assertIn('readTubeParam(TUBE_ENABLE, current)', dispatch)
         self.assertIn('writeTubeParam(TUBE_ENABLE, target ? 1 : 0)', dispatch)
-        self.assertIn('showFeatureStateNotification("Tube Modeller", target)', dispatch)
+        self.assertIn('showFeatureStateNotification("Tube", target)', dispatch)
 
     def test_runtime_watcher_uses_exact_tube_and_limiter_readback(self):
         sketch = SKETCH.read_text()
@@ -249,7 +249,7 @@ static_assert(uiFeatureIconSpan(UI_FEATURE_TUBE | UI_FEATURE_LIMITER) == 34);
         self.assertIn('dspi.tube.known = false;', poll)
         self.assertIn('dspi.limiter.engagedKnown = false;', poll)
         self.assertIn('const bool notificationsAllowed = externalRuntimeStateReady;', poll)
-        self.assertIn('showFeatureStateNotification("Tube Modeller"', poll)
+        self.assertIn('showFeatureStateNotification("Tube"', poll)
         self.assertNotIn('showFeatureStateNotification("Limiter"', poll)
 
 

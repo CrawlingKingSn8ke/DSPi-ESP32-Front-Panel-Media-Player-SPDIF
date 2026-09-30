@@ -83,7 +83,7 @@ inline void makeConfig(uint8_t *wire, uint8_t fftOrder,
   wire[2] = static_cast<uint8_t>(mask);
   wire[3] = static_cast<uint8_t>(mask >> 8);
   wire[4] = fftOrder;
-  wire[6] = 180; // 180 ms power-domain averaging; no manual run flag.
+  wire[6] = 120; // Faster 120 ms averaging; no manual run flag.
   wire[8] = 24;  // Peak decay is harmless even though this page shows average.
 }
 

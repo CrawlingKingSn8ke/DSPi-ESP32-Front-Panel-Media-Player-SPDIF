@@ -239,7 +239,7 @@
 #define BLE_REPORTS_PER_LOOP 12
 #define BLE_REPORT_QUEUE_LENGTH 24
 #define BLE_HELD_FAILSAFE_MS 8000
-#define SPECTRUM_POLL_MS 110
+#define SPECTRUM_POLL_MS 80
 #define BLE_MAX_INPUT_SOURCES 32
 
 #define LCD_NATIVE_W 240
@@ -8717,7 +8717,7 @@ bool pollExternalRuntimeState()
   } else if (subSynthChanged) {
     showFeatureStateNotification("Sub Synth", observedSubSynth != 0);
   } else if (tubeChanged) {
-    showFeatureStateNotification("Tube Modeller", observedTube != 0);
+    showFeatureStateNotification("Tube", observedTube != 0);
   }
 
   if (presetChanged && menuPage == PAGE_PRESET && !editActive) {
@@ -13135,40 +13135,44 @@ void drawMenuValue(int16_t y, const String &value)
 
 void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
 {
-  constexpr int16_t plotX = 43;
-  constexpr int16_t plotW = 239;
-  constexpr uint8_t plotH = 46;
+  constexpr int16_t plotX = 12;
+  constexpr int16_t plotW = 235;
+  constexpr uint8_t plotH = 74;
+  constexpr uint8_t firstBand = 3; // 20 Hz is the first displayed centre.
   const uint16_t grid = blend565(C_BLACK, uiAccent(), 35);
   const uint8_t selected = channel == 0 ? spectrumSelection.upper :
       spectrumSelection.lower;
-  const uint8_t step = stereoSpectrum.hasFrame[channel] &&
-      stereoSpectrum.frame[channel].count > 34 ? 6 : 7;
+  const uint8_t bandCount = stereoSpectrum.hasFrame[channel]
+      ? stereoSpectrum.frame[channel].count : 34;
+  const uint8_t shownBands = bandCount > firstBand
+      ? bandCount - firstBand : 31;
   // One-pixel guide lines mark the three 20 dB intervals, 0 to -60 dBFS.
   for (uint8_t level = 0; level < 4; ++level) {
     canvas->drawFastHLine(plotX, baseline - (plotH * level) / 3,
                           plotW, grid);
   }
-  drawFontText(FontMedium, 8, baseline - 34,
+  drawFontRight(FontMedium, 309, baseline - 51,
                selected & 1 ? "R" : "L", uiMainText());
   canvas->setTextSize(1);
-  canvas->setTextColor(uiAccentSoft());
-  canvas->setCursor(12, baseline - 12);
+  canvas->setTextColor(uiMainText());
+  canvas->setCursor(288, baseline - 17);
   canvas->print(selected + 1);
-  canvas->setTextColor(uiDimText());
   for (uint8_t level = 0; level < 4; ++level) {
-    canvas->setCursor(286, baseline - plotH * level / 3 - 4);
+    canvas->setCursor(253, baseline - plotH * level / 3 - 4);
     canvas->print(level == 3 ? "0" : level == 2 ? "-20" :
                   level == 1 ? "-40" : "-60");
   }
 
   if (!stereoSpectrum.hasFrame[channel]) return;
   const SpectrumRta::BandFrame &frame = stereoSpectrum.frame[channel];
-  for (uint8_t band = 0; band < frame.count; ++band) {
+  for (uint8_t band = firstBand; band < frame.count; ++band) {
     const uint8_t h = SpectrumRta::barHeight(frame.average[band],
                                              stereoSpectrum.levelZero, plotH);
     if (!h) continue;
-    const int16_t x = plotX + band * step;
-    canvas->fillRoundRect(x, baseline - h, step - 2, h, 1, colour);
+    const int16_t x = plotX + (band - firstBand) * plotW / shownBands;
+    const int16_t nextX = plotX + (band + 1 - firstBand) * plotW / shownBands;
+    canvas->fillRoundRect(x, baseline - h, std::max<int16_t>(1, nextX - x - 1),
+                          h, 1, colour);
   }
 }
 
@@ -13182,9 +13186,6 @@ bool drawSpectrumVisualizer()
   drawFontText(FontMedium, 18, 18,
       ellipsizeFontText(FontMedium, sourceText(), sourceBudget), uiMainText());
   drawFontRight(FontMedium, 302, 18, preset, uiMainText());
-  drawTaperLine(UI_W / 2, 45, 286, 1, uiAccentDark());
-  drawFontCentredGlow(FontMedium, 52, "Spectrum");
-  drawTaperLine(UI_W / 2, 83, 286, 1, uiAccentDark());
 
   if (stereoSpectrum.probed && !stereoSpectrum.supported) {
     drawFontCentredGlowColour(FontMedium, 111, "Unavailable", uiWarning());
@@ -13199,24 +13200,29 @@ bool drawSpectrumVisualizer()
   const uint16_t leftColour = uiVolumeMeterColour();
   const uint16_t rightColour = volumeMeterPaletteIndex == PALETTE_CYAN
       ? C_BLUE : mix565(leftColour, uiAccent(), 125);
-  drawSpectrumChannel(0, 140, leftColour);
+  drawSpectrumChannel(0, 131, leftColour);
   if (spectrumSelection.lower != spectrumSelection.upper) {
-    drawSpectrumChannel(1, 207, rightColour);
+    drawSpectrumChannel(1, 214, rightColour);
   }
 
   if (!stereoSpectrum.hasFrame[0] && !stereoSpectrum.hasFrame[1]) {
-    drawFontCentredGlowColour(FontSmall, 145, "Waiting for audio", uiDimText());
+    drawFontCentredGlowColour(FontSmall, 109, "Waiting for audio", uiDimText());
   }
   canvas->setTextSize(1);
-  canvas->setTextColor(uiAccentSoft());
-  // IEC third-octave centres: indices 3, 10, 20, 30 and 33.
-  const uint8_t step = stereoSpectrum.hasFrame[0] &&
-      stereoSpectrum.frame[0].count > 34 ? 6 : 7;
-  canvas->setCursor(40 + 3 * step, 225); canvas->print("20");
-  canvas->setCursor(36 + 10 * step, 225); canvas->print("100");
-  canvas->setCursor(40 + 20 * step, 225); canvas->print("1k");
-  canvas->setCursor(36 + 30 * step, 225); canvas->print("10k");
-  canvas->setCursor(38 + 33 * step, 225); canvas->print("20k");
+  canvas->setTextColor(uiMainText());
+  // IEC third-octave centres: indices 3, 10, 20, 30 and 33. At 44.1/48 kHz
+  // 20 kHz is the last band; 96 kHz can extend to 40 kHz.
+  const uint8_t bandCount = stereoSpectrum.hasFrame[0]
+      ? stereoSpectrum.frame[0].count : 34;
+  const uint8_t shownBands = bandCount > 3 ? bandCount - 3 : 31;
+  const auto frequencyX = [shownBands](uint8_t band) {
+    return 12 + (band - 3) * 235 / shownBands;
+  };
+  canvas->setCursor(12, 226); canvas->print("20");
+  canvas->setCursor(frequencyX(10) - 9, 226); canvas->print("100");
+  canvas->setCursor(frequencyX(20) - 6, 226); canvas->print("1k");
+  canvas->setCursor(frequencyX(30) - 9, 226); canvas->print("10k");
+  canvas->setCursor(frequencyX(33) - 9, 226); canvas->print("20k");
   return flushVisualizerFrame();
 }
 
@@ -15722,7 +15728,7 @@ void dispatchUiAction(UiAction action)
           dspi.tube.supported && readTubeParam(TUBE_ENABLE, current);
       const bool target = current == 0;
       const bool ok = ready && writeTubeParam(TUBE_ENABLE, target ? 1 : 0);
-      if (ok && fullScreen) showFeatureStateNotification("Tube Modeller", target);
+      if (ok && fullScreen) showFeatureStateNotification("Tube", target);
       else {
         showToast(ok ? (String("Tube Modeller ") + (target ? "On" : "Off")) :
                        (dspi.connected ? "Unavailable" : "NO DSPi"), 900);
