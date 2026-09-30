@@ -27,3 +27,8 @@ constexpr bool uiShowDownArrow(bool below, bool toastVisible)
 {
   return below && !toastVisible;
 }
+
+constexpr bool uiShowUpArrow(bool below, uint8_t first, bool toastVisible)
+{
+  return !below && first > 0 && !toastVisible;
+}

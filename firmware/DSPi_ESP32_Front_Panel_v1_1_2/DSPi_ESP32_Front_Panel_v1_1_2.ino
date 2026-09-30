@@ -11230,7 +11230,7 @@ String pageTitle(MenuPage page)
 {
   switch (page) {
     case PAGE_MAIN: return "Menu";
-    case PAGE_FEATURES: return "Features";
+    case PAGE_FEATURES: return "DSP Config";
     case PAGE_INPUT: return "Input";
     case PAGE_MEDIA: return "Music Library";
     case PAGE_PRESET: return "Preset";
@@ -11382,7 +11382,7 @@ uint8_t menuItemCount(MenuPage page)
 String menuItemName(MenuPage page, uint8_t index)
 {
   if (page == PAGE_MAIN) {
-    const char *items[] = {"Input", "Music", "Preset", "Features", "System"};
+    const char *items[] = {"Input", "Music", "Preset", "DSP Config", "System"};
     return items[std::min<uint8_t>(index, 4)];
   }
   if (page == PAGE_FEATURES) {
@@ -11448,7 +11448,8 @@ String menuItemName(MenuPage page, uint8_t index)
   }
   if (page == PAGE_SYSTEM) {
     const char *items[] = {
-      "Status", "Screen Settings", "Volume Limit", "WiFi Transfer/Update", "Remote"
+      "Remote", "Volume Limit", "Screen Settings",
+      "WiFi Transfer/Update", "Status"
     };
     return items[std::min<uint8_t>(index, 4)];
   }
@@ -11555,7 +11556,7 @@ String currentEditValue()
     if (menuIndex == 1 || menuIndex == 4 || menuIndex == 5) return String((int)roundf(editFloat));
     return String(editFloat, 1);
   }
-  if (menuPage == PAGE_SYSTEM && menuIndex == 2) return String(editFloat, 1) + " dB";
+  if (menuPage == PAGE_SYSTEM && menuIndex == 1) return String(editFloat, 1) + " dB";
   if (menuPage == PAGE_MEDIA_SETTINGS) {
     return mediaSeekStepText((uint8_t)editInt);
   }
@@ -11651,9 +11652,9 @@ String menuItemValue(MenuPage page, uint8_t index)
     return bleMenuItemValue(index);
   }
   if (page == PAGE_SYSTEM) {
-    if (index == 0) return dspi.connected ? "Ready" : "Fault";
-    if (index == 1) return "Open";
-    if (index == 2) return String(dspi.masterVolumeDb, 1) + " dB";
+    if (index == 1) return String(dspi.masterVolumeDb, 1) + " dB";
+    if (index == 2) return "Open";
+    if (index == 4) return dspi.connected ? "Ready" : "Fault";
     return "";
   }
   if (page == PAGE_MEDIA_SETTINGS) {
@@ -12093,21 +12094,21 @@ void drawSubSynthIcon(int16_t x, int16_t y, uint16_t colour)
 
 void drawTubeIcon(int16_t x, int16_t y, uint16_t colour)
 {
-  // A narrow glass envelope with an accent-coloured glowing filament.
+  // A narrow glass envelope with a filament in the same meter colour.
   canvas->drawRoundRect(x + 2, y + 1, 11, 12, 4, colour);
   canvas->drawFastHLine(x + 3, y + 13, 9, colour);
   canvas->drawFastVLine(x + 5, y + 13, 3, colour);
   canvas->drawFastVLine(x + 9, y + 13, 3, colour);
-  canvas->drawLine(x + 5, y + 10, x + 7, y + 5, uiAccent());
-  canvas->drawLine(x + 7, y + 5, x + 9, y + 10, uiAccent());
+  canvas->drawLine(x + 5, y + 10, x + 7, y + 5, colour);
+  canvas->drawLine(x + 7, y + 5, x + 9, y + 10, colour);
 }
 
 void drawLimiterIcon(int16_t x, int16_t y, uint16_t colour)
 {
   // A fixed ceiling over a bounded waveform, distinct from the tube outline.
-  canvas->drawFastHLine(x + 1, y + 2, 12, uiAccent());
-  canvas->drawFastVLine(x + 1, y + 2, 4, uiAccent());
-  canvas->drawFastVLine(x + 12, y + 2, 4, uiAccent());
+  canvas->drawFastHLine(x + 1, y + 2, 12, colour);
+  canvas->drawFastVLine(x + 1, y + 2, 4, colour);
+  canvas->drawFastVLine(x + 12, y + 2, 4, colour);
   canvas->drawLine(x + 1, y + 11, x + 4, y + 11, colour);
   canvas->drawLine(x + 4, y + 11, x + 6, y + 7, colour);
   canvas->drawLine(x + 6, y + 7, x + 8, y + 13, colour);
@@ -12115,15 +12116,27 @@ void drawLimiterIcon(int16_t x, int16_t y, uint16_t colour)
   canvas->drawLine(x + 10, y + 11, x + 13, y + 11, colour);
 }
 
+void drawFeatureIconForIndex(uint8_t index, int16_t centerX, int16_t y)
+{
+  const uint8_t feature = static_cast<uint8_t>(1u << index);
+  const int16_t x = centerX - uiFeatureIconWidth(feature) / 2;
+  const uint16_t colour = uiVolumeMeterColour();
+  switch (index) {
+    case 0: drawEarIcon(x, y, colour); break;
+    case 1: drawHeadphonesIcon(x, y, colour); break;
+    case 2: drawLevellerIcon(x, y, colour); break;
+    case 3: drawPsybassIcon(x, y, colour); break;
+    case 4: drawSubSynthIcon(x, y, colour); break;
+    case 5: drawTubeIcon(x, y, colour); break;
+    case 6: drawLimiterIcon(x, y, colour); break;
+  }
+}
+
 void drawTopStatus()
 {
   String src = sourceText();
   String preset = presetText();
   const int16_t presetWidth = fontTextWidth(FontMedium, preset);
-  drawFontRight(FontMedium, 302, 7, preset, uiMainText());
-  drawFontText(FontMedium, 18, 7,
-      ellipsizeFontText(FontMedium, src,
-          std::max<int16_t>(0, 302 - presetWidth - 18 - 12)), uiMainText());
 
   uint8_t iconMask = 0;
   if (dspi.loudnessEnabled) iconMask |= UI_FEATURE_LOUDNESS;
@@ -12141,28 +12154,39 @@ void drawTopStatus()
     iconMask |= UI_FEATURE_LIMITER;
   }
   const int16_t iconSpan = uiFeatureIconSpan(iconMask);
-  const int16_t iconX = (UI_W - iconSpan) / 2;
-  const int16_t iconY = 45;
+  // Reserve space between source and preset, so the icons occupy the same
+  // header line instead of a second row over the volume readout.
+  const int16_t sourceBudget = std::max<int16_t>(0,
+      302 - presetWidth - 18 - 28 - iconSpan);
+  const String shownSource = ellipsizeFontText(FontMedium, src, sourceBudget);
+  const int16_t sourceRight = 18 + fontTextWidth(FontMedium, shownSource);
+  const int16_t presetLeft = 302 - presetWidth;
+  drawFontText(FontMedium, 18, 18, shownSource, uiMainText());
+  drawFontRight(FontMedium, 302, 18, preset, uiMainText());
+  const int16_t iconX = std::max<int16_t>(sourceRight + 8,
+      std::min<int16_t>((UI_W - iconSpan) / 2, presetLeft - iconSpan - 8));
+  const int16_t iconY = 22;
+  const uint16_t iconColour = uiVolumeMeterColour();
   if (dspi.loudnessEnabled) {
-    drawEarIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LOUDNESS), iconY, uiMainText());
+    drawEarIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LOUDNESS), iconY, iconColour);
   }
   if (dspi.crossfeedEnabled) {
-    drawHeadphonesIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_CROSSFEED), iconY, uiMainText());
+    drawHeadphonesIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_CROSSFEED), iconY, iconColour);
   }
   if (dspi.levellerEnabled) {
-    drawLevellerIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LEVELLER), iconY, uiMainText());
+    drawLevellerIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LEVELLER), iconY, iconColour);
   }
   if (dspi.psybassSupported && dspi.psybassEnabled) {
-    drawPsybassIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_PSY_BASS), iconY, uiMainText());
+    drawPsybassIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_PSY_BASS), iconY, iconColour);
   }
   if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
-    drawSubSynthIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_SUB_SYNTH), iconY, uiMainText());
+    drawSubSynthIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_SUB_SYNTH), iconY, iconColour);
   }
   if (iconMask & UI_FEATURE_TUBE) {
-    drawTubeIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_TUBE), iconY, uiMainText());
+    drawTubeIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_TUBE), iconY, iconColour);
   }
   if (iconMask & UI_FEATURE_LIMITER) {
-    drawLimiterIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LIMITER), iconY, uiMainText());
+    drawLimiterIcon(iconX + uiFeatureIconOffset(iconMask, UI_FEATURE_LIMITER), iconY, iconColour);
   }
 }
 
@@ -12862,7 +12886,7 @@ void drawMenuValue(int16_t y, const String &value)
     return;
   }
 
-  if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
+  if (menuPage == PAGE_SYSTEM && menuIndex == 1) {
     drawFixedVolumeLimitValue(y, value, valueColour);
     return;
   }
@@ -13913,6 +13937,14 @@ void drawListDownArrow(bool below, bool toastVisible)
   canvas->drawLine(x, 224, x + 5, 219, uiAccent());
 }
 
+void drawListUpArrow(bool below, uint8_t first, bool toastVisible)
+{
+  if (!uiShowUpArrow(below, first, toastVisible)) return;
+  const int16_t x = UI_W - 12;
+  canvas->drawLine(x - 5, 224, x, 219, uiAccent());
+  canvas->drawLine(x, 219, x + 5, 224, uiAccent());
+}
+
 void drawPresetList()
 {
   static constexpr uint8_t VISIBLE_ROWS = 4;
@@ -13949,12 +13981,13 @@ void drawPresetList()
   if (toastVisible) {
     drawFontCentredGlowColour(FontSmall, 197, toastText, uiAccent());
   } else {
-    drawFontCentredGlowColour(FontSmall, 188,
-                              "Hold OK button to save", uiAccent());
-    drawFontCentredGlowColour(FontSmall, 211,
+    drawFontCentredGlowColour(FontMedium, 186,
+                              "Hold Select to save", uiAccent());
+    drawFontCentredGlowColour(FontMedium, 211,
                               "current preset", uiAccent());
   }
   drawListDownArrow(window.below, toastVisible);
+  drawListUpArrow(window.below, window.first, toastVisible);
   flushCanvasLocked();
 }
 
@@ -14002,7 +14035,8 @@ void drawSystemSettingsList()
     const int16_t unitWidth = tubeUnit ? (int16_t)strlen(unit) * 12 + 4 : 0;
     const bool paletteSwatch = menuPage == PAGE_THEME && row < 4;
     if (paletteSwatch) value = "";
-    const int16_t requestedValueWidth = paletteSwatch ? 28 :
+    const int16_t requestedValueWidth = menuPage == PAGE_FEATURES ? 42 :
+        paletteSwatch ? 28 :
         (value.length() ? fontTextWidth(FontMedium, value) + unitWidth : 0);
     const UiListColumns columns = uiListColumns(UI_W, requestedValueWidth);
     String label = ellipsizeFontText(FontMedium,
@@ -14033,6 +14067,9 @@ void drawSystemSettingsList()
       canvas->fillCircle(UI_W - 17, y + 17, 9, swatch);
       canvas->drawCircle(UI_W - 17, y + 17, 10, uiDimText());
     }
+    if (menuPage == PAGE_FEATURES) {
+      drawFeatureIconForIndex(row, UI_W - 28, y + 9);
+    }
 
     if (menuPage == PAGE_IDLE_SCREEN && row < 4 &&
         row == (uint8_t)screenTimeoutAction) {
@@ -14048,6 +14085,7 @@ void drawSystemSettingsList()
     drawFontCentredGlowColour(FontMedium, 211, toast, uiAccent());
   }
   drawListDownArrow(window.below, toastVisible);
+  drawListUpArrow(window.below, window.first, toastVisible);
   flushCanvasLocked();
 }
 
@@ -14080,7 +14118,16 @@ void drawMenu()
     // retains the accepted native 62 px font; adjacent categories provide a
     // restrained visual cue that Left/Right or encoder rotation move across.
     String selected = menuItemName(menuPage, menuIndex);
-    drawMenuTextNative(80, selected, uiMainText());
+    if (selected == "DSP Config") {
+      // The native glyphs exist, but the complete title spans the full panel.
+      // Fit it with a measured 88% rendering instead of clipping its first D.
+      const uint8_t scale = 88;
+      const int16_t width = fontTextWidthScaledKerned(FontMenu, selected, scale);
+      drawFontTextScaledKerned(FontMenu, (UI_W - width) / 2, 80,
+                               selected, uiMainText(), scale);
+    } else {
+      drawMenuTextNative(80, selected, uiMainText());
+    }
     uint8_t count = menuItemCount(PAGE_MAIN);
     uint8_t previous = (uint8_t)((menuIndex + count - 1) % count);
     uint8_t next = (uint8_t)((menuIndex + 1) % count);
@@ -14089,7 +14136,7 @@ void drawMenu()
   } else {
     drawMenuOptionCentredGlow(53, menuItemName(menuPage, menuIndex));
 
-    if (menuPage == PAGE_SYSTEM && menuIndex == 0) {
+    if (menuPage == PAGE_SYSTEM && menuIndex == 4) {
       String summary = dspi.connected ? "DSPi ready" : "Communication fault";
       uint16_t colour = dspi.connected ? uiAccent() : uiFault();
       drawFontCentredGlowColour(FontMedium, 112, summary, colour);
@@ -14103,7 +14150,7 @@ void drawMenu()
       else drawFontCentredGlowColour(FontMedium, 115, name, colour);
     } else {
       drawMenuValue(88, menuItemValue(menuPage, menuIndex));
-      if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
+      if (menuPage == PAGE_SYSTEM && menuIndex == 1) {
         drawFontCentredGlowColour(FontSmall, 190, "Global ceiling", uiAccentSoft());
       }
     }
@@ -14464,7 +14511,7 @@ void beginEdit()
     else if (menuIndex == 3) editFloat = dspi.psybassDriveDb;
     else if (menuIndex == 4) editFloat = dspi.psybassCharacterPct;
     else editFloat = dspi.psybassOriginalDb;
-  } else if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
+  } else if (menuPage == PAGE_SYSTEM && menuIndex == 1) {
     editFloat = dspi.masterVolumeDb;
   } else if (menuPage == PAGE_MEDIA_SETTINGS) {
     editInt = mediaSeekStepIndex;
@@ -14566,7 +14613,7 @@ void adjustEdit(int direction)
     else if (menuIndex == 3) editFloat = wrapEditFloat(editFloat, direction, 0.5f, 0.0f, 18.0f);
     else if (menuIndex == 4) editFloat = wrapEditFloat(editFloat, direction, 5.0f, 0.0f, 100.0f);
     else editFloat = wrapEditFloat(editFloat, direction, 1.0f, -60.0f, 0.0f);
-  } else if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
+  } else if (menuPage == PAGE_SYSTEM && menuIndex == 1) {
     // Keep editing local. Sending a DSP command on every encoder detent makes
     // the control plane compete with active I2S playback and provides no extra
     // safety. The value is committed once, inside a muted transaction.
@@ -14673,7 +14720,7 @@ void applyEdit()
     else if (menuIndex == 3) ok = setPsybassDrive(editFloat);
     else if (menuIndex == 4) ok = setPsybassCharacter(editFloat);
     else ok = setPsybassOriginal(editFloat);
-  } else if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
+  } else if (menuPage == PAGE_SYSTEM && menuIndex == 1) {
     const bool originalMute = dspi.muted;
     const float originalMaster = dspi.masterVolumeDb;
     const bool mediaSessionPresent = mediaPlayerPoc.active() ||
@@ -14867,11 +14914,11 @@ void selectMenuItem()
   }
 
   if (menuPage == PAGE_SYSTEM && menuIndex == 0) {
-    transitionToStatusScreen();
+    enterPage(PAGE_BLUETOOTH);
     return;
   }
 
-  if (menuPage == PAGE_SYSTEM && menuIndex == 1) {
+  if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
     enterPage(PAGE_SCREEN_SETTINGS);
     return;
   }
@@ -14882,7 +14929,7 @@ void selectMenuItem()
   }
 
   if (menuPage == PAGE_SYSTEM && menuIndex == 4) {
-    enterPage(PAGE_BLUETOOTH);
+    transitionToStatusScreen();
     return;
   }
 
@@ -15289,8 +15336,8 @@ void dispatchUiAction(UiAction action)
     else if (action == ACT_MENU_TOGGLE) enterPage(PAGE_MAIN);
     else if (action == ACT_BACK) bleBack();
     else if (action == ACT_SELECT) bleSelect();
-    else if (action == ACT_LEFT) bleNavigate(-1);
-    else if (action == ACT_RIGHT) bleNavigate(1);
+    else if (action == ACT_NAV_UP) bleNavigate(-1);
+    else if (action == ACT_NAV_DOWN) bleNavigate(1);
     return;
   }
 
@@ -15928,18 +15975,26 @@ String remoteLabelForAction(uint8_t mappingIndex)
 // -----------------------------------------------------------------------------
 
 void drawBleListRow(uint8_t visibleRow, bool selected, const String &label,
-                    const String &value, bool mapped)
+                    const String &value, bool mapped, bool alignValueLeft = false)
 {
   const int16_t y = 52 + visibleRow * 36;
   canvas->fillRect(4, y, UI_W - 8, 35, C_BLACK);
   if (selected) canvas->fillRect(4, y, 3, 35, uiMainText());
-  const UiListColumns columns = uiListColumns(UI_W,
-      fontTextWidth(FontMedium, value));
-  drawFontText(FontMedium, columns.labelX, y + 4,
-      ellipsizeFontText(FontMedium, label, columns.labelWidth), uiMainText());
-  drawFontRight(FontMedium, columns.valueRight, y + 4,
-      ellipsizeFontText(FontMedium, value, columns.valueWidth),
-      mapped ? uiAccent() : uiDimText());
+  if (alignValueLeft) {
+    drawFontText(FontMedium, 13, y + 4,
+        ellipsizeFontText(FontMedium, label, 85), uiMainText());
+    drawFontText(FontMedium, 106, y + 4,
+        ellipsizeFontText(FontMedium, value, UI_W - 119),
+        mapped ? uiAccent() : uiDimText());
+  } else {
+    const UiListColumns columns = uiListColumns(UI_W,
+        fontTextWidth(FontMedium, value));
+    drawFontText(FontMedium, columns.labelX, y + 4,
+        ellipsizeFontText(FontMedium, label, columns.labelWidth), uiMainText());
+    drawFontRight(FontMedium, columns.valueRight, y + 4,
+        ellipsizeFontText(FontMedium, value, columns.valueWidth),
+        mapped ? uiAccent() : uiDimText());
+  }
 }
 
 void drawBleSpinner(int16_t cx, int16_t cy, uint8_t phase)
@@ -16024,6 +16079,7 @@ void drawBleScreen()
           remoteMapEntrySet(remoteMap[entry]));
     }
     drawListDownArrow(window.below, false);
+    drawListUpArrow(window.below, window.first, false);
   } else if (bleUiMode == BLE_UI_LEARNING) {
     drawMenuOptionCentredGlow(53, bleMappingNames[bleMappingIndex]);
     String prompt = bleLearningMessage.length() ? bleLearningMessage :
@@ -16038,9 +16094,10 @@ void drawBleScreen()
       const uint8_t option = homeShortcutOptionIndex(homeShortcuts[entry]);
       drawBleListRow(entry - window.first, entry == bleShortcutIndex,
           homeShortcutKeyNames[entry], homeShortcutOptionNames[option],
-          homeShortcuts[entry] != ACT_NONE);
+          homeShortcuts[entry] != ACT_NONE, true);
     }
     drawListDownArrow(window.below, false);
+    drawListUpArrow(window.below, window.first, false);
   } else if (bleUiMode == BLE_UI_SHORTCUT_EDIT) {
     const UiPagedWindow window = uiPagedWindow(HOME_SHORTCUT_OPTION_COUNT,
         bleShortcutOptionIndex, 4, (bleShortcutOptionIndex / 4) * 4);
@@ -16052,6 +16109,7 @@ void drawBleScreen()
           entry != 0);
     }
     drawListDownArrow(window.below, false);
+    drawListUpArrow(window.below, window.first, false);
   } else if (bleUiMode == BLE_UI_CONFIRM_DEFAULTS) {
     drawMenuOptionCentredGlow(53, "Restore Defaults");
     drawFontCentredGlowColour(FontLarge, 88,
@@ -16060,7 +16118,7 @@ void drawBleScreen()
     drawMenuOptionCentredGlow(53, "Remove remote?");
     drawFontCentredGlowColour(FontMedium, 100,
         ellipsizeFontText(FontMedium, String(bleSavedName), UI_W - 24), uiMainText());
-    drawFontCentredGlowColour(FontLarge, 150,
+    drawFontCentredGlowColour(FontMedium, 150,
                               bleRemoveYes ? "Remove" : "Cancel", uiAccent());
   } else if (bleUiMode == BLE_UI_MESSAGE && bleMessage == "Pairing") {
     // Pairing is shown only once. The animated spinner supplies the activity cue.
@@ -17373,7 +17431,7 @@ bool remoteActionRepeatsNavigation(UiAction action)
     return action == ACT_NAV_UP || action == ACT_NAV_DOWN;
   }
   if (uiView == VIEW_BLE) {
-    return action == ACT_LEFT || action == ACT_RIGHT;
+    return action == ACT_NAV_UP || action == ACT_NAV_DOWN;
   }
   return false;
 }

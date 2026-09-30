@@ -28,8 +28,8 @@ class WifiSystemEntryContracts(unittest.TestCase):
 
     def test_system_list_has_wifi_after_volume_limit(self):
         expected = (
-            '"Status", "Screen Settings", "Volume Limit", '
-            '"WiFi Transfer/Update"'
+            '"Remote", "Volume Limit", "Screen Settings",\n'
+            '      "WiFi Transfer/Update", "Status"'
         )
         self.assertIn(expected, INO)
         self.assertIn("case PAGE_SYSTEM: return 4", INO)

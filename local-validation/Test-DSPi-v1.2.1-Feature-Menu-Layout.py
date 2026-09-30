@@ -57,6 +57,10 @@ static_assert(!uiPagedWindow(10, 9, 4, 2).below);
 static_assert(uiShowDownArrow(true, false));
 static_assert(!uiShowDownArrow(true, true));
 static_assert(!uiShowDownArrow(false, false));
+static_assert(uiShowUpArrow(false, 1, false));
+static_assert(!uiShowUpArrow(true, 1, false));
+static_assert(!uiShowUpArrow(false, 0, false));
+static_assert(!uiShowUpArrow(false, 1, true));
 """
         result = compile_assertions(source)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -88,10 +92,11 @@ static_assert(!uiShowDownArrow(false, false));
         self.assertIn("case PAGE_FEATURES: return 7;", counts)
         self.assertIn("case PAGE_SYSTEM: return 5;", counts)
         names = function_body(sketch, "String menuItemName(MenuPage page, uint8_t index)")
-        self.assertIn('"Input", "Music", "Preset", "Features", "System"', names)
+        self.assertIn('"Input", "Music", "Preset", "DSP Config", "System"', names)
         self.assertIn('"Loudness", "Crossfeed", "Leveller", "Psy Bass",', names)
         self.assertIn('"Sub Synth", "Tube Modeller", "Output Limiter"', names)
-        self.assertIn('"WiFi Transfer/Update", "Remote"', names)
+        self.assertIn('"Remote", "Volume Limit", "Screen Settings",', names)
+        self.assertIn('"WiFi Transfer/Update", "Status"', names)
         pages = function_body(sketch, "MenuPage pageForMainIndex(uint8_t index)")
         self.assertIn("PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_FEATURES, PAGE_SYSTEM", pages)
         main_index = function_body(sketch, "int8_t mainIndexForPage(MenuPage page)")
@@ -108,7 +113,7 @@ static_assert(!uiShowDownArrow(false, false));
         self.assertIn("uiListColumns", listing)
         selection = function_body(sketch, "void selectMenuItem()")
         self.assertIn("menuPage == PAGE_FEATURES", selection)
-        self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 4", selection)
+        self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 0", selection)
         back = function_body(sketch, "void goBack()")
         self.assertIn("enterPage(PAGE_FEATURES)", back)
         self.assertIn("enterPage(PAGE_SYSTEM)", back)
@@ -201,10 +206,10 @@ static_assert(uiFeatureIconSpan(UI_FEATURE_TUBE | UI_FEATURE_LIMITER) == 34);
         top = function_body(sketch, "void drawTopStatus()")
         self.assertIn('UI_FEATURE_TUBE', top)
         self.assertIn('UI_FEATURE_LIMITER', top)
-        self.assertIn('const int16_t iconX = (UI_W - iconSpan) / 2', top)
+        self.assertIn('const int16_t iconX = std::max<int16_t>(sourceRight + 8', top)
         self.assertIn('drawTubeIcon(', top)
         self.assertIn('drawLimiterIcon(', top)
-        self.assertNotIn('presetLeft', top)
+        self.assertIn('presetLeft', top)
         self.assertIn('drawTaperLine((UI_W / 2) - 2, 72',
                       function_body(sketch, "void drawHome()"))
 
