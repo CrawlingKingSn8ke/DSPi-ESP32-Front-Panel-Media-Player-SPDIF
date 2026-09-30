@@ -5266,6 +5266,7 @@ enum MenuPage {
   PAGE_MEDIA_SETTINGS,
   PAGE_SCREEN_SETTINGS,
   PAGE_IDLE_SCREEN,
+  PAGE_SPECTRUM,
   PAGE_THEME,
   PAGE_SUB_SYNTH,
   PAGE_SUB_SELECT,
@@ -5987,15 +5988,21 @@ struct StereoSpectrumState {
   bool supported = false;
   bool configured = false;
   bool configChangedExternally = false;
+  bool channelUnavailable = false;
   bool hasFrame[2] = {false, false};
   uint8_t fftOrder = 0;
   uint8_t levelZero = 243;
   uint8_t nextChannel = 0;
   uint32_t lastPollAt = 0;
+  uint32_t lastAvailabilityCheckAt = 0;
   uint8_t configWire[SpectrumRta::kConfigBytes] = {};
   SpectrumRta::BandFrame frame[2];
 };
 StereoSpectrumState stereoSpectrum;
+SpectrumRta::SelectionRecord spectrumSelection;
+uint16_t spectrumAvailableInputs = 0x0003;
+uint16_t spectrumAvailableOutputs = 0x0003;
+bool spectrumAvailabilityKnown = false;
 float analogNeedleDb = -20.0f;
 float analogPeakHeldDb = -20.0f;
 unsigned long analogNeedleUpdatedAt = 0;
@@ -6566,6 +6573,11 @@ void presetPanelSettingsKey(uint8_t slot, char *key, size_t keyCapacity)
   snprintf(key, keyCapacity, "preset_ui%u", (unsigned)slot);
 }
 
+void spectrumPresetKey(uint8_t slot, char *key, size_t keyCapacity)
+{
+  snprintf(key, keyCapacity, "spectrum_p%u", (unsigned)slot);
+}
+
 bool presetPanelSettingsRecordValid(const PresetPanelSettingsRecord &record)
 {
   return record.version == PRESET_PANEL_SETTINGS_VERSION &&
@@ -6597,7 +6609,12 @@ bool savePresetPanelSettings(uint8_t slot)
   char key[12] = {0};
   presetPanelSettingsKey(slot, key, sizeof(key));
   const size_t written = preferences.putBytes(key, &record, sizeof(record));
-  const bool ok = written == sizeof(record);
+  char spectrumKey[16] = {0};
+  spectrumPresetKey(slot, spectrumKey, sizeof(spectrumKey));
+  const size_t spectrumWritten = preferences.putBytes(
+      spectrumKey, &spectrumSelection, sizeof(spectrumSelection));
+  const bool ok = written == sizeof(record) &&
+      spectrumWritten == sizeof(spectrumSelection);
   Serial.printf("PRESET PANEL NVS: save slot=P%u result=%s bytes=%u\n",
                 (unsigned)slot + 1U, ok ? "OK" : "FAILED",
                 (unsigned)written);
@@ -6655,6 +6672,14 @@ bool applyPresetPanelSettings(uint8_t slot, bool force)
     Serial.printf("PRESET PANEL NVS: load slot=P%u result=legacy/default\n",
                   (unsigned)slot + 1U);
     return false;
+  }
+
+  char spectrumKey[16] = {0};
+  spectrumPresetKey(slot, spectrumKey, sizeof(spectrumKey));
+  if (preferences.getBytesLength(spectrumKey) == sizeof(spectrumSelection)) {
+    SpectrumRta::SelectionRecord candidate = {};
+    preferences.getBytes(spectrumKey, &candidate, sizeof(candidate));
+    if (SpectrumRta::validSelection(candidate)) spectrumSelection = candidate;
   }
 
   brightnessPercent = record.brightness;
@@ -7260,6 +7285,7 @@ static const uint8_t REQ_RTA_GET_CONFIG = 0x09;
 static const uint8_t REQ_RTA_GET_CAPS = 0x0A;
 static const uint8_t REQ_RTA_GET_BANDS = 0x0B;
 static const uint8_t REQ_RTA_CONTROL = 0x0E;
+static const uint8_t REQ_GET_OUTPUT_ENABLE = 0x73;
 
 struct UartFrame {
   uint8_t type;
@@ -8770,6 +8796,59 @@ bool readStatusU32ForMeter(uint16_t selector, uint32_t &value)
                length, false) || length != 4) return false;
   value = readLe32(payload);
   return true;
+}
+
+uint16_t spectrumAvailableMask(uint8_t tap)
+{
+  if (!spectrumAvailabilityKnown) return 0;
+  return tap == SpectrumRta::kInputTap
+      ? spectrumAvailableInputs : spectrumAvailableOutputs;
+}
+
+bool refreshSpectrumAvailability()
+{
+  spectrumAvailabilityKnown = false;
+  if (!dspi.connected) return false;
+  uint8_t caps[SpectrumRta::kCapsBytes] = {};
+  uint16_t length = 0;
+  uint8_t fftOrder = 0, levelZero = 0;
+  if (!dspiGet(REQ_RTA_GET_CAPS, 0, sizeof(caps), caps,
+               sizeof(caps), length, false) ||
+      !SpectrumRta::parseCaps(caps, length, fftOrder, levelZero) ||
+      caps[1] > 16 || caps[2] > 16) return false;
+
+  uint32_t activeInputs = 0;
+  if (!readStatusU32ForMeter(23, activeInputs) || activeInputs == 0 ||
+      activeInputs > caps[1]) return false;
+  uint16_t outputMask = 0;
+  for (uint8_t out = 0; out < caps[2]; ++out) {
+    uint8_t enabled = 0;
+    if (!getExactByte(REQ_GET_OUTPUT_ENABLE, enabled, out, false) ||
+        enabled > 1) return false;
+    if (enabled) outputMask |= static_cast<uint16_t>(1u << out);
+  }
+  spectrumAvailableInputs = static_cast<uint16_t>((1u << activeInputs) - 1u);
+  spectrumAvailableOutputs = outputMask;
+  spectrumAvailabilityKnown = true;
+  SpectrumRta::fitSelection(spectrumSelection,
+      spectrumAvailableMask(spectrumSelection.tap));
+  return true;
+}
+
+bool selectedSpectrumChannelsLive()
+{
+  if (spectrumSelection.tap == SpectrumRta::kInputTap) {
+    uint32_t activeInputs = 0;
+    return readStatusU32ForMeter(23, activeInputs) &&
+        spectrumSelection.upper < activeInputs &&
+        spectrumSelection.lower < activeInputs;
+  }
+  uint8_t enabled = 0;
+  if (!getExactByte(REQ_GET_OUTPUT_ENABLE, enabled,
+                    spectrumSelection.upper, false) || enabled != 1) return false;
+  if (spectrumSelection.lower == spectrumSelection.upper) return true;
+  return getExactByte(REQ_GET_OUTPUT_ENABLE, enabled,
+                      spectrumSelection.lower, false) && enabled == 1;
 }
 
 bool pollUsbMeterStreamActive()
@@ -11276,6 +11355,7 @@ String pageTitle(MenuPage page)
     case PAGE_MEDIA_SETTINGS: return "Music Settings";
     case PAGE_SCREEN_SETTINGS: return "Screen Settings";
     case PAGE_IDLE_SCREEN: return "Idle Screen";
+    case PAGE_SPECTRUM: return "Spectrum";
     case PAGE_THEME: return "Theme";
   }
   return "Menu";
@@ -11395,9 +11475,10 @@ uint8_t menuItemCount(MenuPage page)
     case PAGE_BLUETOOTH: return bleMenuItemCount();
     case PAGE_SYSTEM: return 5;
     case PAGE_MEDIA_SETTINGS: return 1;
-    case PAGE_SCREEN_SETTINGS: return 4;
+    case PAGE_SCREEN_SETTINGS: return 5;
     case PAGE_IDLE_SCREEN:
       return screenTimeoutAction == SCREEN_TIMEOUT_DIM ? 5 : 4;
+    case PAGE_SPECTRUM: return 3;
     case PAGE_THEME: return 4;
   }
   return 1;
@@ -11482,7 +11563,12 @@ String menuItemName(MenuPage page, uint8_t index)
     if (index == 0) return "Brightness";
     if (index == 1) return "Idle Settings";
     if (index == 2) return "Idle Screen";
+    if (index == 3) return "Spectrum";
     return "Theme";
+  }
+  if (page == PAGE_SPECTRUM) {
+    const char *items[] = {"Source", "Upper Channel", "Lower Channel"};
+    return items[std::min<uint8_t>(index, 2)];
   }
   if (page == PAGE_IDLE_SCREEN) {
     if (index < 4) {
@@ -11591,6 +11677,10 @@ String currentEditValue()
   if (menuPage == PAGE_IDLE_SCREEN) {
     return screenDimText((uint8_t)editInt);
   }
+  if (menuPage == PAGE_SPECTRUM) {
+    if (menuIndex == 0) return editInt == 0 ? "Inputs" : "Outputs";
+    return spectrumChannelText((uint8_t)editInt, spectrumSelection.tap);
+  }
   if (menuPage == PAGE_THEME) {
     if (menuIndex < 3) return "";
     return vuColourChoiceText((VuColourChoice)editInt);
@@ -11693,6 +11783,12 @@ String menuItemValue(MenuPage page, uint8_t index)
   if (page == PAGE_IDLE_SCREEN) {
     if (index < 4) return "";
     return screenDimText(screenDimPercent) + "%";
+  }
+  if (page == PAGE_SPECTRUM) {
+    if (index == 0) return spectrumSelection.tap == 0 ? "Inputs" : "Outputs";
+    if (!spectrumAvailableMask(spectrumSelection.tap)) return "None";
+    return spectrumChannelText(index == 1 ? spectrumSelection.upper :
+        spectrumSelection.lower, spectrumSelection.tap);
   }
   if (page == PAGE_THEME) {
     if (index < 3) return "";
@@ -11911,6 +12007,18 @@ void serviceScreenPower()
     return;
   }
 
+  // Manual Spectrum and analogue VU selection remains at chosen brightness.
+  // Timeout-invoked views retain the user's configured dim/off policy.
+  if (uiView == VIEW_VISUALIZER && !screenTimeoutViewActive) {
+    lastUserActivityAt = millis();
+    if (screenDimmed) {
+      screenDimmed = false;
+      startBacklightFade(uiBrightnessPwm());
+    }
+    serviceBacklightFade();
+    return;
+  }
+
   uint32_t timeout = screenTimeoutMs();
   const bool expired = timeout != 0 &&
       (uint32_t)(millis() - lastUserActivityAt) >= timeout;
@@ -12101,6 +12209,13 @@ void drawEarIcon(int16_t x, int16_t y, uint16_t colour,
   p.line(10, 9, 7, 8, colour);
   p.line(7, 8, 5, 10, colour);
   p.fillCircle(5, 10, 1, colour);
+}
+
+String spectrumChannelText(uint8_t channel, uint8_t tap)
+{
+  if (channel == 0xff) return "None";
+  return String(tap == SpectrumRta::kInputTap ? "In " : "Out ") +
+      String(channel + 1) + (channel & 1 ? " R" : " L");
 }
 
 void drawHeadphonesIcon(int16_t x, int16_t y, uint16_t colour,
@@ -13020,14 +13135,31 @@ void drawMenuValue(int16_t y, const String &value)
 
 void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
 {
-  constexpr int16_t plotX = 49;
-  constexpr int16_t plotW = 260;
-  constexpr uint8_t plotH = 57;
+  constexpr int16_t plotX = 43;
+  constexpr int16_t plotW = 239;
+  constexpr uint8_t plotH = 46;
   const uint16_t grid = blend565(C_BLACK, uiAccent(), 35);
-  canvas->drawFastHLine(plotX, baseline, plotW, grid);
-  canvas->drawFastHLine(plotX, baseline - plotH / 2, plotW, grid);
-  canvas->drawFastHLine(plotX, baseline - plotH, plotW, grid);
-  drawFontText(FontSmall, 8, baseline - 45, channel == 0 ? "L" : "R", uiMainText());
+  const uint8_t selected = channel == 0 ? spectrumSelection.upper :
+      spectrumSelection.lower;
+  const uint8_t step = stereoSpectrum.hasFrame[channel] &&
+      stereoSpectrum.frame[channel].count > 34 ? 6 : 7;
+  // One-pixel guide lines mark the three 20 dB intervals, 0 to -60 dBFS.
+  for (uint8_t level = 0; level < 4; ++level) {
+    canvas->drawFastHLine(plotX, baseline - (plotH * level) / 3,
+                          plotW, grid);
+  }
+  drawFontText(FontMedium, 8, baseline - 34,
+               selected & 1 ? "R" : "L", uiMainText());
+  canvas->setTextSize(1);
+  canvas->setTextColor(uiAccentSoft());
+  canvas->setCursor(12, baseline - 12);
+  canvas->print(selected + 1);
+  canvas->setTextColor(uiDimText());
+  for (uint8_t level = 0; level < 4; ++level) {
+    canvas->setCursor(286, baseline - plotH * level / 3 - 4);
+    canvas->print(level == 3 ? "0" : level == 2 ? "-20" :
+                  level == 1 ? "-40" : "-60");
+  }
 
   if (!stereoSpectrum.hasFrame[channel]) return;
   const SpectrumRta::BandFrame &frame = stereoSpectrum.frame[channel];
@@ -13035,8 +13167,8 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
     const uint8_t h = SpectrumRta::barHeight(frame.average[band],
                                              stereoSpectrum.levelZero, plotH);
     if (!h) continue;
-    const int16_t x = plotX + band * 7;
-    canvas->fillRoundRect(x, baseline - h, 5, h, 1, colour);
+    const int16_t x = plotX + band * step;
+    canvas->fillRoundRect(x, baseline - h, step - 2, h, 1, colour);
   }
 }
 
@@ -13044,13 +13176,22 @@ bool drawSpectrumVisualizer()
 {
   uiView = VIEW_VISUALIZER;
   drawBase();
-  drawFontCentredGlowColour(FontSmall, 3, "SPECTRUM", uiMainText());
-  canvas->drawFastHLine(10, 36, 300, uiAccentDark());
+  const String preset = presetText();
+  const int16_t sourceBudget = std::max<int16_t>(0,
+      270 - fontTextWidth(FontMedium, preset));
+  drawFontText(FontMedium, 18, 18,
+      ellipsizeFontText(FontMedium, sourceText(), sourceBudget), uiMainText());
+  drawFontRight(FontMedium, 302, 18, preset, uiMainText());
+  drawTaperLine(UI_W / 2, 45, 286, 1, uiAccentDark());
+  drawFontCentredGlow(FontMedium, 52, "Spectrum");
+  drawTaperLine(UI_W / 2, 83, 286, 1, uiAccentDark());
 
   if (stereoSpectrum.probed && !stereoSpectrum.supported) {
-    drawFontCentredGlowColour(FontSmall, 94, "Unavailable", uiWarning());
-    drawFontCentredGlowColour(FontSmall, 135,
-        stereoSpectrum.configChangedExternally ? "Config changed" : "Needs DSPi v1.1.6",
+    drawFontCentredGlowColour(FontMedium, 111, "Unavailable", uiWarning());
+    drawFontCentredGlowColour(FontSmall, 151,
+        stereoSpectrum.configChangedExternally ? "Config changed" :
+        stereoSpectrum.channelUnavailable ? "Channel unavailable" :
+        "Needs DSPi v1.1.6",
         uiDimText());
     return flushVisualizerFrame();
   }
@@ -13058,20 +13199,24 @@ bool drawSpectrumVisualizer()
   const uint16_t leftColour = uiVolumeMeterColour();
   const uint16_t rightColour = volumeMeterPaletteIndex == PALETTE_CYAN
       ? C_BLUE : mix565(leftColour, uiAccent(), 125);
-  drawSpectrumChannel(0, 110, leftColour);
-  drawSpectrumChannel(1, 190, rightColour);
+  drawSpectrumChannel(0, 140, leftColour);
+  if (spectrumSelection.lower != spectrumSelection.upper) {
+    drawSpectrumChannel(1, 207, rightColour);
+  }
 
   if (!stereoSpectrum.hasFrame[0] && !stereoSpectrum.hasFrame[1]) {
-    drawFontCentredGlowColour(FontSmall, 100, "Waiting for audio", uiDimText());
+    drawFontCentredGlowColour(FontSmall, 145, "Waiting for audio", uiDimText());
   }
   canvas->setTextSize(1);
-  canvas->setTextColor(uiDimText());
+  canvas->setTextColor(uiAccentSoft());
   // IEC third-octave centres: indices 3, 10, 20, 30 and 33.
-  canvas->setCursor(66, 210); canvas->print("20");
-  canvas->setCursor(113, 210); canvas->print("100");
-  canvas->setCursor(183, 210); canvas->print("1k");
-  canvas->setCursor(253, 210); canvas->print("10k");
-  canvas->setCursor(281, 210); canvas->print("20k");
+  const uint8_t step = stereoSpectrum.hasFrame[0] &&
+      stereoSpectrum.frame[0].count > 34 ? 6 : 7;
+  canvas->setCursor(40 + 3 * step, 225); canvas->print("20");
+  canvas->setCursor(36 + 10 * step, 225); canvas->print("100");
+  canvas->setCursor(40 + 20 * step, 225); canvas->print("1k");
+  canvas->setCursor(36 + 30 * step, 225); canvas->print("10k");
+  canvas->setCursor(38 + 33 * step, 225); canvas->print("20k");
   return flushVisualizerFrame();
 }
 
@@ -14047,7 +14192,8 @@ bool isSystemSettingsListPage(MenuPage page)
          page == PAGE_LOUDNESS || page == PAGE_CROSSFEED ||
          page == PAGE_LEVELLER || page == PAGE_PSYBASS ||
          page == PAGE_BLUETOOTH || page == PAGE_SCREEN_SETTINGS ||
-         page == PAGE_IDLE_SCREEN || page == PAGE_THEME ||
+         page == PAGE_IDLE_SCREEN || page == PAGE_SPECTRUM ||
+         page == PAGE_THEME ||
          isSubSynthPage(page) || isTubeLimiterPage(page);
 }
 
@@ -14337,6 +14483,10 @@ void enterPage(MenuPage page)
 {
   encoderMenuDetentRemainder = 0;
   fadeUiOut();
+  if (page == PAGE_SPECTRUM && !refreshSpectrumAvailability()) {
+    spectrumAvailabilityKnown = false;
+    showToast("Spectrum unavailable");
+  }
   if (isSubSynthPage(page) && dspi.connected) {
     if (!dspi.subSynth.known) probeSubSynth(dspi.subSynth);
     if (dspi.subSynth.supported && !syncSubSynthDetails(page == PAGE_SUB_OUTPUTS)) {
@@ -14466,7 +14616,8 @@ void goBack()
     drawMenu();
     return;
   }
-  if (menuPage == PAGE_THEME || menuPage == PAGE_IDLE_SCREEN) {
+  if (menuPage == PAGE_THEME || menuPage == PAGE_IDLE_SCREEN ||
+      menuPage == PAGE_SPECTRUM) {
     enterPage(PAGE_SCREEN_SETTINGS);
     return;
   }
@@ -14500,6 +14651,10 @@ void goBack()
 
 void beginEdit()
 {
+  if (menuPage == PAGE_SPECTRUM && menuIndex != 0 &&
+      !spectrumAvailableMask(spectrumSelection.tap)) {
+    showToast("No live channels"); drawMenu(); return;
+  }
   if (isSubSynthPage(menuPage)) {
     const SubSynthParam p = currentSubSynthParam();
     float current = 0;
@@ -14561,6 +14716,9 @@ void beginEdit()
     else editInt = screenTimeoutOption;
   } else if (menuPage == PAGE_IDLE_SCREEN) {
     editInt = screenDimPercent;
+  } else if (menuPage == PAGE_SPECTRUM) {
+    editInt = menuIndex == 0 ? spectrumSelection.tap :
+        menuIndex == 1 ? spectrumSelection.upper : spectrumSelection.lower;
   } else if (menuPage == PAGE_THEME) {
     if (menuIndex == 0) editInt = mainTextPaletteIndex;
     else if (menuIndex == 1) editInt = accentPaletteIndex;
@@ -14673,6 +14831,16 @@ void adjustEdit(int direction)
     }
   } else if (menuPage == PAGE_IDLE_SCREEN) {
     editInt = wrapEditInt(editInt, direction, 10, 10, 80);
+  } else if (menuPage == PAGE_SPECTRUM) {
+    if (menuIndex == 0) editInt = editInt == 0 ? 1 : 0;
+    else {
+      const uint8_t other = menuIndex == 1 ? spectrumSelection.lower :
+          spectrumSelection.upper;
+      const uint8_t next = SpectrumRta::nextEnabled(
+          spectrumAvailableMask(spectrumSelection.tap), (uint8_t)editInt,
+          direction, other);
+      if (next != 0xff) editInt = next;
+    }
   } else if (menuPage == PAGE_THEME) {
     if (menuIndex == 1) {
       editInt = wrapEditInt(editInt, direction, 1,
@@ -14840,6 +15008,18 @@ void applyEdit()
     markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
     recordUserActivity();
     successText = "Applied";
+  } else if (menuPage == PAGE_SPECTRUM) {
+    if (menuIndex == 0) {
+      spectrumSelection.tap = (uint8_t)editInt;
+      SpectrumRta::fitSelection(spectrumSelection,
+          spectrumAvailableMask(spectrumSelection.tap));
+    } else if (menuIndex == 1) {
+      spectrumSelection.upper = (uint8_t)editInt;
+    } else {
+      spectrumSelection.lower = (uint8_t)editInt;
+    }
+    markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
+    successText = "Spectrum saved";
   } else if (menuPage == PAGE_THEME) {
     if (menuIndex == 0) {
       mainTextPaletteIndex = (uint8_t)constrain(
@@ -14980,6 +15160,10 @@ void selectMenuItem()
       return;
     }
     if (menuIndex == 3) {
+      enterPage(PAGE_SPECTRUM);
+      return;
+    }
+    if (menuIndex == 4) {
       enterPage(PAGE_THEME);
       return;
     }
@@ -18065,6 +18249,8 @@ void serviceDeferredPreferences()
          preferences.putUChar("screen_act", screenTimeoutAction) == 1 &&
          preferences.putUChar("media_seek", mediaSeekStepIndex) == 1 &&
          preferences.putUChar("media_set_ver", MEDIA_SETTINGS_VERSION) == 1 &&
+         preferences.putBytes("sp_cfg", &spectrumSelection,
+                              sizeof(spectrumSelection)) == sizeof(spectrumSelection) &&
          persistThemePreferencesNow();
   }
 
@@ -19346,6 +19532,12 @@ void setup()
 
   preferences.begin("dspi-panel", false);
 
+  if (preferences.getBytesLength("sp_cfg") == sizeof(spectrumSelection)) {
+    SpectrumRta::SelectionRecord candidate = {};
+    preferences.getBytes("sp_cfg", &candidate, sizeof(candidate));
+    if (SpectrumRta::validSelection(candidate)) spectrumSelection = candidate;
+  }
+
   // Version 3 adds two palette roles and separates digital/home meters from
   // the analogue face. Every older VU choice is copied to both new roles so
   // the first boot after upgrade is visually identical.
@@ -19545,23 +19737,48 @@ void serviceStereoSpectrum()
       drawVisualizer();
       return;
     }
-    SpectrumRta::makeOutputPairConfig(stereoSpectrum.configWire,
-                                      stereoSpectrum.fftOrder);
+    const uint8_t channelLimit = spectrumSelection.tap == SpectrumRta::kInputTap
+        ? caps[1] : caps[2];
+    if (spectrumSelection.upper >= channelLimit ||
+        spectrumSelection.lower >= channelLimit ||
+        !selectedSpectrumChannelsLive()) {
+      stereoSpectrum.supported = false;
+      stereoSpectrum.channelUnavailable = true;
+      Serial.println("SPECTRUM: selected channel unavailable");
+      drawVisualizer();
+      return;
+    }
+    SpectrumRta::makeConfig(stereoSpectrum.configWire,
+                            stereoSpectrum.fftOrder, spectrumSelection);
     stereoSpectrum.configured = dspiSet(REQ_RTA_SET_CONFIG, 0,
         stereoSpectrum.configWire, sizeof(stereoSpectrum.configWire), false);
     if (!stereoSpectrum.configured) {
       stereoSpectrum.supported = false;
-      Serial.println("SPECTRUM: output 1/2 setup rejected");
+      Serial.println("SPECTRUM: selected channels rejected");
       drawVisualizer();
       return;
     }
-    Serial.println("SPECTRUM: output 1/2 selected; read-on-demand enabled");
+    Serial.printf("SPECTRUM: tap=%u channels=%u/%u read-on-demand enabled\n",
+                  spectrumSelection.tap, spectrumSelection.upper + 1,
+                  spectrumSelection.lower + 1);
   }
   if (!stereoSpectrum.supported || !stereoSpectrum.configured) return;
 
   if ((uint32_t)(millis() - stereoSpectrum.lastPollAt) < SPECTRUM_POLL_MS) return;
   stereoSpectrum.lastPollAt = millis();
   if (stereoSpectrum.nextChannel == 0) {
+    if ((uint32_t)(millis() - stereoSpectrum.lastAvailabilityCheckAt) >= 2000) {
+      stereoSpectrum.lastAvailabilityCheckAt = millis();
+      if (!selectedSpectrumChannelsLive()) {
+        stereoSpectrum.supported = false;
+        stereoSpectrum.channelUnavailable = true;
+        stereoSpectrum.hasFrame[0] = false;
+        stereoSpectrum.hasFrame[1] = false;
+        Serial.println("SPECTRUM: selected channel no longer enabled");
+        drawVisualizer();
+        return;
+      }
+    }
     uint8_t current[SpectrumRta::kConfigBytes] = {};
     uint16_t configLength = 0;
     if (!dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
@@ -19569,7 +19786,7 @@ void serviceStereoSpectrum()
     if (configLength != sizeof(current) ||
         memcmp(current, stereoSpectrum.configWire, sizeof(current)) != 0) {
       // The Console or another surface took ownership. Never relabel its
-      // input/multichannel data as output L/R and never stop its analyser.
+      // channels as our selected pair and never stop its analyser.
       stereoSpectrum.configured = false;
       stereoSpectrum.supported = false;
       stereoSpectrum.configChangedExternally = true;
@@ -19579,18 +19796,21 @@ void serviceStereoSpectrum()
       return;
     }
   }
-  const uint8_t channel = stereoSpectrum.nextChannel;
-  stereoSpectrum.nextChannel ^= 1;
+  const uint8_t slot = stereoSpectrum.nextChannel;
+  const uint8_t channel = slot == 0 ? spectrumSelection.upper :
+      spectrumSelection.lower;
+  stereoSpectrum.nextChannel = spectrumSelection.upper ==
+      spectrumSelection.lower ? 0 : slot ^ 1;
   uint8_t payload[SpectrumRta::kBandFrameBytes] = {};
   uint16_t length = 0;
   if (dspiGet(REQ_RTA_GET_BANDS, channel, sizeof(payload), payload,
               sizeof(payload), length, false)) {
     SpectrumRta::BandFrame frame;
     if (SpectrumRta::parseBandFrame(payload, length, channel, frame)) {
-      stereoSpectrum.frame[channel] = frame;
-      stereoSpectrum.hasFrame[channel] = true;
+      stereoSpectrum.frame[slot] = frame;
+      stereoSpectrum.hasFrame[slot] = true;
     } else {
-      stereoSpectrum.hasFrame[channel] = false;
+      stereoSpectrum.hasFrame[slot] = false;
     }
   }
   // One full LCD transfer per L/R pair, not one per UART response.
