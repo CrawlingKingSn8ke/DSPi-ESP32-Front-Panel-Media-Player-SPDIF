@@ -8157,8 +8157,8 @@ String tubeValueText(TubeParam p, float value)
 {
   if (p == TUBE_ENABLE) return value ? "On" : "Off";
   if (p == TUBE_TYPE) return TUBE_TYPE_NAMES[constrain((int)value, 0, 16)];
-  if (p == TUBE_DRIVE) return String(value, 1) + " dB";
-  if (p == TUBE_MIX) return String((int)value) + " pct";
+  if (p == TUBE_DRIVE) return String(value, 1);
+  if (p == TUBE_MIX) return String((int)value);
   return "Open";
 }
 
@@ -11638,6 +11638,7 @@ bool menuValueUsesPercent()
   return (menuPage == PAGE_LOUDNESS && menuIndex == 2) ||
          (menuPage == PAGE_LEVELLER && menuIndex == 1) ||
          (menuPage == PAGE_PSYBASS && menuIndex == 4) ||
+         (menuPage == PAGE_TUBE && menuIndex == 3) ||
          (menuPage == PAGE_SCREEN_SETTINGS && menuIndex == 0) ||
          (menuPage == PAGE_IDLE_SCREEN && menuIndex == 4);
 }
@@ -11646,6 +11647,7 @@ const char *menuValueUnit()
 {
   if (menuPage == PAGE_PSYBASS && !psybassWritable()) return "";
   if (menuValueUsesPercent()) return "%";
+  if (menuPage == PAGE_TUBE && menuIndex == 2) return "dB";
   if (menuPage == PAGE_LOUDNESS && menuIndex == 1) return "dB";
   if (menuPage == PAGE_CROSSFEED && menuIndex == 2) return "Hz";
   if (menuPage == PAGE_CROSSFEED && menuIndex == 3) return "dB";
@@ -12708,6 +12710,23 @@ void drawFixedVolumeLimitValue(int16_t y, const String &value, uint16_t colour)
   drawFontText(FontDb, dbX, y + 50, "dB", colour);
 }
 
+void drawMenuNumericWithCompactUnit(int16_t y, const String &number,
+                                    const char *unit, uint16_t colour)
+{
+  const int16_t numberWidth = fontTextWidth(FontLarge, number);
+  const int16_t unitWidth = (int16_t)strlen(unit) * 12;
+  const int16_t numberX = std::max<int16_t>(4,
+      (UI_W - numberWidth - 6 - unitWidth) / 2);
+  const uint16_t glow = blend565(C_BLACK, colour, 74);
+  drawFontText(FontLarge, numberX + 1, y, number, glow);
+  drawFontText(FontLarge, numberX, y + 1, number, glow);
+  drawFontText(FontLarge, numberX, y, number, colour);
+  canvas->setTextSize(2);
+  canvas->setTextColor(colour);
+  canvas->setCursor(numberX + numberWidth + 6, y + 55);
+  canvas->print(unit);
+}
+
 void drawPaletteSwatchEditor(int16_t y)
 {
   const uint8_t selected = (uint8_t)constrain(
@@ -12766,6 +12785,11 @@ void drawMenuValue(int16_t y, const String &value)
 
   if (menuPage == PAGE_SYSTEM && menuIndex == 2) {
     drawFixedVolumeLimitValue(y, value, valueColour);
+    return;
+  }
+
+  if (menuPage == PAGE_TUBE && (menuIndex == 2 || menuIndex == 3)) {
+    drawMenuNumericWithCompactUnit(y, value, menuValueUnit(), valueColour);
     return;
   }
 
@@ -13893,17 +13917,32 @@ void drawSystemSettingsList()
     if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
 
     String value = menuItemValue(menuPage, row);
+    const bool tubeUnit = menuPage == PAGE_TUBE &&
+        (row == 2 || row == 3) && value != "Unavailable";
+    const char *unit = tubeUnit ? (row == 2 ? "dB" : "%") : "";
+    const int16_t unitWidth = tubeUnit ? (int16_t)strlen(unit) * 12 + 4 : 0;
     const bool paletteSwatch = menuPage == PAGE_THEME && row < 4;
     if (paletteSwatch) value = "";
     const int16_t requestedValueWidth = paletteSwatch ? 28 :
-        (value.length() ? fontTextWidth(FontMedium, value) : 0);
+        (value.length() ? fontTextWidth(FontMedium, value) + unitWidth : 0);
     const UiListColumns columns = uiListColumns(UI_W, requestedValueWidth);
     String label = ellipsizeFontText(FontMedium,
         menuItemName(menuPage, row), columns.labelWidth);
     drawFontText(FontMedium, columns.labelX, y + 4, label, uiMainText());
     if (value.length()) {
-      value = ellipsizeFontText(FontMedium, value, columns.valueWidth);
-      drawFontRight(FontMedium, columns.valueRight, y + 4, value, uiAccent());
+      value = ellipsizeFontText(FontMedium, value,
+          columns.valueWidth - unitWidth);
+      if (tubeUnit) {
+        const int16_t numberX = columns.valueRight - unitWidth -
+            fontTextWidth(FontMedium, value);
+        drawFontText(FontMedium, numberX, y + 4, value, uiAccent());
+        canvas->setTextSize(2);
+        canvas->setTextColor(uiAccent());
+        canvas->setCursor(columns.valueRight - unitWidth + 4, y + 12);
+        canvas->print(unit);
+      } else {
+        drawFontRight(FontMedium, columns.valueRight, y + 4, value, uiAccent());
+      }
     }
     if (paletteSwatch) {
       const uint16_t swatch = row < 3

@@ -112,6 +112,25 @@ static_assert(!uiShowDownArrow(false, false));
         self.assertNotIn("enterPage(PAGE_FEATURES)",
                          function_body(sketch, "void renderMediaBrowser(bool fullFrame)"))
 
+    def test_tube_drive_and_mix_keep_large_numbers_with_matching_small_units(self):
+        sketch = SKETCH.read_text()
+        value = function_body(sketch, "String tubeValueText(TubeParam p, float value)")
+        self.assertIn('if (p == TUBE_DRIVE) return String(value, 1);', value)
+        self.assertIn('if (p == TUBE_MIX) return String((int)value);', value)
+        self.assertNotIn('pct', value)
+        unit = function_body(sketch, "const char *menuValueUnit()")
+        self.assertIn('menuPage == PAGE_TUBE && menuIndex == 2', unit)
+        percent = function_body(sketch, "bool menuValueUsesPercent()")
+        self.assertIn('menuPage == PAGE_TUBE && menuIndex == 3', percent)
+        editor = function_body(sketch, "void drawMenuValue(int16_t y, const String &value)")
+        self.assertIn('drawMenuNumericWithCompactUnit(y, value, menuValueUnit()', editor)
+        numeric = function_body(sketch, "void drawMenuNumericWithCompactUnit(")
+        self.assertIn('fontTextWidth(FontLarge, number)', numeric)
+        self.assertIn('canvas->setTextSize(2)', numeric)
+        listing = function_body(sketch, "void drawSystemSettingsList()")
+        self.assertIn('const bool tubeUnit', listing)
+        self.assertIn('canvas->setTextSize(2)', listing)
+
 
 if __name__ == "__main__":
     unittest.main()
