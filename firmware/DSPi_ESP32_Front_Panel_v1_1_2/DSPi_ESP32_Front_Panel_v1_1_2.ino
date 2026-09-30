@@ -33,19 +33,19 @@
   - User Volume remains the daily listening control; Volume Limit controls DSPi Master Volume
   - System > Volume Limit uses verified 0xD2 set and 0xD3 readback
   - Fixed-size Volume Limit typography across its complete range
-  - Five-second encoder hold opens a full-screen stereo L/R segmented VU display
+  - Five-second encoder hold opens a full-screen output L/R spectrum display
   - Encoder rotation still changes User Volume while the VU display is active
-  - VU display keeps the current User Volume visible and Back/one press exits
+  - Spectrum and analogue VU pages retain volume controls and Back exits
   - Home-shortcut toggles show a brief clean On/Off confirmation
   - Enabled feature symbols remain exactly as before; disabled symbols remain hidden
   - Preset page refreshes Console-saved slot names whenever it is opened
   - Save Current captures the active DSPi preset through the native 0x90 command
   - Global Volume Limit is persisted through DSPi independent storage
   - Large confirmed preset and input change screens for distance viewing
-  - Screen timeout actions: dim, screen off, digital VU or analogue VU
+  - Screen timeout actions: dim, screen off, stereo spectrum or analogue VU
   - Complete six-source beta5 Input editor with verified dynamic availability
   - S/PDIF 1/2/3 and ADAT lock/rate status from exact protocol responses
-  - Approved analogue combined-peak VU page after the unchanged stereo VU
+  - Approved analogue combined-peak VU page after the stereo spectrum
   - Meter snapshots clear on source/preset/link changes and inactive USB streams
   - Single saved BLE remote ownership with state-derived menu rows
   - Remove Remote completes disconnect, bond deletion and stack restart before success
@@ -98,6 +98,7 @@
 #include "TubeLimiter.h"
 #include "UiReadability.h"
 #include "UiMenuLayout.h"
+#include "SpectrumRta.h"
 #include "WifiTransferMode.h"
 
 #define DSPI_HAVE_NIMBLE 1
@@ -238,7 +239,7 @@
 #define BLE_REPORTS_PER_LOOP 12
 #define BLE_REPORT_QUEUE_LENGTH 24
 #define BLE_HELD_FAILSAFE_MS 8000
-#define VISUALIZER_SEGMENT_COUNT 19
+#define SPECTRUM_POLL_MS 110
 #define BLE_MAX_INPUT_SOURCES 32
 
 #define LCD_NATIVE_W 240
@@ -5418,7 +5419,8 @@ static_assert(sizeof(LegacyPresetPanelSettingsRecordV1) == 8,
 enum ScreenTimeoutAction : uint8_t {
   SCREEN_TIMEOUT_DIM = 0,
   SCREEN_TIMEOUT_OFF = 1,
-  SCREEN_TIMEOUT_DIGITAL_VU = 2,
+  // Keep persisted value 2: existing digital-page preference becomes Spectrum.
+  SCREEN_TIMEOUT_SPECTRUM = 2,
   SCREEN_TIMEOUT_ANALOG_VU = 3
 };
 
@@ -5975,11 +5977,25 @@ float meterRightTrail = 0.0f;
 unsigned long outputClipUntil = 0;
 
 enum VisualizerPage : uint8_t {
-  VISUALIZER_STEREO = 0,
+  VISUALIZER_SPECTRUM = 0,
   VISUALIZER_ANALOG = 1
 };
 
-VisualizerPage visualizerPage = VISUALIZER_STEREO;
+VisualizerPage visualizerPage = VISUALIZER_SPECTRUM;
+struct StereoSpectrumState {
+  bool probed = false;
+  bool supported = false;
+  bool configured = false;
+  bool configChangedExternally = false;
+  bool hasFrame[2] = {false, false};
+  uint8_t fftOrder = 0;
+  uint8_t levelZero = 243;
+  uint8_t nextChannel = 0;
+  uint32_t lastPollAt = 0;
+  uint8_t configWire[SpectrumRta::kConfigBytes] = {};
+  SpectrumRta::BandFrame frame[2];
+};
+StereoSpectrumState stereoSpectrum;
 float analogNeedleDb = -20.0f;
 float analogPeakHeldDb = -20.0f;
 unsigned long analogNeedleUpdatedAt = 0;
@@ -6184,6 +6200,8 @@ void requestWifiTransferSafeExit(const char *reason);
 void serviceWifiTransfer();
 void serviceWifiTransferUiRedraw();
 bool drawVisualizer();
+void serviceStereoSpectrum();
+void serviceStereoSpectrumExit();
 float combinedOutputPeakDbfs();
 float analogDisplayVuFromDbfs(float dbfs);
 void resetAnalogPeakHold(float seedDb);
@@ -7237,12 +7255,18 @@ static const uint8_t REQ_GET_INPUT_RATE = 0xEE;
 static const uint8_t REQ_GET_SPDIF_INPUT_CONFIG = 0xEF;
 static const uint8_t REQ_GET_I2S_RX_PIN = 0xF2;
 static const uint8_t REQ_GET_PLATFORM = 0x7F;
+static const uint8_t REQ_RTA_SET_CONFIG = 0x08;
+static const uint8_t REQ_RTA_GET_CONFIG = 0x09;
+static const uint8_t REQ_RTA_GET_CAPS = 0x0A;
+static const uint8_t REQ_RTA_GET_BANDS = 0x0B;
+static const uint8_t REQ_RTA_CONTROL = 0x0E;
 
 struct UartFrame {
   uint8_t type;
   uint8_t status;
   uint16_t length;
-  uint8_t payload[64];
+  // RTA V3 per-channel band frames are 82 bytes. No all-channel bulk GETs.
+  uint8_t payload[96];
 };
 
 enum DspiFrameReadResult : uint8_t {
@@ -11497,7 +11521,7 @@ String screenTimeoutActionText(ScreenTimeoutAction action)
   switch (action) {
     case SCREEN_TIMEOUT_DIM: return "Dim Brightness";
     case SCREEN_TIMEOUT_OFF: return "Screen Off";
-    case SCREEN_TIMEOUT_DIGITAL_VU: return "Digital VU";
+    case SCREEN_TIMEOUT_SPECTRUM: return "Spectrum";
     case SCREEN_TIMEOUT_ANALOG_VU: return "Analog VU";
     default: return "Dim Brightness";
   }
@@ -11900,7 +11924,7 @@ void serviceScreenPower()
       activateScreenTimeoutView(
           screenTimeoutAction == SCREEN_TIMEOUT_ANALOG_VU
               ? VISUALIZER_ANALOG
-              : VISUALIZER_STEREO);
+              : VISUALIZER_SPECTRUM);
     }
   }
   serviceBacklightFade();
@@ -11923,10 +11947,9 @@ bool flushCanvasTryLocked(uint32_t timeoutMs)
 
 bool flushVisualizerFrame()
 {
-  // Manual VU mode retains its existing rendering behaviour. Only the
-  // automatic idle VU uses a bounded lock attempt so an SD transaction can
-  // never leave the main UI task waiting indefinitely for a full-frame flush.
-  if (screenTimeoutViewActive) {
+  // A spectrum redraw never waits behind an SD read during music playback.
+  // Preserve the accepted manual analogue VU rendering path.
+  if (screenTimeoutViewActive || visualizerPage == VISUALIZER_SPECTRUM) {
     return flushCanvasTryLocked(SCREEN_TIMEOUT_VU_SPI_TRY_MS);
   }
   flushCanvasLocked();
@@ -12995,102 +13018,67 @@ void drawMenuValue(int16_t y, const String &value)
   }
 }
 
-uint16_t visualizerSegmentColour(uint8_t segmentFromBottom)
+void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
 {
-  uint16_t pos = (uint16_t)segmentFromBottom * 1000U / (VISUALIZER_SEGMENT_COUNT - 1U);
-  if (volumeMeterPaletteIndex == PALETTE_CYAN) {
-    if (pos < 240) return mix565(C_CYAN, C_BLUE, (uint8_t)((pos * 255U) / 240U));
-    if (pos < 470) return mix565(C_BLUE, C_PURPLE, (uint8_t)(((pos - 240U) * 255U) / 230U));
-    if (pos < 680) return mix565(C_PURPLE, C_MAGENTA, (uint8_t)(((pos - 470U) * 255U) / 210U));
-    if (pos < 850) return mix565(C_MAGENTA, C_ORANGE, (uint8_t)(((pos - 680U) * 255U) / 170U));
-    return mix565(C_ORANGE, C_RED, (uint8_t)(((pos - 850U) * 255U) / 150U));
-  }
+  constexpr int16_t plotX = 49;
+  constexpr int16_t plotW = 260;
+  constexpr uint8_t plotH = 57;
+  const uint16_t grid = blend565(C_BLACK, uiAccent(), 35);
+  canvas->drawFastHLine(plotX, baseline, plotW, grid);
+  canvas->drawFastHLine(plotX, baseline - plotH / 2, plotW, grid);
+  canvas->drawFastHLine(plotX, baseline - plotH, plotW, grid);
+  drawFontText(FontSmall, 8, baseline - 45, channel == 0 ? "L" : "R", uiMainText());
 
-  const uint16_t vu = uiVolumeMeterColour();
-  if (pos < 680) {
-    return blend565(C_BLACK, vu, (uint8_t)(96 + (pos * 159UL) / 680UL));
-  }
-  if (pos < 850) return mix565(vu, uiWarning(),
-      (uint8_t)(((pos - 680U) * 255U) / 170U));
-  return mix565(uiWarning(), uiClip(),
-      (uint8_t)(((pos - 850U) * 255U) / 150U));
-}
-
-void drawStereoVuColumn(int16_t x, float activeWidth, float trailWidth)
-{
-  const int16_t meterW = 48;
-  const int16_t segmentH = 6;
-  const int16_t segmentGap = 2;
-  const int16_t bottomY = 204;
-
-  float activeLevel = constrain(activeWidth / 266.0f, 0.0f, 1.0f);
-  float trailLevel = constrain(trailWidth / 266.0f, activeLevel, 1.0f);
-  int16_t activeSegments = constrain((int16_t)roundf(activeLevel * VISUALIZER_SEGMENT_COUNT),
-                                     (int16_t)0, (int16_t)VISUALIZER_SEGMENT_COUNT);
-  int16_t trailSegments = constrain((int16_t)roundf(trailLevel * VISUALIZER_SEGMENT_COUNT),
-                                     activeSegments, (int16_t)VISUALIZER_SEGMENT_COUNT);
-
-  for (uint8_t segment = 0; segment < VISUALIZER_SEGMENT_COUNT; segment++) {
-    int16_t y = bottomY - (segment + 1) * (segmentH + segmentGap);
-    uint16_t base = visualizerSegmentColour(segment);
-    uint8_t alpha = 18;
-    if (segment < activeSegments) alpha = 255;
-    else if (segment < trailSegments) alpha = 88;
-    uint16_t colour = alpha == 255 ? base : blend565(C_BLACK, base, alpha);
-
-    if (segment < activeSegments) {
-      canvas->fillRoundRect(x - 1, y - 1, meterW + 2, segmentH + 2, 2,
-                            blend565(C_BLACK, base, 36));
-    }
-    canvas->fillRoundRect(x, y, meterW, segmentH, 2, colour);
+  if (!stereoSpectrum.hasFrame[channel]) return;
+  const SpectrumRta::BandFrame &frame = stereoSpectrum.frame[channel];
+  for (uint8_t band = 0; band < frame.count; ++band) {
+    const uint8_t h = SpectrumRta::barHeight(frame.average[band],
+                                             stereoSpectrum.levelZero, plotH);
+    if (!h) continue;
+    const int16_t x = plotX + band * 7;
+    canvas->fillRoundRect(x, baseline - h, 5, h, 1, colour);
   }
 }
 
-bool drawStereoVisualizer()
+bool drawSpectrumVisualizer()
 {
   uiView = VIEW_VISUALIZER;
   drawBase();
+  drawFontCentredGlowColour(FontSmall, 3, "SPECTRUM", uiMainText());
+  canvas->drawFastHLine(10, 36, 300, uiAccentDark());
 
-  const int16_t meterW = 48;
-  const int16_t leftX = 35;
-  const int16_t rightX = UI_W - leftX - meterW;
-
-  drawStereoVuColumn(leftX, meterLeftActive, meterLeftTrail);
-  drawStereoVuColumn(rightX, meterRightActive, meterRightTrail);
-
-  // Use a reduced native FontLarge number, rather than bitmap text, so the
-  // centre value is substantially larger than Fix6 but still cannot touch the
-  // accepted meter columns. The suffix and mute state have their own lines.
-  String volume = String(dspi.volumeDb, 1);
-  int16_t unscaledWidth = fontTextWidthKerned(FontLarge, volume);
-  const int16_t centreLeft = leftX + meterW + 4;
-  const int16_t centreRight = rightX - 4;
-  const int16_t maximumWidth = centreRight - centreLeft;
-  uint8_t scalePercent = 72;
-  if (unscaledWidth > 0) {
-    scalePercent = std::min<uint8_t>(scalePercent,
-      (uint8_t)std::max<int16_t>(52, (maximumWidth * 100) / unscaledWidth));
+  if (stereoSpectrum.probed && !stereoSpectrum.supported) {
+    drawFontCentredGlowColour(FontSmall, 94, "Unavailable", uiWarning());
+    drawFontCentredGlowColour(FontSmall, 135,
+        stereoSpectrum.configChangedExternally ? "Config changed" : "Needs DSPi v1.1.6",
+        uiDimText());
+    return flushVisualizerFrame();
   }
-  int16_t scaledWidth = fontTextWidthScaledKerned(FontLarge, volume, scalePercent);
-  int16_t volumeX = (UI_W - scaledWidth) / 2;
-  uint16_t glow = blend565(C_BLACK, uiMainText(), 82);
-  drawFontTextScaledKerned(FontLarge, volumeX + 1, 70, volume, glow, scalePercent);
-  drawFontTextScaledKerned(FontLarge, volumeX, 70, volume, uiMainText(), scalePercent);
-  drawFontCentredGlowColour(FontSmall, 139, "dB", uiMainText());
-  if (dspi.muted) drawFontCentredGlowColour(FontSmall, 169, "Mute", uiWarning());
 
-  int16_t leftLabelX = leftX + (meterW - fontTextWidth(FontMedium, "L")) / 2;
-  int16_t rightLabelX = rightX + (meterW - fontTextWidth(FontMedium, "R")) / 2;
-  drawFontText(FontMedium, leftLabelX, 207, "L", uiMainText());
-  drawFontText(FontMedium, rightLabelX, 207, "R", uiMainText());
+  const uint16_t leftColour = uiVolumeMeterColour();
+  const uint16_t rightColour = volumeMeterPaletteIndex == PALETTE_CYAN
+      ? C_BLUE : mix565(leftColour, uiAccent(), 125);
+  drawSpectrumChannel(0, 110, leftColour);
+  drawSpectrumChannel(1, 190, rightColour);
 
+  if (!stereoSpectrum.hasFrame[0] && !stereoSpectrum.hasFrame[1]) {
+    drawFontCentredGlowColour(FontSmall, 100, "Waiting for audio", uiDimText());
+  }
+  canvas->setTextSize(1);
+  canvas->setTextColor(uiDimText());
+  // IEC third-octave centres: indices 3, 10, 20, 30 and 33.
+  canvas->setCursor(66, 210); canvas->print("20");
+  canvas->setCursor(113, 210); canvas->print("100");
+  canvas->setCursor(183, 210); canvas->print("1k");
+  canvas->setCursor(253, 210); canvas->print("10k");
+  canvas->setCursor(281, 210); canvas->print("20k");
   return flushVisualizerFrame();
 }
 
 bool drawVisualizer()
 {
   if (visualizerPage == VISUALIZER_ANALOG) return drawAnalogVisualizer();
-  return drawStereoVisualizer();
+  return drawSpectrumVisualizer();
 }
 
 void drawFeatureConfirmation()
@@ -13398,7 +13386,7 @@ void drawWifiTransferPowerOffNotice()
 
 void enterVisualizer()
 {
-  visualizerPage = VISUALIZER_STEREO;
+  visualizerPage = VISUALIZER_SPECTRUM;
   clearMeterReadout(nullptr);
   resetAnalogPeakHold(-20.0f);
 
@@ -13418,14 +13406,14 @@ void enterVisualizer()
 
 void toggleVisualizer()
 {
-  // The dedicated VU action alone cycles Home -> Stereo -> Analog -> Home.
+  // The dedicated VU action cycles Home -> Spectrum -> Analog -> Home.
   if (uiView != VIEW_VISUALIZER) {
     enterVisualizer();
     return;
   }
 
   fadeUiOut();
-  if (visualizerPage == VISUALIZER_STEREO) {
+  if (visualizerPage == VISUALIZER_SPECTRUM) {
     visualizerPage = VISUALIZER_ANALOG;
     resetAnalogPeakHold(analogDisplayVuFromDbfs(combinedOutputPeakDbfs()));
     analogNeedleDb = analogPeakHeldDb;
@@ -19535,11 +19523,107 @@ void setup()
   lastConnectAttemptAt = millis() - 1000;
 }
 
+bool stereoSpectrumVisible()
+{
+  return uiView == VIEW_VISUALIZER &&
+         visualizerPage == VISUALIZER_SPECTRUM;
+}
+
+void serviceStereoSpectrum()
+{
+  if (!stereoSpectrumVisible() || !dspi.connected) return;
+  if (!stereoSpectrum.probed) {
+    uint8_t caps[SpectrumRta::kCapsBytes] = {};
+    uint16_t length = 0;
+    stereoSpectrum.probed = true;
+    stereoSpectrum.supported = dspiGet(REQ_RTA_GET_CAPS, 0, sizeof(caps),
+        caps, sizeof(caps), length, false) &&
+        SpectrumRta::parseCaps(caps, length, stereoSpectrum.fftOrder,
+                               stereoSpectrum.levelZero);
+    if (!stereoSpectrum.supported) {
+      Serial.println("SPECTRUM: DSPi RTA V3 unavailable");
+      drawVisualizer();
+      return;
+    }
+    SpectrumRta::makeOutputPairConfig(stereoSpectrum.configWire,
+                                      stereoSpectrum.fftOrder);
+    stereoSpectrum.configured = dspiSet(REQ_RTA_SET_CONFIG, 0,
+        stereoSpectrum.configWire, sizeof(stereoSpectrum.configWire), false);
+    if (!stereoSpectrum.configured) {
+      stereoSpectrum.supported = false;
+      Serial.println("SPECTRUM: output 1/2 setup rejected");
+      drawVisualizer();
+      return;
+    }
+    Serial.println("SPECTRUM: output 1/2 selected; read-on-demand enabled");
+  }
+  if (!stereoSpectrum.supported || !stereoSpectrum.configured) return;
+
+  if ((uint32_t)(millis() - stereoSpectrum.lastPollAt) < SPECTRUM_POLL_MS) return;
+  stereoSpectrum.lastPollAt = millis();
+  if (stereoSpectrum.nextChannel == 0) {
+    uint8_t current[SpectrumRta::kConfigBytes] = {};
+    uint16_t configLength = 0;
+    if (!dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
+                 sizeof(current), configLength, false)) return;
+    if (configLength != sizeof(current) ||
+        memcmp(current, stereoSpectrum.configWire, sizeof(current)) != 0) {
+      // The Console or another surface took ownership. Never relabel its
+      // input/multichannel data as output L/R and never stop its analyser.
+      stereoSpectrum.configured = false;
+      stereoSpectrum.supported = false;
+      stereoSpectrum.configChangedExternally = true;
+      stereoSpectrum.hasFrame[0] = false;
+      stereoSpectrum.hasFrame[1] = false;
+      drawVisualizer();
+      return;
+    }
+  }
+  const uint8_t channel = stereoSpectrum.nextChannel;
+  stereoSpectrum.nextChannel ^= 1;
+  uint8_t payload[SpectrumRta::kBandFrameBytes] = {};
+  uint16_t length = 0;
+  if (dspiGet(REQ_RTA_GET_BANDS, channel, sizeof(payload), payload,
+              sizeof(payload), length, false)) {
+    SpectrumRta::BandFrame frame;
+    if (SpectrumRta::parseBandFrame(payload, length, channel, frame)) {
+      stereoSpectrum.frame[channel] = frame;
+      stereoSpectrum.hasFrame[channel] = true;
+    } else {
+      stereoSpectrum.hasFrame[channel] = false;
+    }
+  }
+  // One full LCD transfer per L/R pair, not one per UART response.
+  if (stereoSpectrum.nextChannel == 0) drawVisualizer();
+}
+
+void serviceStereoSpectrumExit()
+{
+  if (stereoSpectrumVisible() || !stereoSpectrum.probed) return;
+  if (stereoSpectrum.configured && dspi.connected) {
+    uint8_t current[SpectrumRta::kConfigBytes] = {};
+    uint16_t length = 0;
+    if (dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
+                sizeof(current), length, false) &&
+        length == sizeof(current) &&
+        memcmp(current, stereoSpectrum.configWire, sizeof(current)) == 0) {
+      uint8_t status = 0;
+      dspiGet(REQ_RTA_CONTROL, 0, 1, &status, sizeof(status), length, false);
+      Serial.println("SPECTRUM: stopped after leaving view");
+    }
+  }
+  stereoSpectrum = StereoSpectrumState{};
+}
+
 void serviceVisibleMeters(bool mediaActive)
 {
   if (uiView != VIEW_HOME && uiView != VIEW_VISUALIZER) return;
   if (mediaActive && (mediaTrackTransitionActive() ||
                       mediaPlaybackBufferLow())) return;
+  if (stereoSpectrumVisible()) {
+    serviceStereoSpectrum();
+    return;
+  }
   const uint32_t interval = screenTimeoutViewActive
       ? SCREEN_TIMEOUT_VU_POLL_MS
       : (mediaActive && uiView == VIEW_VISUALIZER ? 120 : METER_POLL_MS);
@@ -19601,6 +19685,7 @@ void loop()
     return;
   }
 
+  serviceStereoSpectrumExit();
   handleSerial();
   serviceDeferredPreferences();
   mediaPlayerPoc.serviceStopCleanup();
