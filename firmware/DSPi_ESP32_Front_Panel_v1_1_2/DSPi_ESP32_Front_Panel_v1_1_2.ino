@@ -13135,9 +13135,9 @@ void drawMenuValue(int16_t y, const String &value)
 
 void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
 {
-  constexpr int16_t plotX = 12;
+  constexpr int16_t plotX = 38;
   constexpr int16_t plotW = 235;
-  constexpr uint8_t plotH = 74;
+  constexpr uint8_t plotH = 70;
   constexpr uint8_t firstBand = 3; // 20 Hz is the first displayed centre.
   const uint16_t grid = blend565(C_BLACK, uiAccent(), 35);
   const uint8_t selected = channel == 0 ? spectrumSelection.upper :
@@ -13158,9 +13158,11 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
   canvas->setCursor(288, baseline - 17);
   canvas->print(selected + 1);
   for (uint8_t level = 0; level < 4; ++level) {
-    canvas->setCursor(253, baseline - plotH * level / 3 - 4);
-    canvas->print(level == 3 ? "0" : level == 2 ? "-20" :
-                  level == 1 ? "-40" : "-60");
+    const char *dbLabel = level == 3 ? "0" : level == 2 ? "-20" :
+                          level == 1 ? "-40" : "-60";
+    canvas->setCursor(30 - (int16_t)strlen(dbLabel) * 6,
+                      baseline - plotH * level / 3 - 4);
+    canvas->print(dbLabel);
   }
 
   if (!stereoSpectrum.hasFrame[channel]) return;
@@ -13200,9 +13202,9 @@ bool drawSpectrumVisualizer()
   const uint16_t leftColour = uiVolumeMeterColour();
   const uint16_t rightColour = volumeMeterPaletteIndex == PALETTE_CYAN
       ? C_BLUE : mix565(leftColour, uiAccent(), 125);
-  drawSpectrumChannel(0, 131, leftColour);
+  drawSpectrumChannel(0, 128, leftColour);
   if (spectrumSelection.lower != spectrumSelection.upper) {
-    drawSpectrumChannel(1, 214, rightColour);
+    drawSpectrumChannel(1, 215, rightColour);
   }
 
   if (!stereoSpectrum.hasFrame[0] && !stereoSpectrum.hasFrame[1]) {
@@ -13216,9 +13218,9 @@ bool drawSpectrumVisualizer()
       ? stereoSpectrum.frame[0].count : 34;
   const uint8_t shownBands = bandCount > 3 ? bandCount - 3 : 31;
   const auto frequencyX = [shownBands](uint8_t band) {
-    return 12 + (band - 3) * 235 / shownBands;
+    return 38 + (band - 3) * 235 / shownBands;
   };
-  canvas->setCursor(12, 226); canvas->print("20");
+  canvas->setCursor(38, 226); canvas->print("20");
   canvas->setCursor(frequencyX(10) - 9, 226); canvas->print("100");
   canvas->setCursor(frequencyX(20) - 6, 226); canvas->print("1k");
   canvas->setCursor(frequencyX(30) - 9, 226); canvas->print("10k");
