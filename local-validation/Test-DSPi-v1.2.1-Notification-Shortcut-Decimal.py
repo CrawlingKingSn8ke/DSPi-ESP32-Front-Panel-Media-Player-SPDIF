@@ -13,8 +13,10 @@ class NotificationAndDecimalContracts(unittest.TestCase):
         start = INO.index('UiAction action = actionForRemotePacket(packet);')
         end = INO.index('bleHeldAction = action;', start)
         routing = INO[start:end]
-        self.assertIn('uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY ||', routing)
-        self.assertIn('(uiView == VIEW_FEATURE_CONFIRM && featureConfirmReturnView == VIEW_HOME)', routing)
+        self.assertIn('uiView == VIEW_HOME ||', routing)
+        self.assertIn('uiView == VIEW_CHANGE_OVERLAY ||', routing)
+        self.assertIn('featureConfirmReturnView == VIEW_HOME ||', routing)
+        self.assertIn('visualizerPage == VISUALIZER_SPECTRUM', routing)
         self.assertLess(routing.index('resolveHomeShortcut(action)'),
                         routing.index('contextualizeUiAction(action)'))
 

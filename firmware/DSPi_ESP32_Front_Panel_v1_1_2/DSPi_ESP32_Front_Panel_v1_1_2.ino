@@ -5998,6 +5998,9 @@ struct StereoSpectrumState {
   uint32_t lastAvailabilityCheckAt = 0;
   uint8_t configWire[SpectrumRta::kConfigBytes] = {};
   SpectrumRta::BandFrame frame[2];
+  uint8_t peakHeight[2][SpectrumRta::kBands] = {};
+  uint32_t peakHoldUntil[2][SpectrumRta::kBands] = {};
+  uint32_t peakUpdatedAt[2] = {};
 };
 StereoSpectrumState stereoSpectrum;
 SpectrumRta::SelectionRecord spectrumSelection;
@@ -6037,6 +6040,7 @@ bool mediaLastRejectedActive = false;
 
 String featureConfirmName;
 bool featureConfirmEnabled = false;
+bool featureConfirmVolume = false;
 unsigned long featureConfirmUntil = 0;
 UiView featureConfirmReturnView = VIEW_HOME;
 
@@ -6140,6 +6144,7 @@ char wifiTransferExitReason[64] = {0};
 
 ChangeOverlayKind changeOverlayKind = CHANGE_OVERLAY_NONE;
 unsigned long changeOverlayUntil = 0;
+UiView changeOverlayReturnView = VIEW_HOME;
 bool queuedSourceOverlay = false;
 InputSource queuedSourceOverlayValue = SRC_USB;
 uint8_t changeOverlayPreset = 0;
@@ -8557,13 +8562,15 @@ bool syncCurrentState(bool includePresetNames)
     if (sourceChanged) queueSourceChangeAfterPreset(dspi.source);
     pendingPresetOverlay = false;
   } else if (oldConnected && presetChanged) {
-    if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY) {
+    if (uiView == VIEW_HOME || uiView == VIEW_VISUALIZER ||
+        uiView == VIEW_CHANGE_OVERLAY) {
       showPresetChangeOverlay(dspi.activePreset);
       if (sourceChanged) queueSourceChangeAfterPreset(dspi.source);
     }
     pendingPresetOverlay = false;
   } else if (oldConnected && sourceChanged &&
-             (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY)) {
+             (uiView == VIEW_HOME || uiView == VIEW_VISUALIZER ||
+              uiView == VIEW_CHANGE_OVERLAY)) {
     if (uiView == VIEW_CHANGE_OVERLAY &&
         changeOverlayKind == CHANGE_OVERLAY_PRESET) {
       queueSourceChangeAfterPreset(dspi.source);
@@ -8758,13 +8765,15 @@ bool pollExternalRuntimeState()
   if (presetChanged) {
     syncPresetNameCandidate(dspi, dspi.activePreset);
     resetMetersForStateChange("external preset changed");
-    if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY) {
+    if (uiView == VIEW_HOME || uiView == VIEW_VISUALIZER ||
+        uiView == VIEW_CHANGE_OVERLAY) {
       showPresetChangeOverlay(dspi.activePreset);
       if (sourceChanged) queueSourceChangeAfterPreset(dspi.source);
     }
   } else if (sourceChanged) {
     resetMetersForStateChange("external input source changed");
-    if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY) {
+    if (uiView == VIEW_HOME || uiView == VIEW_VISUALIZER ||
+        uiView == VIEW_CHANGE_OVERLAY) {
       showSourceChangeOverlay(dspi.source);
     }
   } else if (loudnessChanged) {
@@ -8779,6 +8788,9 @@ bool pollExternalRuntimeState()
     showFeatureStateNotification("Sub Synth", observedSubSynth != 0);
   } else if (tubeChanged) {
     showFeatureStateNotification("Tube", observedTube != 0);
+  } else if (volumeChanged && uiView == VIEW_VISUALIZER &&
+             visualizerPage == VISUALIZER_SPECTRUM) {
+    showSpectrumVolumeNotification();
   }
 
   if (presetChanged && menuPage == PAGE_PRESET && !editActive) {
@@ -13237,6 +13249,30 @@ void drawMenuValue(int16_t y, const String &value)
   }
 }
 
+void updateSpectrumPeaks(uint8_t slot, const SpectrumRta::BandFrame &frame)
+{
+  if (slot >= 2) return;
+  const uint32_t now = millis();
+  const uint32_t elapsed = stereoSpectrum.peakUpdatedAt[slot]
+      ? now - stereoSpectrum.peakUpdatedAt[slot] : 0;
+  stereoSpectrum.peakUpdatedAt[slot] = now;
+  for (uint8_t band = 3; band < frame.count; ++band) {
+    const uint8_t height = SpectrumRta::barHeight(frame.average[band],
+                                                  stereoSpectrum.levelZero, 70);
+    uint8_t &peak = stereoSpectrum.peakHeight[slot][band];
+    if (height >= peak) {
+      peak = height;
+      stereoSpectrum.peakHoldUntil[slot][band] = now + 240;
+    } else if ((int32_t)(now - stereoSpectrum.peakHoldUntil[slot][band]) >= 0) {
+      // One marker per real band: hold briefly, then descend more slowly than
+      // the RTA bar. A fresh hit lifts the marker immediately.
+      const uint8_t fall = (uint8_t)std::min<uint32_t>(70,
+          (elapsed * 42U) / 1000U);
+      peak = std::max<uint8_t>(height, peak > fall ? peak - fall : 0);
+    }
+  }
+}
+
 void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
 {
   constexpr int16_t plotX = 38;
@@ -13269,16 +13305,18 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
     canvas->print(dbLabel);
   }
 
-  if (!stereoSpectrum.hasFrame[channel]) return;
-  const SpectrumRta::BandFrame &frame = stereoSpectrum.frame[channel];
-  for (uint8_t band = firstBand; band < frame.count; ++band) {
-    const uint8_t h = SpectrumRta::barHeight(frame.average[band],
-                                             stereoSpectrum.levelZero, plotH);
-    if (!h) continue;
+  const SpectrumRta::BandFrame *frame = stereoSpectrum.hasFrame[channel]
+      ? &stereoSpectrum.frame[channel] : nullptr;
+  for (uint8_t band = firstBand; band < bandCount; ++band) {
+    const uint8_t h = frame
+        ? SpectrumRta::barHeight(frame->average[band],
+                                 stereoSpectrum.levelZero, plotH) : 0;
     const int16_t x = plotX + (band - firstBand) * plotW / shownBands;
     const int16_t nextX = plotX + (band + 1 - firstBand) * plotW / shownBands;
-    canvas->fillRect(x, baseline - h, std::max<int16_t>(1, nextX - x - 1),
-                     h, colour);
+    const int16_t width = std::max<int16_t>(1, nextX - x - 1);
+    if (h) canvas->fillRect(x, baseline - h, width, h, colour);
+    const uint8_t peak = frame ? stereoSpectrum.peakHeight[channel][band] : 0;
+    canvas->fillRect(x, baseline - peak - (peak ? 2 : 0), width, 1, colour);
   }
 }
 
@@ -13286,12 +13324,7 @@ bool drawSpectrumVisualizer()
 {
   uiView = VIEW_VISUALIZER;
   drawBase();
-  const String preset = presetText();
-  const int16_t sourceBudget = std::max<int16_t>(0,
-      270 - fontTextWidth(FontMedium, preset));
-  drawFontText(FontMedium, 18, 18,
-      ellipsizeFontText(FontMedium, sourceText(), sourceBudget), uiMainText());
-  drawFontRight(FontMedium, 302, 18, preset, uiMainText());
+  drawTopStatus();
 
   if (stereoSpectrum.probed && !stereoSpectrum.supported) {
     drawFontCentredGlowColour(FontMedium, 111, "Unavailable", uiWarning());
@@ -13346,8 +13379,9 @@ void drawFeatureConfirmation()
   uiView = VIEW_FEATURE_CONFIRM;
   drawBase();
   drawMenuTextNative(20, featureConfirmName, uiMainText());
-  drawFontCentredGlowColour(FontLarge, 108,
-                            featureConfirmEnabled ? "On" : "Off", uiMainText());
+  if (featureConfirmVolume) drawVolumeNumber(72);
+  else drawFontCentredGlowColour(FontLarge, 108,
+                                featureConfirmEnabled ? "On" : "Off", uiMainText());
   flushCanvasLocked();
 }
 
@@ -13356,14 +13390,41 @@ void showFeatureConfirmation(const char *featureName, bool enabled)
   featureConfirmReturnView = uiView;
   featureConfirmName = featureName;
   featureConfirmEnabled = enabled;
+  featureConfirmVolume = false;
   featureConfirmUntil = millis() + 900;
   drawFeatureConfirmation();
 }
 
 void showFeatureStateNotification(const char *featureName, bool enabled)
 {
-  if (uiView != VIEW_HOME) return;
+  if (uiView != VIEW_HOME &&
+      !(uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM)) return;
   showFeatureConfirmation(featureName, enabled);
+}
+
+void showSpectrumVolumeNotification()
+{
+  const bool refreshNumberOnly = uiView == VIEW_FEATURE_CONFIRM &&
+      featureConfirmVolume && featureConfirmReturnView == VIEW_VISUALIZER;
+  if (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM) {
+    featureConfirmReturnView = VIEW_VISUALIZER;
+  } else if (uiView != VIEW_FEATURE_CONFIRM ||
+             featureConfirmReturnView != VIEW_VISUALIZER ||
+             visualizerPage != VISUALIZER_SPECTRUM) {
+    return;
+  }
+  featureConfirmName = "Volume";
+  featureConfirmVolume = true;
+  featureConfirmUntil = millis() + 900;
+  if (refreshNumberOnly) {
+    // Held volume repeats redraw only the number, not the full LCD frame.
+    // This uses the same bounded strip as the proven Now Playing volume card.
+    canvas->fillRect(0, 70, UI_W, 111, C_BLACK);
+    drawVolumeNumber(72);
+    flushCanvasRegionLocked(0, 70, UI_W, 111);
+  } else {
+    drawFeatureConfirmation();
+  }
 }
 
 void drawChangeOverlay()
@@ -13432,6 +13493,12 @@ void drawChangeOverlay()
 void showPresetChangeOverlay(uint8_t slot)
 {
   if (slot >= 10) return;
+  if (uiView != VIEW_CHANGE_OVERLAY) {
+    changeOverlayReturnView = (uiView == VIEW_VISUALIZER ||
+        (uiView == VIEW_FEATURE_CONFIRM &&
+         featureConfirmReturnView == VIEW_VISUALIZER))
+        ? VIEW_VISUALIZER : VIEW_HOME;
+  }
   queuedSourceOverlay = false;
   changeOverlayKind = CHANGE_OVERLAY_PRESET;
   changeOverlayPreset = slot;
@@ -13441,6 +13508,12 @@ void showPresetChangeOverlay(uint8_t slot)
 
 void showSourceChangeOverlay(InputSource source)
 {
+  if (uiView != VIEW_CHANGE_OVERLAY) {
+    changeOverlayReturnView = (uiView == VIEW_VISUALIZER ||
+        (uiView == VIEW_FEATURE_CONFIRM &&
+         featureConfirmReturnView == VIEW_VISUALIZER))
+        ? VIEW_VISUALIZER : VIEW_HOME;
+  }
   queuedSourceOverlay = false;
   changeOverlayKind = CHANGE_OVERLAY_SOURCE;
   changeOverlaySource = source;
@@ -13468,7 +13541,8 @@ void dismissChangeOverlay()
   }
   changeOverlayKind = CHANGE_OVERLAY_NONE;
   changeOverlayUntil = 0;
-  drawHome();
+  uiView = changeOverlayReturnView;
+  redrawCurrentView();
 }
 
 void drawPresetSaveConfirmation()
@@ -14564,6 +14638,7 @@ void dismissFeatureConfirmation()
   UiView returnView = featureConfirmReturnView;
   featureConfirmUntil = 0;
   featureConfirmName = "";
+  featureConfirmVolume = false;
   uiView = returnView;
   redrawCurrentView();
 }
@@ -15490,6 +15565,13 @@ void changeVolume(float delta)
   // The large blackout volume card belongs only to Now Playing.  Home keeps
   // its normal layout and live meters even while local media is audible.
   if (uiView == VIEW_MEDIA_NOW_PLAYING) showMediaVolumeOverlay();
+  else if ((uiView == VIEW_VISUALIZER &&
+            visualizerPage == VISUALIZER_SPECTRUM) ||
+           (uiView == VIEW_FEATURE_CONFIRM &&
+            featureConfirmReturnView == VIEW_VISUALIZER &&
+            visualizerPage == VISUALIZER_SPECTRUM)) {
+    showSpectrumVolumeNotification();
+  }
   else redrawCurrentView();
 }
 
@@ -15641,7 +15723,12 @@ void dispatchUiAction(UiAction action)
 
   // A confirmation never swallows input: restore the exact previous view and
   // then process the action against that view.
-  if (uiView == VIEW_FEATURE_CONFIRM) dismissFeatureConfirmation();
+  if (uiView == VIEW_FEATURE_CONFIRM &&
+      !((action == ACT_VOL_UP || action == ACT_VOL_DOWN) &&
+        featureConfirmReturnView == VIEW_VISUALIZER &&
+        visualizerPage == VISUALIZER_SPECTRUM)) {
+    dismissFeatureConfirmation();
+  }
   if (uiView == VIEW_CHANGE_OVERLAY) dismissChangeOverlay();
 
   if (uiView == VIEW_WIFI_TRANSFER_CONFIRM) {
@@ -15796,18 +15883,23 @@ void dispatchUiAction(UiAction action)
 
   switch (action) {
     case ACT_MUTE: {
-      bool visualizerActive = uiView == VIEW_VISUALIZER;
-      if (dspi.connected) setUserMute(!dspi.muted);
-      if (visualizerActive) drawVisualizer();
+      const bool spectrumActive = uiView == VIEW_VISUALIZER &&
+          visualizerPage == VISUALIZER_SPECTRUM;
+      const bool visualizerActive = uiView == VIEW_VISUALIZER;
+      const bool ok = dspi.connected && setUserMute(!dspi.muted);
+      if (ok && spectrumActive) showFeatureStateNotification("Mute", dspi.muted);
+      else if (visualizerActive) drawVisualizer();
       else if (mediaPlayerPoc.active()) redrawCurrentView();
       else drawHome();
       break;
     }
     case ACT_NAV_UP:
-      if (uiView == VIEW_HOME) changeVolume(1.0f); // Serial/test fallback only.
+      if (uiView == VIEW_HOME || uiView == VIEW_VISUALIZER)
+        changeVolume(1.0f); // Serial/test fallback only.
       break;
     case ACT_NAV_DOWN:
-      if (uiView == VIEW_HOME) changeVolume(-1.0f); // Serial/test fallback only.
+      if (uiView == VIEW_HOME || uiView == VIEW_VISUALIZER)
+        changeVolume(-1.0f); // Serial/test fallback only.
       break;
     case ACT_SELECT:
       if (uiView == VIEW_VISUALIZER) transitionToHome();
@@ -15828,7 +15920,8 @@ void dispatchUiAction(UiAction action)
       }
       break;
     case ACT_LOUDNESS_TOGGLE: {
-      bool fullScreen = uiView == VIEW_HOME;
+      bool fullScreen = uiView == VIEW_HOME ||
+          (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
       bool target = !dspi.loudnessEnabled;
       bool ok = dspi.connected && setLoudness(target);
       if (ok && fullScreen) showFeatureStateNotification("Loudness", target);
@@ -15840,7 +15933,8 @@ void dispatchUiAction(UiAction action)
       break;
     }
     case ACT_CROSSFEED_TOGGLE: {
-      bool fullScreen = uiView == VIEW_HOME;
+      bool fullScreen = uiView == VIEW_HOME ||
+          (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
       bool target = !dspi.crossfeedEnabled;
       bool ok = dspi.connected && setCrossfeed(target);
       if (ok && fullScreen) showFeatureStateNotification("Crossfeed", target);
@@ -15852,7 +15946,8 @@ void dispatchUiAction(UiAction action)
       break;
     }
     case ACT_LEVELLER_TOGGLE: {
-      bool fullScreen = uiView == VIEW_HOME;
+      bool fullScreen = uiView == VIEW_HOME ||
+          (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
       bool target = !dspi.levellerEnabled;
       bool ok = dspi.connected && setLeveller(target);
       if (ok && fullScreen) showFeatureStateNotification("Leveller", target);
@@ -15864,7 +15959,8 @@ void dispatchUiAction(UiAction action)
       break;
     }
     case ACT_SUB_SYNTH_TOGGLE: {
-      const bool fullScreen = uiView == VIEW_HOME;
+      const bool fullScreen = uiView == VIEW_HOME ||
+          (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
       float current = 0;
       const bool ready = dspi.connected && dspi.subSynth.known && dspi.subSynth.supported &&
                          readSubSynthParam(SUB_ENABLE, current);
@@ -15879,7 +15975,8 @@ void dispatchUiAction(UiAction action)
       break;
     }
     case ACT_TUBE_TOGGLE: {
-      const bool fullScreen = uiView == VIEW_HOME;
+      const bool fullScreen = uiView == VIEW_HOME ||
+          (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
       float current = 0;
       const bool ready = dspi.connected && dspi.tube.known &&
           dspi.tube.supported && readTubeParam(TUBE_ENABLE, current);
@@ -15894,7 +15991,8 @@ void dispatchUiAction(UiAction action)
       break;
     }
     case ACT_PSYBASS_TOGGLE: {
-      bool fullScreen = uiView == VIEW_HOME;
+      bool fullScreen = uiView == VIEW_HOME ||
+          (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
       bool target = !dspi.psybassEnabled;
       bool ok = dspi.connected && psybassWritable() && setPsybassEnabled(target);
       if (ok && fullScreen) showFeatureStateNotification("Psy Bass", target);
@@ -15971,6 +16069,12 @@ void applyEncoderDetents(int16_t detents)
     return;
   }
 
+  if (uiView == VIEW_FEATURE_CONFIRM &&
+      featureConfirmReturnView == VIEW_VISUALIZER &&
+      visualizerPage == VISUALIZER_SPECTRUM) {
+    changeVolume((float)detents);
+    return;
+  }
   if (uiView == VIEW_FEATURE_CONFIRM) dismissFeatureConfirmation();
   if (uiView == VIEW_CHANGE_OVERLAY) dismissChangeOverlay();
 
@@ -18056,8 +18160,13 @@ void processBleReport(const BleReportPacket &packet)
 
   UiAction action = actionForRemotePacket(packet);
   // Home notifications must not turn the same shortcut into raw volume navigation.
-  if (uiView == VIEW_HOME || uiView == VIEW_CHANGE_OVERLAY ||
-      (uiView == VIEW_FEATURE_CONFIRM && featureConfirmReturnView == VIEW_HOME)) {
+  if (uiView == VIEW_HOME ||
+      (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM) ||
+      uiView == VIEW_CHANGE_OVERLAY ||
+      (uiView == VIEW_FEATURE_CONFIRM &&
+       (featureConfirmReturnView == VIEW_HOME ||
+        (featureConfirmReturnView == VIEW_VISUALIZER &&
+         visualizerPage == VISUALIZER_SPECTRUM)))) {
     action = resolveHomeShortcut(action);
   }
   action = contextualizeUiAction(action);
@@ -19936,6 +20045,44 @@ void serviceStereoSpectrum()
   }
   if (!stereoSpectrum.supported || !stereoSpectrum.configured) return;
 
+  // Presets may restore a different Spectrum pair while an announcement is
+  // covering this page. Reconfigure only if DSPi still holds our old config;
+  // never overwrite a Console analyser session that took ownership meanwhile.
+  uint8_t desiredConfig[SpectrumRta::kConfigBytes] = {};
+  SpectrumRta::makeConfig(desiredConfig, stereoSpectrum.fftOrder,
+                          spectrumSelection);
+  if (memcmp(desiredConfig, stereoSpectrum.configWire,
+             sizeof(desiredConfig)) != 0) {
+    uint8_t current[SpectrumRta::kConfigBytes] = {};
+    uint16_t currentLength = 0;
+    if (!selectedSpectrumChannelsLive()) {
+      stereoSpectrum.supported = false;
+      stereoSpectrum.channelUnavailable = true;
+      stereoSpectrum.hasFrame[0] = stereoSpectrum.hasFrame[1] = false;
+      drawVisualizer();
+      return;
+    }
+    if (!dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
+                 sizeof(current), currentLength, false)) return;
+    if (currentLength != sizeof(current) ||
+        memcmp(current, stereoSpectrum.configWire, sizeof(current)) != 0) {
+      stereoSpectrum.supported = false;
+      stereoSpectrum.configChangedExternally = true;
+      stereoSpectrum.hasFrame[0] = stereoSpectrum.hasFrame[1] = false;
+      drawVisualizer();
+      return;
+    }
+    if (!dspiSet(REQ_RTA_SET_CONFIG, 0, desiredConfig,
+                 sizeof(desiredConfig), false)) return;
+    memcpy(stereoSpectrum.configWire, desiredConfig, sizeof(desiredConfig));
+    stereoSpectrum.hasFrame[0] = stereoSpectrum.hasFrame[1] = false;
+    memset(stereoSpectrum.peakHeight, 0, sizeof(stereoSpectrum.peakHeight));
+    memset(stereoSpectrum.peakHoldUntil, 0,
+           sizeof(stereoSpectrum.peakHoldUntil));
+    stereoSpectrum.peakUpdatedAt[0] = stereoSpectrum.peakUpdatedAt[1] = 0;
+    stereoSpectrum.nextChannel = 0;
+  }
+
   if ((uint32_t)(millis() - stereoSpectrum.lastPollAt) < SPECTRUM_POLL_MS) return;
   stereoSpectrum.lastPollAt = millis();
   if (stereoSpectrum.nextChannel == 0) {
@@ -19979,6 +20126,7 @@ void serviceStereoSpectrum()
               sizeof(payload), length, false)) {
     SpectrumRta::BandFrame frame;
     if (SpectrumRta::parseBandFrame(payload, length, channel, frame)) {
+      updateSpectrumPeaks(slot, frame);
       stereoSpectrum.frame[slot] = frame;
       stereoSpectrum.hasFrame[slot] = true;
     } else {
@@ -19991,7 +20139,16 @@ void serviceStereoSpectrum()
 
 void serviceStereoSpectrumExit()
 {
-  if (stereoSpectrumVisible() || !stereoSpectrum.probed) return;
+  // A transient notification covers Spectrum without relinquishing its RTA
+  // configuration or erasing peak markers. Polling remains paused until the
+  // card returns to the visualizer.
+  const bool spectrumNotification = visualizerPage == VISUALIZER_SPECTRUM &&
+      ((uiView == VIEW_FEATURE_CONFIRM &&
+        featureConfirmReturnView == VIEW_VISUALIZER) ||
+       (uiView == VIEW_CHANGE_OVERLAY &&
+        changeOverlayReturnView == VIEW_VISUALIZER));
+  if (stereoSpectrumVisible() || spectrumNotification ||
+      !stereoSpectrum.probed) return;
   if (stereoSpectrum.configured && dspi.connected) {
     uint8_t current[SpectrumRta::kConfigBytes] = {};
     uint16_t length = 0;

@@ -82,8 +82,10 @@ class StereoSpectrumContracts(unittest.TestCase):
         self.assertIn("if (!spectrumAvailabilityKnown) return 0",
                       body("uint16_t spectrumAvailableMask(uint8_t tap)"))
         display = body("bool drawSpectrumVisualizer()")
-        self.assertIn("sourceText()", display)
-        self.assertIn("presetText()", display)
+        self.assertIn("drawTopStatus()", display)
+        header = body("void drawTopStatus()")
+        self.assertIn("sourceText()", header)
+        self.assertIn("presetText()", header)
         self.assertNotIn('"Spectrum"', display)
         self.assertNotIn("drawTaperLine", display)
         self.assertIn("drawSpectrumChannel(0, 128", display)

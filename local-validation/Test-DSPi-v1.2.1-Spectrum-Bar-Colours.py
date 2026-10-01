@@ -56,7 +56,8 @@ class SpectrumBarColourContracts(unittest.TestCase):
         channel = body("void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)")
         display = body("bool drawSpectrumVisualizer()")
         self.assertIn("firstBand = 3", channel)
-        self.assertIn("band < frame.count", channel)
+        self.assertIn("band < bandCount", channel)
+        self.assertIn("stereoSpectrum.frame[channel].count", channel)
         self.assertIn("canvas->fillRect(x, baseline - h", channel)
         self.assertNotIn("fillRoundRect(x, baseline - h", channel)
         for label in ('"20"', '"50"', '"100"', '"200"', '"500"',
