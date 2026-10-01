@@ -231,7 +231,7 @@ if (-not $MergedBin) {
     if (Test-Path -LiteralPath $releaseFull) { $MergedBin = Get-Item -LiteralPath $releaseFull }
 }
 if (-not $AppBin) {
-    $releaseApp = Join-Path $ReleaseDir "$ProjectName-v$ReleaseVersion.bin"
+    $releaseApp = Join-Path $ReleaseDir "$ProjectName-v$ReleaseVersion-OTA.bin"
     if (Test-Path -LiteralPath $releaseApp) { $AppBin = Get-Item -LiteralPath $releaseApp }
 }
 
@@ -247,7 +247,7 @@ if ($MergedBin.Length -lt 16000000) {
 
 if (-not $FlashOnly) {
     $ReleaseFull = Join-Path $ReleaseDir "$ProjectName-v$ReleaseVersion-Full.bin"
-    $ReleaseApp = Join-Path $ReleaseDir "$ProjectName-v$ReleaseVersion.bin"
+    $ReleaseApp = Join-Path $ReleaseDir "$ProjectName-v$ReleaseVersion-OTA.bin"
     Copy-Item -LiteralPath $MergedBin.FullName -Destination $ReleaseFull -Force
     Copy-Item -LiteralPath $AppBin.FullName -Destination $ReleaseApp -Force
     if ($ElfFile) {

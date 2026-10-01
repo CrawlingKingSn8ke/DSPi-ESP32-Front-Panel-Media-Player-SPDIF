@@ -88,7 +88,9 @@ Both the ESP and an independent TV S/PDIF transmitter can produce one small clic
 Keep the internal 3.3 V logic connection and its ground return short. A series
 resistor is not a mandatory requirement for this tested wiring.
 
-## Current verified v1.2.1 build
+## Historical verified v1.2.1 build
+
+The checksums below describe the earlier v1.2.1 transmitter build, not the current v1.3.0 release. For current firmware images and checksums, use the [v1.3.0 release notes](RELEASE-NOTES-v1.3.0.md) and its `SHA256SUMS-v1.3.0.txt` asset.
 
 - OTA: `DSPi-ESP32-Front-Panel-v1.2.1-OTA.bin`
 - OTA size: 1,917,392 bytes

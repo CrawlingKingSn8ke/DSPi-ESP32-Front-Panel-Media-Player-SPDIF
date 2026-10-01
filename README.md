@@ -7,43 +7,20 @@ Stable ESP32-S3 front-panel firmware with an integrated SD-card music player and
 
 The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 
-## Version 1.2.1 — r2 maintenance release
+## Version 1.3.0
 
-This is the current stable S/PDIF media-player build. It retains the complete VU IMP interface, presets, SD music player and local Wi-Fi transfer/update portal, together with the hardened 24-bit S/PDIF transmitter and continuous same-rate carrier transitions.
+This release builds on the stable v1.2.1 r2 S/PDIF media player. The audio route, album artwork, presets, BLE remote, analogue VU and local Wi-Fi updater remain available.
 
-### Added since the original v1.2.1 release
+### New since v1.2.1 r2
 
-- Repeated embedded album artwork can reuse an exact JPEG match and decoded image from a bounded PSRAM cache. The first load, SD read and existing audio-safety delay are unchanged.
-- Repeated folder-page requests can reuse up to three exact pages from a bounded PSRAM cache. New pages still scan the SD card; mount and Wi-Fi transfer changes clear the cache.
-- **Sub Synth** controls on compatible DSPi v1.1.6-beta3 or newer firmware: enable, three bands, selectivity, depth/hold, ceiling, LF boost, enabled matrix outputs and Link Pairs. The Home icon, D-pad shortcut and full-screen on/off notification use the same path as the other DSP features. The panel reads and preserves the DSPi's existing settings.
-- Larger, consistent settings values, Status and Wi-Fi Transfer text; an Analog VU colour swatch selector; and spacing between Psy Bass and Sub Synth icons. The Wi-Fi page now shows the essential connection and transfer status information.
-- Corrected native **Sub Synth** and **Remote** menu glyphs and enlarged the Remote Key Map's coloured button label.
+- **Tube Modeller** Basic controls: enable, tube choice, Drive, Mix and DSPi-enabled output selection. Advanced values saved in DSPi Console remain owned by DSPi and are not reset by the panel.
+- **Output Limiter** controls in the Setup menu, with DSPi-enabled outputs. Tube and Limiter settings follow the connected DSPi's state and presets.
+- **Stereo Spectrum** replaces the old digital bar VU page. Select the input or output channel pair from channels enabled in the DSPi matrix; only the visible pair is requested. Each channel has its own colour palette, with animated peak markers. The analogue VU page remains available.
+- A reorganised **Setup** menu, clearer Remote key mapping, continuation arrows for longer lists, and updated Home feature icons and notifications. Spectrum retains source/preset information and supports the normal volume, mute and feature overlays.
 
-The r2 maintenance tag identifies the current release files. The firmware and build scripts retain version 1.2.1. The original `v1.2.1` release remains available for rollback.
+Tube Modeller, Output Limiter and Spectrum require a compatible DSPi v1.1.6 firmware exposing those controls. The previous [v1.2.1 r2 release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/tag/v1.2.1-r2) remains available for rollback.
 
-### Main changes
-
-- Independent Main Text, Accent, Volume Meters and Analog VU colour roles.
-- Thirty-colour text/meter palette plus six shaded analogue VU face choices.
-- Cached custom analogue faces for cyan-speed needle animation without changing the approved artwork or calibration.
-- Reworked System, Screen, Idle Screen, Theme and ten-slot Preset list interfaces.
-- Five-second Select hold saves a complete DSPi/panel preset; normal selection remains in the preset list.
-- Confirmed DSPi Console changes update the Home state and use the same full-screen notifications as local controls.
-- Music playback uses the normal I2S Home state, with automatic route ownership and reliable 44.1/48 kHz operation.
-- Hardened 48 kHz decoder scheduling, BLE reconnect deferral, background-artwork limits and underrun telemetry.
-- Standards-checked 24-bit consumer S/PDIF at 44.1/48 kHz with a complete encoded-silence DMA preload.
-- Atomic carrier-retention lifecycle and exact continuation after partial DMA writes during track transitions.
-- RAM-only S/PDIF timeout, partial-write, error, restart and retained-transition counters.
-- Fire TV remotes using private directed wake advertisements reconnect through their verified saved bond after an ESP32 restart.
-- Home shortcut notifications no longer reinterpret a repeated feature key as a volume step.
-- Rotary volume changes now advance by exactly 1 dB per physical encoder detent, matching the BLE remote.
-- The large volume decimal point is rendered once without loose glow pixels.
-- Text rendering skips transparent RLE runs, reuses each run's colour blend, walks glyph coordinates without per-pixel division and directly indexes the common fonts.
-- Album-art scaling reuses precomputed source columns, reducing scaling divisions without changing the image, SD-card admission delay or JPEG decoding safeguards.
-- Browser firmware updates can start without an SD card; song transfer still requires one.
-- Preserves the v1.1.3 S/PDIF 4 compatibility, Wi-Fi Music Transfer, BLE remote and SD music-player features.
-
-See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [SPDIF-IMPLEMENTATION.md](SPDIF-IMPLEMENTATION.md) for the implementation, compatibility and wiring details. The latest release's `SHA256SUMS-v1.2.1-r2.txt` asset contains the verified firmware checksums.
+See [v1.3.0 release notes](RELEASE-NOTES-v1.3.0.md) for the feature summary and [S/PDIF implementation and wiring](SPDIF-IMPLEMENTATION.md) for the audio connection. The release includes `SHA256SUMS-v1.3.0.txt` for verifying the firmware images.
 
 ## Hardware
 
@@ -55,8 +32,9 @@ See [CHANGELOG-v1.2.1.md](CHANGELOG-v1.2.1.md) for the maintenance summary and [
 
 ## DSPi compatibility
 
-- DSPi firmware v1.1.5/V28 and compatible v1.1.6 beta builds: four S/PDIF inputs and verified runtime notifications are supported.
-- Sub Synth requires compatible DSPi v1.1.6-beta3 or newer firmware with the extended control commands. Unsupported firmware will not expose a working Sub Synth control set.
+- DSPi firmware v1.1.5/V28 and compatible v1.1.6 builds: four S/PDIF inputs and verified runtime notifications are supported.
+- Sub Synth requires compatible DSPi v1.1.6-beta3 or newer firmware with the extended control commands.
+- Tube Modeller, Output Limiter and Spectrum require compatible DSPi v1.1.6 firmware exposing their commands and telemetry.
 - Earlier compatible DSPi firmware: the fourth S/PDIF source remains hidden when only three inputs are reported.
 
 ## Wiring
@@ -93,14 +71,14 @@ Power encoder modules from 3.3 V, not 5 V.
 
 ## Flash on Windows
 
-1. Download the latest v1.2.1 maintenance release source or clone `main`.
+1. Download the latest v1.3.0 release source or clone `main`.
 2. Install Python 3 if `py --version` does not show a version.
 3. Connect the ESP32-S3-LCD-2 by USB.
 4. Close Arduino Serial Monitor and any program using the COM port.
 5. Open PowerShell in the project folder and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.2.1.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.3.0.ps1"
 ```
 
 The script asks for or uses the supplied COM port, installs the required build tools when needed, compiles the firmware and performs a clean flash.
@@ -108,7 +86,7 @@ The script asks for or uses the supplied COM port, installs the required build t
 To update only the application while preserving BLE pairing and panel settings:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.2.1.ps1" -PreserveSettings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.3.0.ps1" -PreserveSettings
 ```
 
 A clean flash erases BLE pairing, learned key mappings, brightness, screen-power settings and shortcut assignments. After a clean flash, disconnect all power for at least 10 seconds before reconnecting.
@@ -118,7 +96,7 @@ A clean flash erases BLE pairing, learned key mappings, brightness, screen-power
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.2.1.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.3.0.ps1"
 ```
 
 The script installs or verifies:
@@ -134,7 +112,7 @@ The Arduino sketch retains its historical v1.1.2 directory name so the existing 
 firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
 ```
 
-The v1.2.1 wrappers use the version-neutral build engine and name generated artifacts as v1.2.1.
+The v1.3.0 wrappers use the version-neutral build engine and name generated artifacts as v1.3.0. The historical sketch-directory name is unchanged.
 
 Board profile:
 
@@ -174,7 +152,7 @@ Restrictions:
 
 The first installation must use the full USB image. After that, future application updates can be installed from the panel's local Wi-Fi page while preserving BLE bonds, remote mappings, presets and screen settings. An SD card is not required for firmware updates.
 
-1. Download `DSPi-ESP32-Front-Panel-v1.2.1-r2-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
+1. Download `DSPi-ESP32-Front-Panel-v1.3.0-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
 2. Stop or pause local music playback.
 3. Open **System > Wi-Fi Transfer/Update** on the panel and confirm **Start**.
 4. Connect to the network shown on the panel and open its displayed browser address.
@@ -184,7 +162,7 @@ The first installation must use the full USB image. After that, future applicati
 8. After the restart, switch off or disconnect all power for at least 10 seconds, then power the unit back on before using the media player. A software restart does not power-cycle the SD card, so this step is required for a reliable SD remount.
 
 > [!WARNING]
-> Never upload `DSPi-ESP32-Front-Panel-v1.2.1-r2-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
+> Never upload `DSPi-ESP32-Front-Panel-v1.3.0-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
 
 ## Wi-Fi Music Transfer
 
