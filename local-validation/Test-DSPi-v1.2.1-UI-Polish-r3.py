@@ -28,19 +28,18 @@ def body(signature):
 
 
 class UiPolishR3Contracts(unittest.TestCase):
-    def test_dsp_setup_uses_exact_main_menu_style_and_fits(self):
+    def test_setup_uses_exact_main_menu_style_and_fits(self):
         menu = body("void drawMenu()")
         self.assertIn("drawMenuTextNative(80, selected, uiMainText())", menu)
         self.assertNotIn("drawFontTextScaledKerned(FontMenu", menu)
         names = body("String menuItemName(MenuPage page, uint8_t index)")
-        self.assertIn('"Input", "Music", "Preset", "DSP Setup", "System"', names)
+        self.assertIn('"Input", "Music", "Preset", "Setup", "System"', names)
         glyph_table = SKETCH.split("static const GlyphDef FontMenu_glyphs[] = {", 1)[1].split("};", 1)[0]
         advances = dict((letter, int(advance)) for letter, advance in
                         re.findall(r"\{'(.)',\s*\d+,\s*\d+,\s*(\d+),", glyph_table))
-        title = "DSP Setup"
+        title = "Setup"
         self.assertTrue(all(ch == " " or ch in advances for ch in title))
         width = sum(15 if ch == " " else advances[ch] for ch in title)
-        self.assertEqual(width, 299)
         self.assertLessEqual(width, 320 - 16)
 
     def test_home_icons_enlarge_with_seven_pixel_gap_and_bounded_labels(self):

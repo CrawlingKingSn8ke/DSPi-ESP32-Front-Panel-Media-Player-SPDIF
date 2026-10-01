@@ -70,8 +70,13 @@ class SpectrumPeaksAndOverlays(unittest.TestCase):
     def test_volume_repeat_updates_only_number_region(self):
         volume = body("void showSpectrumVolumeNotification()")
         self.assertIn("refreshNumberOnly", volume)
-        self.assertIn("flushCanvasRegionLocked(0, 70, UI_W, 111)", volume)
+        self.assertIn("drawMediaVolumeOverlay(true)", volume)
+        self.assertIn('featureConfirmName = ""', volume)
         self.assertIn("featureConfirmUntil = millis() + 900", volume)
+        card = body("void drawFeatureConfirmation()")
+        self.assertLess(card.index("if (featureConfirmVolume)"),
+                        card.index("drawMenuTextNative"))
+        self.assertIn("drawMediaVolumeOverlay(false)", card)
         self.assertIn("showSpectrumVolumeNotification()", body(
             "void changeVolume(float delta)"))
         dispatch = body("void dispatchUiAction(UiAction action)")

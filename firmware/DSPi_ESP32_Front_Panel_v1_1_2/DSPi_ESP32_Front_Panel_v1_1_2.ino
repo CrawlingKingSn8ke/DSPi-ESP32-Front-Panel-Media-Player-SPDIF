@@ -6368,6 +6368,7 @@ void serviceBleRemoteRemoval();
 void resetBleScanState(bool stopActive);
 void scheduleSavedReconnect();
 void dismissFeatureConfirmation();
+void drawMediaVolumeOverlay(bool partial);
 bool restartBleRemoteStack();
 void beginBleTransferShutdown();
 int8_t serviceBleTransferShutdown();
@@ -11436,7 +11437,7 @@ String pageTitle(MenuPage page)
 {
   switch (page) {
     case PAGE_MAIN: return "Menu";
-    case PAGE_FEATURES: return "DSP Setup";
+    case PAGE_FEATURES: return "Setup";
     case PAGE_INPUT: return "Input";
     case PAGE_MEDIA: return "Music Library";
     case PAGE_PRESET: return "Preset";
@@ -11593,7 +11594,7 @@ uint8_t menuItemCount(MenuPage page)
 String menuItemName(MenuPage page, uint8_t index)
 {
   if (page == PAGE_MAIN) {
-    const char *items[] = {"Input", "Music", "Preset", "DSP Setup", "System"};
+    const char *items[] = {"Input", "Music", "Preset", "Setup", "System"};
     return items[std::min<uint8_t>(index, 4)];
   }
   if (page == PAGE_FEATURES) {
@@ -13377,11 +13378,15 @@ bool drawVisualizer()
 void drawFeatureConfirmation()
 {
   uiView = VIEW_FEATURE_CONFIRM;
+  if (featureConfirmVolume) {
+    // Identical number-only card to Now Playing, with no feature heading.
+    drawMediaVolumeOverlay(false);
+    return;
+  }
   drawBase();
   drawMenuTextNative(20, featureConfirmName, uiMainText());
-  if (featureConfirmVolume) drawVolumeNumber(72);
-  else drawFontCentredGlowColour(FontLarge, 108,
-                                featureConfirmEnabled ? "On" : "Off", uiMainText());
+  drawFontCentredGlowColour(FontLarge, 108,
+                            featureConfirmEnabled ? "On" : "Off", uiMainText());
   flushCanvasLocked();
 }
 
@@ -13413,15 +13418,12 @@ void showSpectrumVolumeNotification()
              visualizerPage != VISUALIZER_SPECTRUM) {
     return;
   }
-  featureConfirmName = "Volume";
+  featureConfirmName = "";
   featureConfirmVolume = true;
   featureConfirmUntil = millis() + 900;
   if (refreshNumberOnly) {
-    // Held volume repeats redraw only the number, not the full LCD frame.
-    // This uses the same bounded strip as the proven Now Playing volume card.
-    canvas->fillRect(0, 70, UI_W, 111, C_BLACK);
-    drawVolumeNumber(72);
-    flushCanvasRegionLocked(0, 70, UI_W, 111);
+    // Use precisely the Now Playing number strip for held-volume repeats.
+    drawMediaVolumeOverlay(true);
   } else {
     drawFeatureConfirmation();
   }
