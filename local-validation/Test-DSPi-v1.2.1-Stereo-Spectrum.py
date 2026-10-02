@@ -109,7 +109,8 @@ class StereoSpectrumContracts(unittest.TestCase):
         self.assertGreaterEqual(lower - height - upper, 16)
 
     def test_faster_pair_cadence_and_short_tube_notification(self):
-        self.assertIn("#define SPECTRUM_POLL_MS 80", SKETCH)
+        self.assertIn("#define SPECTRUM_EXTERNAL_CHANNEL_POLL_MS 30", SKETCH)
+        self.assertIn("#define SPECTRUM_MEDIA_CHANNEL_POLL_MS 80", SKETCH)
         self.assertIn("wire[6] = 120", PROTOCOL)
         self.assertNotIn('showFeatureStateNotification("Tube Modeller"', SKETCH)
         self.assertIn('showFeatureStateNotification("Tube", target)', SKETCH)

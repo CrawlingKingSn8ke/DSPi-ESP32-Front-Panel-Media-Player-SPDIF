@@ -239,7 +239,13 @@
 #define BLE_REPORTS_PER_LOOP 12
 #define BLE_REPORT_QUEUE_LENGTH 24
 #define BLE_HELD_FAILSAFE_MS 8000
-#define SPECTRUM_POLL_MS 80
+// Two external-source UART reads every ~60 ms follow DSPi's ~17 Hz RTA
+// updates. Local SD playback retains the proven slower bus/audio budget.
+#define SPECTRUM_EXTERNAL_CHANNEL_POLL_MS 30
+#define SPECTRUM_MEDIA_CHANNEL_POLL_MS 80
+#define SPECTRUM_EXTERNAL_RENDER_MS 40
+#define SPECTRUM_INTERPOLATION_MS 60
+#define SPECTRUM_FULL_REFRESH_MS 1000
 #define BLE_MAX_INPUT_SOURCES 32
 
 #define LCD_NATIVE_W 240
@@ -5998,6 +6004,12 @@ struct StereoSpectrumState {
   uint32_t lastAvailabilityCheckAt = 0;
   uint8_t configWire[SpectrumRta::kConfigBytes] = {};
   SpectrumRta::BandFrame frame[2];
+  uint8_t blendFrom[2][SpectrumRta::kBands] = {};
+  uint8_t blendTo[2][SpectrumRta::kBands] = {};
+  uint32_t blendStartedAt[2] = {};
+  uint8_t blendDurationMs[2] = {};
+  uint32_t lastRenderAt = 0;
+  uint32_t lastFullRenderAt = 0;
   uint8_t peakHeight[2][SpectrumRta::kBands] = {};
   uint32_t peakHoldUntil[2][SpectrumRta::kBands] = {};
   uint32_t peakUpdatedAt[2] = {};
@@ -6223,6 +6235,7 @@ void requestWifiTransferSafeExit(const char *reason);
 void serviceWifiTransfer();
 void serviceWifiTransferUiRedraw();
 bool drawVisualizer();
+bool stereoSpectrumVisible();
 void serviceStereoSpectrum();
 void serviceStereoSpectrumExit();
 float combinedOutputPeakDbfs();
@@ -12223,6 +12236,22 @@ bool flushCanvasRegionTryLocked(int16_t x, int16_t y, int16_t w, int16_t h,
   return true;
 }
 
+bool flushCanvasFullWidthRegionTryLocked(int16_t y, int16_t h,
+                                         uint32_t timeoutMs)
+{
+  if (y < 0) { h += y; y = 0; }
+  if (y + h > UI_H) h = UI_H - y;
+  if (h <= 0) return false;
+  uint16_t *framebuffer = canvas->getFramebuffer();
+  if (!framebuffer || !mediaSharedSpiTryLock(timeoutMs)) return false;
+  // Full-width rows are contiguous in the RGB565 canvas. One rectangular
+  // transfer is substantially cheaper than one SPI transaction per row.
+  panel->draw16bitRGBBitmap(0, y, framebuffer + (int32_t)y * UI_W,
+                            UI_W, h);
+  mediaSharedSpiUnlock();
+  return true;
+}
+
 void fadeUiOut()
 {
   backlightFadeActive = false;
@@ -13274,6 +13303,46 @@ void updateSpectrumPeaks(uint8_t slot, const SpectrumRta::BandFrame &frame)
   }
 }
 
+uint8_t spectrumRenderedHeight(uint8_t slot, uint8_t band, uint32_t now)
+{
+  if (slot >= 2 || band >= SpectrumRta::kBands ||
+      !stereoSpectrum.hasFrame[slot]) return 0;
+  return SpectrumRta::interpolateHeight(
+      stereoSpectrum.blendFrom[slot][band],
+      stereoSpectrum.blendTo[slot][band],
+      now - stereoSpectrum.blendStartedAt[slot],
+      stereoSpectrum.blendDurationMs[slot]);
+}
+
+void acceptSpectrumFrame(uint8_t slot, const SpectrumRta::BandFrame &frame)
+{
+  if (slot >= 2) return;
+  const uint32_t now = millis();
+  const bool hadFrame = stereoSpectrum.hasFrame[slot];
+  // DSPi can return the same 17 Hz frame twice. Do not restart a transition
+  // until its sequence changes, or interpolation could stall below the target.
+  if (hadFrame && stereoSpectrum.frame[slot].sequence == frame.sequence &&
+      stereoSpectrum.frame[slot].count == frame.count &&
+      memcmp(stereoSpectrum.frame[slot].average, frame.average,
+             frame.count) == 0) {
+    updateSpectrumPeaks(slot, frame);
+    return;
+  }
+  for (uint8_t band = 0; band < frame.count; ++band) {
+    const uint8_t target = SpectrumRta::barHeight(frame.average[band],
+                                                  stereoSpectrum.levelZero, 70);
+    stereoSpectrum.blendFrom[slot][band] = hadFrame
+        ? spectrumRenderedHeight(slot, band, now) : target;
+    stereoSpectrum.blendTo[slot][band] = target;
+  }
+  stereoSpectrum.blendStartedAt[slot] = now;
+  stereoSpectrum.blendDurationMs[slot] = mediaPlayerPoc.active()
+      ? 0 : SPECTRUM_INTERPOLATION_MS;
+  updateSpectrumPeaks(slot, frame);
+  stereoSpectrum.frame[slot] = frame;
+  stereoSpectrum.hasFrame[slot] = true;
+}
+
 void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
 {
   constexpr int16_t plotX = 38;
@@ -13308,10 +13377,9 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
 
   const SpectrumRta::BandFrame *frame = stereoSpectrum.hasFrame[channel]
       ? &stereoSpectrum.frame[channel] : nullptr;
+  const uint32_t now = millis();
   for (uint8_t band = firstBand; band < bandCount; ++band) {
-    const uint8_t h = frame
-        ? SpectrumRta::barHeight(frame->average[band],
-                                 stereoSpectrum.levelZero, plotH) : 0;
+    const uint8_t h = frame ? spectrumRenderedHeight(channel, band, now) : 0;
     const int16_t x = plotX + (band - firstBand) * plotW / shownBands;
     const int16_t nextX = plotX + (band + 1 - firstBand) * plotW / shownBands;
     const int16_t width = std::max<int16_t>(1, nextX - x - 1);
@@ -13319,6 +13387,27 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
     const uint8_t peak = frame ? stereoSpectrum.peakHeight[channel][band] : 0;
     canvas->fillRect(x, baseline - peak - (peak ? 2 : 0), width, 1, colour);
   }
+}
+
+bool drawSpectrumInterpolatedFrame()
+{
+  if (!stereoSpectrumVisible() || !stereoSpectrum.supported) return false;
+  // The dynamic plots occupy these rows. Source, preset, feature icons and
+  // frequency labels stay in the canvas and receive a periodic full refresh.
+  constexpr int16_t regionY = 54;
+  constexpr int16_t regionH = 163;
+  canvas->fillRect(0, regionY, UI_W, regionH, C_BLACK);
+  drawSpectrumChannel(0, 128, spectrumBarColour(spectrumSelection.tap,
+      spectrumSelection.upper));
+  if (spectrumSelection.lower != spectrumSelection.upper) {
+    drawSpectrumChannel(1, 215, spectrumBarColour(spectrumSelection.tap,
+        spectrumSelection.lower));
+  }
+  if (!stereoSpectrum.hasFrame[0] && !stereoSpectrum.hasFrame[1]) {
+    drawFontCentredGlowColour(FontSmall, 109, "Waiting for audio", uiDimText());
+  }
+  return flushCanvasFullWidthRegionTryLocked(regionY, regionH,
+                                             SCREEN_TIMEOUT_VU_SPI_TRY_MS);
 }
 
 bool drawSpectrumVisualizer()
@@ -13366,7 +13455,9 @@ bool drawSpectrumVisualizer()
   canvas->setCursor(frequencyX(23) - 6, 226); canvas->print("2k");
   canvas->setCursor(frequencyX(27) - 6, 226); canvas->print("5k");
   canvas->setCursor(frequencyX(30) - 9, 226); canvas->print("10k");
-  return flushVisualizerFrame();
+  const bool flushed = flushVisualizerFrame();
+  if (flushed) stereoSpectrum.lastFullRenderAt = millis();
+  return flushed;
 }
 
 bool drawVisualizer()
@@ -20085,58 +20176,75 @@ void serviceStereoSpectrum()
     stereoSpectrum.nextChannel = 0;
   }
 
-  if ((uint32_t)(millis() - stereoSpectrum.lastPollAt) < SPECTRUM_POLL_MS) return;
-  stereoSpectrum.lastPollAt = millis();
-  if (stereoSpectrum.nextChannel == 0) {
-    if ((uint32_t)(millis() - stereoSpectrum.lastAvailabilityCheckAt) >= 2000) {
-      stereoSpectrum.lastAvailabilityCheckAt = millis();
-      if (!selectedSpectrumChannelsLive()) {
+  const bool mediaActive = mediaPlayerPoc.active();
+  const uint32_t pollInterval = mediaActive
+      ? SPECTRUM_MEDIA_CHANNEL_POLL_MS
+      : SPECTRUM_EXTERNAL_CHANNEL_POLL_MS;
+  const bool pollDue = (uint32_t)(millis() - stereoSpectrum.lastPollAt) >=
+      pollInterval;
+  if (pollDue) {
+    stereoSpectrum.lastPollAt = millis();
+    if (stereoSpectrum.nextChannel == 0) {
+      if ((uint32_t)(millis() - stereoSpectrum.lastAvailabilityCheckAt) >= 2000) {
+        stereoSpectrum.lastAvailabilityCheckAt = millis();
+        if (!selectedSpectrumChannelsLive()) {
+          stereoSpectrum.supported = false;
+          stereoSpectrum.channelUnavailable = true;
+          stereoSpectrum.hasFrame[0] = false;
+          stereoSpectrum.hasFrame[1] = false;
+          Serial.println("SPECTRUM: selected channel no longer enabled");
+          drawVisualizer();
+          return;
+        }
+      }
+      uint8_t current[SpectrumRta::kConfigBytes] = {};
+      uint16_t configLength = 0;
+      if (!dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
+                   sizeof(current), configLength, false)) return;
+      if (configLength != sizeof(current) ||
+          memcmp(current, stereoSpectrum.configWire, sizeof(current)) != 0) {
+        // The Console or another surface took ownership. Never relabel its
+        // channels as our selected pair and never stop its analyser.
+        stereoSpectrum.configured = false;
         stereoSpectrum.supported = false;
-        stereoSpectrum.channelUnavailable = true;
+        stereoSpectrum.configChangedExternally = true;
         stereoSpectrum.hasFrame[0] = false;
         stereoSpectrum.hasFrame[1] = false;
-        Serial.println("SPECTRUM: selected channel no longer enabled");
         drawVisualizer();
         return;
       }
     }
-    uint8_t current[SpectrumRta::kConfigBytes] = {};
-    uint16_t configLength = 0;
-    if (!dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
-                 sizeof(current), configLength, false)) return;
-    if (configLength != sizeof(current) ||
-        memcmp(current, stereoSpectrum.configWire, sizeof(current)) != 0) {
-      // The Console or another surface took ownership. Never relabel its
-      // channels as our selected pair and never stop its analyser.
-      stereoSpectrum.configured = false;
-      stereoSpectrum.supported = false;
-      stereoSpectrum.configChangedExternally = true;
-      stereoSpectrum.hasFrame[0] = false;
-      stereoSpectrum.hasFrame[1] = false;
-      drawVisualizer();
-      return;
+    const uint8_t slot = stereoSpectrum.nextChannel;
+    const uint8_t channel = slot == 0 ? spectrumSelection.upper :
+        spectrumSelection.lower;
+    stereoSpectrum.nextChannel = spectrumSelection.upper ==
+        spectrumSelection.lower ? 0 : slot ^ 1;
+    uint8_t payload[SpectrumRta::kBandFrameBytes] = {};
+    uint16_t length = 0;
+    if (dspiGet(REQ_RTA_GET_BANDS, channel, sizeof(payload), payload,
+                sizeof(payload), length, false)) {
+      SpectrumRta::BandFrame frame;
+      if (SpectrumRta::parseBandFrame(payload, length, channel, frame)) {
+        acceptSpectrumFrame(slot, frame);
+      } else {
+        stereoSpectrum.hasFrame[slot] = false;
+      }
     }
   }
-  const uint8_t slot = stereoSpectrum.nextChannel;
-  const uint8_t channel = slot == 0 ? spectrumSelection.upper :
-      spectrumSelection.lower;
-  stereoSpectrum.nextChannel = spectrumSelection.upper ==
-      spectrumSelection.lower ? 0 : slot ^ 1;
-  uint8_t payload[SpectrumRta::kBandFrameBytes] = {};
-  uint16_t length = 0;
-  if (dspiGet(REQ_RTA_GET_BANDS, channel, sizeof(payload), payload,
-              sizeof(payload), length, false)) {
-    SpectrumRta::BandFrame frame;
-    if (SpectrumRta::parseBandFrame(payload, length, channel, frame)) {
-      updateSpectrumPeaks(slot, frame);
-      stereoSpectrum.frame[slot] = frame;
-      stereoSpectrum.hasFrame[slot] = true;
-    } else {
-      stereoSpectrum.hasFrame[slot] = false;
-    }
+  if (mediaActive) {
+    // The proven audio path keeps its old paired-sample redraw cadence.
+    if (pollDue && stereoSpectrum.nextChannel == 0) drawVisualizer();
+    return;
   }
-  // One full LCD transfer per L/R pair, not one per UART response.
-  if (stereoSpectrum.nextChannel == 0) drawVisualizer();
+  if ((uint32_t)(millis() - stereoSpectrum.lastRenderAt) <
+      SPECTRUM_EXTERNAL_RENDER_MS) return;
+  stereoSpectrum.lastRenderAt = millis();
+  if ((uint32_t)(millis() - stereoSpectrum.lastFullRenderAt) >=
+      SPECTRUM_FULL_REFRESH_MS) {
+    drawVisualizer();
+  } else {
+    drawSpectrumInterpolatedFrame();
+  }
 }
 
 void serviceStereoSpectrumExit()

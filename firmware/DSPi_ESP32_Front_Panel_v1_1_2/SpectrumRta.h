@@ -109,4 +109,13 @@ inline uint8_t barHeight(uint8_t encoded, uint8_t levelZero, uint8_t height) {
   if (encoded >= levelZero) return height;
   return static_cast<uint8_t>((static_cast<uint16_t>(encoded - floor) * height) / 120);
 }
+
+inline uint8_t interpolateHeight(uint8_t from, uint8_t to,
+                                 uint32_t elapsedMs, uint32_t durationMs) {
+  if (!durationMs || elapsedMs >= durationMs) return to;
+  const uint32_t distance = to >= from ? to - from : from - to;
+  const uint32_t step = (distance * elapsedMs + durationMs / 2) / durationMs;
+  return to >= from ? static_cast<uint8_t>(from + step)
+                    : static_cast<uint8_t>(from - step);
+}
 } // namespace SpectrumRta
