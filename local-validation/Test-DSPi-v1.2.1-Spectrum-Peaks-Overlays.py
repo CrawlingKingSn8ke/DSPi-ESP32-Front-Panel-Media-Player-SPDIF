@@ -34,7 +34,7 @@ class SpectrumPeaksAndOverlays(unittest.TestCase):
         self.assertIn("acceptSpectrumFrame(slot, frame)", body("void serviceStereoSpectrum()"))
         self.assertIn("updateSpectrumPeaks(slot, frame)", body("void acceptSpectrumFrame(uint8_t slot, const SpectrumRta::BandFrame &frame)"))
         self.assertIn("baseline - peak - (peak ? 4 : 2)", draw)
-        self.assertIn("width, 3, colour", draw)
+        self.assertIn("barWidth[band], 3, colour", draw)
         self.assertIn("nextX - x - 1", draw)
 
     def test_feature_icons_and_shortcuts_use_home_roles(self):

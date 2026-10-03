@@ -33,11 +33,11 @@ class UiPolishR3Contracts(unittest.TestCase):
         self.assertIn("drawMenuTextNative(80, selected, uiMainText())", menu)
         self.assertNotIn("drawFontTextScaledKerned(FontMenu", menu)
         names = body("String menuItemName(MenuPage page, uint8_t index)")
-        self.assertIn('"Input", "Music", "Preset", "Setup", "System"', names)
+        self.assertIn('"Input", "Music", "Preset", "Effects", "System"', names)
         glyph_table = SKETCH.split("static const GlyphDef FontMenu_glyphs[] = {", 1)[1].split("};", 1)[0]
         advances = dict((letter, int(advance)) for letter, advance in
                         re.findall(r"\{'(.)',\s*\d+,\s*\d+,\s*(\d+),", glyph_table))
-        title = "Setup"
+        title = "Effects"
         self.assertTrue(all(ch == " " or ch in advances for ch in title))
         width = sum(15 if ch == " " else advances[ch] for ch in title)
         self.assertLessEqual(width, 320 - 16)

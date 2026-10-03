@@ -92,7 +92,7 @@ static_assert(!uiShowUpArrow(false, 1, true));
         self.assertIn("case PAGE_FEATURES: return 7;", counts)
         self.assertIn("case PAGE_SYSTEM: return 5;", counts)
         names = function_body(sketch, "String menuItemName(MenuPage page, uint8_t index)")
-        self.assertIn('"Input", "Music", "Preset", "Setup", "System"', names)
+        self.assertIn('"Input", "Music", "Preset", "Effects", "System"', names)
         self.assertIn('"Loudness", "Crossfeed", "Leveller", "Psy Bass",', names)
         self.assertIn('"Sub Synth", "Tube Modeller", "Output Limiter"', names)
         self.assertIn('"Remote", "Volume Limit", "Screen Settings",', names)

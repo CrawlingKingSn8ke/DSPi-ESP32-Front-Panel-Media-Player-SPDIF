@@ -68,6 +68,18 @@ class SpectrumBarColourContracts(unittest.TestCase):
         # final real band gives 31 displayed bars.
         self.assertEqual(34 - 3, 31)
 
+    def test_segment_gaps_are_drawn_after_bars_but_before_peak_markers(self):
+        channel = body("void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)")
+        self.assertIn("for (uint8_t gap = 3; gap < plotH; gap += 3)", channel)
+        self.assertIn("canvas->drawFastHLine(plotX, baseline - gap, plotW, C_BLACK)", channel)
+        bar = channel.index("canvas->fillRect(x, baseline - h")
+        gaps = channel.index("for (uint8_t gap = 3; gap < plotH; gap += 3)")
+        mask = channel.index("canvas->drawFastHLine(plotX, baseline - gap, plotW, C_BLACK)")
+        peak = channel.index("canvas->fillRect(barX[band], baseline - peak")
+        self.assertLess(bar, gaps)
+        self.assertLess(gaps, mask)
+        self.assertLess(mask, peak)
+
 
 if __name__ == "__main__":
     unittest.main()

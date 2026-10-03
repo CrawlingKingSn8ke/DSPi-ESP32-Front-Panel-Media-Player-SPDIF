@@ -61,9 +61,9 @@ class UiPolishR2Contracts(unittest.TestCase):
 
     def test_dsp_setup_uses_native_font_and_icons_share_meter_colour(self):
         names = body("String menuItemName(MenuPage page, uint8_t index)")
-        self.assertIn('"Input", "Music", "Preset", "Setup", "System"', names)
+        self.assertIn('"Input", "Music", "Preset", "Effects", "System"', names)
         title = body("String pageTitle(MenuPage page)")
-        self.assertIn('case PAGE_FEATURES: return "Setup"', title)
+        self.assertIn('case PAGE_FEATURES: return "Effects"', title)
         menu = body("void drawMenu()")
         self.assertIn("drawMenuTextNative(80, selected, uiMainText())", menu)
         self.assertNotIn("drawFontTextScaledKerned(FontMenu", menu)

@@ -53,6 +53,18 @@ class SpectrumInterpolationContracts(unittest.TestCase):
         self.assertIn("mediaPlayerPoc.active()", accept)
         self.assertIn("SPECTRUM_INTERPOLATION_MS", accept)
 
+    def test_falling_external_bar_uses_new_sample_without_extra_interpolation(self):
+        accept = body(SKETCH, "void acceptSpectrumFrame(uint8_t slot, const SpectrumRta::BandFrame &frame)")
+        self.assertIn("target < rendered ? target : rendered", accept)
+        self.assertIn("mediaPlayerPoc.active()", accept)
+        self.assertIn("SPECTRUM_INTERPOLATION_MS", accept)
+        self.assertIn("wire[6] = 120", PROTOCOL)
+
+    def test_empty_spectrum_has_no_waiting_message(self):
+        for signature in ("bool drawSpectrumInterpolatedFrame()",
+                          "bool drawSpectrumVisualizer()"):
+            self.assertNotIn("Waiting for audio", body(SKETCH, signature))
+
     def test_intermediate_transfer_covers_only_dynamic_plot_rows(self):
         frame = body(SKETCH, "bool drawSpectrumInterpolatedFrame()")
         transfer = body(SKETCH, "bool flushCanvasFullWidthRegionTryLocked(int16_t y, int16_t h,\n                                         uint32_t timeoutMs)")
