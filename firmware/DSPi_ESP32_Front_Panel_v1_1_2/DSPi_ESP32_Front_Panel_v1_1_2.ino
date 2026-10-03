@@ -13292,7 +13292,7 @@ void updateSpectrumPeaks(uint8_t slot, const SpectrumRta::BandFrame &frame)
     uint8_t &peak = stereoSpectrum.peakHeight[slot][band];
     if (height >= peak) {
       peak = height;
-      stereoSpectrum.peakHoldUntil[slot][band] = now + 240;
+      stereoSpectrum.peakHoldUntil[slot][band] = now + 440;
     } else if ((int32_t)(now - stereoSpectrum.peakHoldUntil[slot][band]) >= 0) {
       // One marker per real band: hold briefly, then descend more slowly than
       // the RTA bar. A fresh hit lifts the marker immediately.
@@ -13385,7 +13385,8 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
     const int16_t width = std::max<int16_t>(1, nextX - x - 1);
     if (h) canvas->fillRect(x, baseline - h, width, h, colour);
     const uint8_t peak = frame ? stereoSpectrum.peakHeight[channel][band] : 0;
-    canvas->fillRect(x, baseline - peak - (peak ? 2 : 0), width, 1, colour);
+    // Three-pixel marker, with one empty row above an active bar.
+    canvas->fillRect(x, baseline - peak - (peak ? 4 : 2), width, 3, colour);
   }
 }
 
