@@ -6053,6 +6053,7 @@ static_assert(sizeof(SpectrumBarColourRecord) == 33,
 static constexpr uint8_t SPECTRUM_BAR_COLOURS_VERSION = 1;
 bool validSpectrumBarColours(const SpectrumBarColourRecord &record);
 SpectrumBarColourRecord spectrumBarColours = {};
+SpectrumBarColourRecord spectrumPeakColours = {};
 uint16_t spectrumAvailableInputs = 0x0003;
 uint16_t spectrumAvailableOutputs = 0x0003;
 bool spectrumAvailabilityKnown = false;
@@ -6522,6 +6523,29 @@ uint16_t spectrumBarColour(uint8_t tap, uint8_t channel)
   return themePaletteColour(spectrumBarPalette(tap, channel));
 }
 
+uint8_t spectrumPeakPalette(uint8_t tap, uint8_t channel)
+{
+  if (channel >= 16) return PALETTE_CYAN;
+  return tap == SpectrumRta::kInputTap
+      ? spectrumPeakColours.inputPalette[channel]
+      : spectrumPeakColours.outputPalette[channel];
+}
+
+uint16_t spectrumPeakColour(uint8_t tap, uint8_t channel)
+{
+  return themePaletteColour(spectrumPeakPalette(tap, channel));
+}
+
+void loadSpectrumPeakColours(const char *key)
+{
+  // Older global settings and presets inherit their own saved bar colours.
+  spectrumPeakColours = spectrumBarColours;
+  if (preferences.getBytesLength(key) != sizeof(spectrumPeakColours)) return;
+  SpectrumBarColourRecord candidate = {};
+  if (preferences.getBytes(key, &candidate, sizeof(candidate)) == sizeof(candidate) &&
+      validSpectrumBarColours(candidate)) spectrumPeakColours = candidate;
+}
+
 uint8_t legacyMainTextToPalette(uint8_t choice)
 {
   switch (choice) {
@@ -6673,6 +6697,11 @@ void spectrumBarPresetKey(uint8_t slot, char *key, size_t keyCapacity)
   snprintf(key, keyCapacity, "spbar_p%u", (unsigned)slot);
 }
 
+void spectrumPeakPresetKey(uint8_t slot, char *key, size_t keyCapacity)
+{
+  snprintf(key, keyCapacity, "sppeak_p%u", (unsigned)slot);
+}
+
 bool presetPanelSettingsRecordValid(const PresetPanelSettingsRecord &record)
 {
   return record.version == PRESET_PANEL_SETTINGS_VERSION &&
@@ -6712,9 +6741,14 @@ bool savePresetPanelSettings(uint8_t slot)
   spectrumBarPresetKey(slot, barKey, sizeof(barKey));
   const size_t barWritten = preferences.putBytes(
       barKey, &spectrumBarColours, sizeof(spectrumBarColours));
+  char peakKey[16] = {0};
+  spectrumPeakPresetKey(slot, peakKey, sizeof(peakKey));
+  const size_t peakWritten = preferences.putBytes(
+      peakKey, &spectrumPeakColours, sizeof(spectrumPeakColours));
   const bool ok = written == sizeof(record) &&
       spectrumWritten == sizeof(spectrumSelection) &&
-      barWritten == sizeof(spectrumBarColours);
+      barWritten == sizeof(spectrumBarColours) &&
+      peakWritten == sizeof(spectrumPeakColours);
   Serial.printf("PRESET PANEL NVS: save slot=P%u result=%s bytes=%u\n",
                 (unsigned)slot + 1U, ok ? "OK" : "FAILED",
                 (unsigned)written);
@@ -6788,6 +6822,10 @@ bool applyPresetPanelSettings(uint8_t slot, bool force)
     preferences.getBytes(barKey, &candidate, sizeof(candidate));
     if (validSpectrumBarColours(candidate)) spectrumBarColours = candidate;
   }
+
+  char peakKey[16] = {0};
+  spectrumPeakPresetKey(slot, peakKey, sizeof(peakKey));
+  loadSpectrumPeakColours(peakKey);
 
   brightnessPercent = record.brightness;
   screenTimeoutOption = record.timeout;
@@ -8928,11 +8966,12 @@ uint8_t spectrumColourRowCount()
   for (uint8_t channel = 0; channel < 16; ++channel) {
     if (spectrumAvailableMask(SpectrumRta::kInputTap) & (1u << channel)) ++count;
   }
-  return count;
+  return count * 2;
 }
 
 bool spectrumColourChannelForRow(uint8_t row, uint8_t &tap, uint8_t &channel)
 {
+  row /= 2; // Each enabled channel has adjacent Bar and Peak swatch rows.
   for (uint8_t candidateTap = SpectrumRta::kOutputTap;; --candidateTap) {
     const uint16_t mask = spectrumAvailableMask(candidateTap);
     for (uint8_t candidate = 0; candidate < 16; ++candidate) {
@@ -11721,7 +11760,7 @@ String menuItemName(MenuPage page, uint8_t index)
   if (page == PAGE_SPECTRUM_COLOURS) {
     uint8_t tap = 0, channel = 0;
     if (!spectrumColourChannelForRow(index, tap, channel)) return "Unavailable";
-    return spectrumChannelText(channel, tap);
+    return spectrumChannelText(channel, tap) + (index & 1 ? " Peak" : " Bar");
   }
   if (page == PAGE_IDLE_SCREEN) {
     if (index < 4) {
@@ -13383,6 +13422,7 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
   const uint16_t grid = blend565(C_BLACK, uiAccent(), 35);
   const uint8_t selected = channel == 0 ? spectrumSelection.upper :
       spectrumSelection.lower;
+  const uint16_t peakColour = spectrumPeakColour(spectrumSelection.tap, selected);
   const uint8_t bandCount = stereoSpectrum.hasFrame[channel]
       ? stereoSpectrum.frame[channel].count : 34;
   const uint8_t shownBands = bandCount > firstBand
@@ -13429,7 +13469,7 @@ void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)
     const uint8_t peak = frame ? stereoSpectrum.peakHeight[channel][band] : 0;
     // Three-pixel marker, with one empty row above an active bar.
     canvas->fillRect(barX[band], baseline - peak - (peak ? 4 : 2),
-                     barWidth[band], 3, colour);
+                     barWidth[band], 3, peakColour);
   }
 }
 
@@ -14583,7 +14623,8 @@ void drawSystemSettingsList()
       if (menuPage == PAGE_SPECTRUM_COLOURS) {
         uint8_t tap = 0, channel = 0;
         if (spectrumColourChannelForRow(row, tap, channel)) {
-          swatch = spectrumBarColour(tap, channel);
+          swatch = row & 1 ? spectrumPeakColour(tap, channel)
+                           : spectrumBarColour(tap, channel);
         }
       } else {
         swatch = row < 3
@@ -15064,7 +15105,8 @@ void beginEdit()
       editActive = false;
       showToast("Unavailable"); drawMenu(); return;
     }
-    editInt = spectrumBarPalette(tap, channel);
+    editInt = menuIndex & 1 ? spectrumPeakPalette(tap, channel)
+                            : spectrumBarPalette(tap, channel);
   } else if (menuPage == PAGE_THEME) {
     if (menuIndex == 0) editInt = mainTextPaletteIndex;
     else if (menuIndex == 1) editInt = accentPaletteIndex;
@@ -15375,9 +15417,10 @@ void applyEdit()
       ok = false;
       failureText = "Unavailable";
     } else {
+      SpectrumBarColourRecord &colours = menuIndex & 1
+          ? spectrumPeakColours : spectrumBarColours;
       uint8_t *palette = tap == SpectrumRta::kInputTap
-          ? spectrumBarColours.inputPalette
-          : spectrumBarColours.outputPalette;
+          ? colours.inputPalette : colours.outputPalette;
       palette[channel] = (uint8_t)constrain(editInt, 0,
                                              THEME_PALETTE_COUNT - 1);
       markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
@@ -18656,6 +18699,8 @@ void serviceDeferredPreferences()
                               sizeof(spectrumSelection)) == sizeof(spectrumSelection) &&
          preferences.putBytes("spbar_cfg", &spectrumBarColours,
                               sizeof(spectrumBarColours)) == sizeof(spectrumBarColours) &&
+         preferences.putBytes("sppeak_cfg", &spectrumPeakColours,
+                              sizeof(spectrumPeakColours)) == sizeof(spectrumPeakColours) &&
          persistThemePreferencesNow();
   }
 
@@ -19943,6 +19988,7 @@ void setup()
     preferences.getBytes("spbar_cfg", &candidate, sizeof(candidate));
     if (validSpectrumBarColours(candidate)) spectrumBarColours = candidate;
   }
+  loadSpectrumPeakColours("sppeak_cfg");
 
   if (preferences.getBytesLength("sp_cfg") == sizeof(spectrumSelection)) {
     SpectrumRta::SelectionRecord candidate = {};

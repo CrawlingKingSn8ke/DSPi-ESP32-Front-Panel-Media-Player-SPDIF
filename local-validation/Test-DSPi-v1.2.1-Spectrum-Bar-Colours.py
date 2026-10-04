@@ -22,6 +22,31 @@ def body(signature):
 
 
 class SpectrumBarColourContracts(unittest.TestCase):
+    def test_peak_colours_have_safe_legacy_defaults_and_separate_storage(self):
+        load = body("void loadSpectrumPeakColours(const char *key)")
+        self.assertIn("spectrumPeakColours = spectrumBarColours", load)
+        self.assertIn("validSpectrumBarColours(candidate)", load)
+        self.assertIn('loadSpectrumPeakColours("sppeak_cfg")', SKETCH)
+        self.assertIn('putBytes("sppeak_cfg", &spectrumPeakColours', SKETCH)
+        self.assertIn('"sppeak_p%u"', SKETCH)
+        self.assertIn("loadSpectrumPeakColours(peakKey)", SKETCH)
+        self.assertIn("peakWritten == sizeof(spectrumPeakColours)", SKETCH)
+
+    def test_each_channel_has_bar_and_peak_colour_rows(self):
+        self.assertIn("return count * 2", body("uint8_t spectrumColourRowCount()"))
+        self.assertIn("row /= 2", body("bool spectrumColourChannelForRow(uint8_t row, uint8_t &tap, uint8_t &channel)"))
+        labels = body("String menuItemName(MenuPage page, uint8_t index)")
+        self.assertIn('index & 1 ? " Peak" : " Bar"', labels)
+        self.assertIn("spectrumPeakColour(tap, channel)", body("void drawSystemSettingsList()"))
+        self.assertIn("spectrumPeakPalette(tap, channel)", body("void beginEdit()"))
+        self.assertIn("spectrumPeakColours", body("void applyEdit()"))
+
+    def test_peak_drawing_uses_independent_colour_without_changing_animation(self):
+        channel = body("void drawSpectrumChannel(uint8_t channel, int16_t baseline, uint16_t colour)")
+        self.assertIn("spectrumPeakColour(spectrumSelection.tap, selected)", channel)
+        self.assertIn("barWidth[band], 3, peakColour", channel)
+        self.assertIn("canvas->fillRect(x, baseline - h, width, h, colour)", channel)
+
     def test_separate_per_channel_persisted_record(self):
         self.assertIn("uint8_t inputPalette[16]", SKETCH)
         self.assertIn("uint8_t outputPalette[16]", SKETCH)
