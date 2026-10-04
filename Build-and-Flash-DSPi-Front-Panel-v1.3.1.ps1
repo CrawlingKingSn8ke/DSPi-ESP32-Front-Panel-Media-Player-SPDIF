@@ -23,7 +23,7 @@ $arguments = @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", $Engine,
-    "-ReleaseVersion", "1.3.0",
+    "-ReleaseVersion", "1.3.1",
     "-Port", $Port,
     "-Baud", $Baud
 )
@@ -35,5 +35,5 @@ if ($SkipLibraryInstall) { $arguments += "-SkipLibraryInstall" }
 
 & powershell.exe @arguments
 if ($LASTEXITCODE -ne 0) {
-    throw "DSPi ESP32 Front Panel v1.3.0 failed with exit code $LASTEXITCODE."
+    throw "DSPi ESP32 Front Panel v1.3.1 failed with exit code $LASTEXITCODE."
 }

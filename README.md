@@ -7,7 +7,7 @@ Stable ESP32-S3 front-panel firmware with an integrated SD-card music player and
 
 The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 
-## Version 1.3.0 r2
+## Version 1.3.1
 
 This release builds on the stable v1.2.1 r2 S/PDIF media player. The audio route, album artwork, presets, BLE remote, analogue VU and local Wi-Fi updater remain available.
 
@@ -18,7 +18,7 @@ This release builds on the stable v1.2.1 r2 S/PDIF media player. The audio route
 - **Stereo Spectrum** replaces the old digital bar VU page. Select the input or output channel pair from channels enabled in the DSPi matrix; only the visible pair is requested. Each channel has its own colour palette, with animated peak markers. The analogue VU page remains available.
 - A reorganised **Effects** menu, clearer Remote key mapping, continuation arrows for longer lists, and updated Home feature icons and notifications. Spectrum retains source/preset information and supports the normal volume, mute and feature overlays.
 
-### New in r2
+### New in v1.3.1
 
 - Smoother external-source Spectrum animation, with prompt bar fall and segmented two-pixel bars.
 - Thicker peak markers with a 440 ms hold and independent per-channel peak colours. **Spectrum > Bar Colours** provides separate Bar and Peak swatches for each enabled channel; both are saved with settings and presets.
@@ -26,7 +26,7 @@ This release builds on the stable v1.2.1 r2 S/PDIF media player. The audio route
 
 Tube Modeller, Output Limiter and Spectrum require a compatible DSPi v1.1.6 firmware exposing those controls. The previous [v1.2.1 r2 release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/tag/v1.2.1-r2) remains available for rollback.
 
-See [v1.3.0 release notes](RELEASE-NOTES-v1.3.0.md) for the feature summary and [S/PDIF implementation and wiring](SPDIF-IMPLEMENTATION.md) for the audio connection. The release includes `SHA256SUMS-v1.3.0.txt` for verifying the firmware images.
+See [v1.3.1 release notes](RELEASE-NOTES-v1.3.1.md) for the feature summary and [S/PDIF implementation and wiring](SPDIF-IMPLEMENTATION.md) for the audio connection. The release includes `SHA256SUMS-v1.3.1.txt` for verifying the firmware images.
 
 ## Hardware
 
@@ -77,14 +77,14 @@ Power encoder modules from 3.3 V, not 5 V.
 
 ## Flash on Windows
 
-1. Download the latest v1.3.0 release source or clone `main`.
+1. Download the latest v1.3.1 release source or clone `main`.
 2. Install Python 3 if `py --version` does not show a version.
 3. Connect the ESP32-S3-LCD-2 by USB.
 4. Close Arduino Serial Monitor and any program using the COM port.
 5. Open PowerShell in the project folder and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.3.0.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.3.1.ps1"
 ```
 
 The script asks for or uses the supplied COM port, installs the required build tools when needed, compiles the firmware and performs a clean flash.
@@ -92,7 +92,7 @@ The script asks for or uses the supplied COM port, installs the required build t
 To update only the application while preserving BLE pairing and panel settings:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.3.0.ps1" -PreserveSettings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.3.1.ps1" -PreserveSettings
 ```
 
 A clean flash erases BLE pairing, learned key mappings, brightness, screen-power settings and shortcut assignments. After a clean flash, disconnect all power for at least 10 seconds before reconnecting.
@@ -102,7 +102,7 @@ A clean flash erases BLE pairing, learned key mappings, brightness, screen-power
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.3.0.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.3.1.ps1"
 ```
 
 The script installs or verifies:
@@ -118,7 +118,7 @@ The Arduino sketch retains its historical v1.1.2 directory name so the existing 
 firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
 ```
 
-The v1.3.0 wrappers use the version-neutral build engine and name generated artifacts as v1.3.0. The historical sketch-directory name is unchanged.
+The v1.3.1 wrappers use the version-neutral build engine and name generated artifacts as v1.3.1. The historical sketch-directory name is unchanged.
 
 Board profile:
 
@@ -158,7 +158,7 @@ Restrictions:
 
 The first installation must use the full USB image. After that, future application updates can be installed from the panel's local Wi-Fi page while preserving BLE bonds, remote mappings, presets and screen settings. An SD card is not required for firmware updates.
 
-1. Download `DSPi-ESP32-Front-Panel-v1.3.0-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
+1. Download `DSPi-ESP32-Front-Panel-v1.3.1-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
 2. Stop or pause local music playback.
 3. Open **System > Wi-Fi Transfer/Update** on the panel and confirm **Start**.
 4. Connect to the network shown on the panel and open its displayed browser address.
@@ -168,7 +168,7 @@ The first installation must use the full USB image. After that, future applicati
 8. After the restart, switch off or disconnect all power for at least 10 seconds, then power the unit back on before using the media player. A software restart does not power-cycle the SD card, so this step is required for a reliable SD remount.
 
 > [!WARNING]
-> Never upload `DSPi-ESP32-Front-Panel-v1.3.0-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
+> Never upload `DSPi-ESP32-Front-Panel-v1.3.1-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
 
 ## Wi-Fi Music Transfer
 

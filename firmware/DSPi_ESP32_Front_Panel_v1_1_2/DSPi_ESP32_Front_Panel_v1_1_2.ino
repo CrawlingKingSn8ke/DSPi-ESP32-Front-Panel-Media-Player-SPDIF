@@ -1,5 +1,5 @@
 /*
-  DSPi ESP32 Control Panel v1.3.0
+  DSPi ESP32 Control Panel v1.3.1
   Target DSPi firmware: compatible v1.1.6 (runtime version readback)
 
   Board:
@@ -14760,7 +14760,7 @@ void drawStatusScreen()
   drawFontCentredGlowColour(FontMedium, rowY, remote,
                             bleConnected ? uiAccent() : uiDimText());
   rowY += 31;
-  drawFontCentredGlow(FontMedium, rowY, "Panel v1.3.0");
+  drawFontCentredGlow(FontMedium, rowY, "Panel v1.3.1");
   if (mediaPlayerPoc.mounted()) {
     rowY += 31;
     drawFontCentredGlowColour(FontMedium, rowY, "SD card mounted", uiAccent());
@@ -19771,7 +19771,7 @@ void serviceWifiTransfer()
 void printHelp()
 {
   Serial.println();
-  Serial.println("DSPi ESP32 Control Panel v1.3.0");
+  Serial.println("DSPi ESP32 Control Panel v1.3.1");
   Serial.println("Media build: native 44.1/48 kHz + Wi-Fi Music Transfer + verified 30 MHz shared SD path");
   Serial.println("u/d = navigate (volume on home), </> = left/right");
   Serial.println("+/- = User Volume");

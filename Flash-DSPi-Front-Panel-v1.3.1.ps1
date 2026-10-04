@@ -13,10 +13,10 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Engine = Join-Path $Root "Build-and-Flash-DSPi-Front-Panel-v1.3.0.ps1"
+$Engine = Join-Path $Root "Build-and-Flash-DSPi-Front-Panel-v1.3.1.ps1"
 
 if (-not (Test-Path -LiteralPath $Engine -PathType Leaf)) {
-    throw "v1.3.0 build and flash engine not found: $Engine"
+    throw "v1.3.1 build and flash engine not found: $Engine"
 }
 
 $arguments = @(
@@ -34,5 +34,5 @@ if ($SkipLibraryInstall) { $arguments += "-SkipLibraryInstall" }
 
 & powershell.exe @arguments
 if ($LASTEXITCODE -ne 0) {
-    throw "DSPi ESP32 Front Panel v1.3.0 failed with exit code $LASTEXITCODE."
+    throw "DSPi ESP32 Front Panel v1.3.1 failed with exit code $LASTEXITCODE."
 }
