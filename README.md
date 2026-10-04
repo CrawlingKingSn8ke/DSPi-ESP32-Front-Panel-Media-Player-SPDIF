@@ -7,16 +7,22 @@ Stable ESP32-S3 front-panel firmware with an integrated SD-card music player and
 
 The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
 
-## Version 1.3.0
+## Version 1.3.0 r2
 
 This release builds on the stable v1.2.1 r2 S/PDIF media player. The audio route, album artwork, presets, BLE remote, analogue VU and local Wi-Fi updater remain available.
 
 ### New since v1.2.1 r2
 
 - **Tube Modeller** Basic controls: enable, tube choice, Drive, Mix and DSPi-enabled output selection. Advanced values saved in DSPi Console remain owned by DSPi and are not reset by the panel.
-- **Output Limiter** controls in the Setup menu, with DSPi-enabled outputs. Tube and Limiter settings follow the connected DSPi's state and presets.
+- **Output Limiter** controls in the Effects menu, with DSPi-enabled outputs. Tube and Limiter settings follow the connected DSPi's state and presets.
 - **Stereo Spectrum** replaces the old digital bar VU page. Select the input or output channel pair from channels enabled in the DSPi matrix; only the visible pair is requested. Each channel has its own colour palette, with animated peak markers. The analogue VU page remains available.
-- A reorganised **Setup** menu, clearer Remote key mapping, continuation arrows for longer lists, and updated Home feature icons and notifications. Spectrum retains source/preset information and supports the normal volume, mute and feature overlays.
+- A reorganised **Effects** menu, clearer Remote key mapping, continuation arrows for longer lists, and updated Home feature icons and notifications. Spectrum retains source/preset information and supports the normal volume, mute and feature overlays.
+
+### New in r2
+
+- Smoother external-source Spectrum animation, with prompt bar fall and segmented two-pixel bars.
+- Thicker peak markers with a 440 ms hold and independent per-channel peak colours. **Spectrum > Bar Colours** provides separate Bar and Peak swatches for each enabled channel; both are saved with settings and presets.
+- The audio-control menu is now named **Effects**. The idle Spectrum view keeps its colour baselines without a waiting message.
 
 Tube Modeller, Output Limiter and Spectrum require a compatible DSPi v1.1.6 firmware exposing those controls. The previous [v1.2.1 r2 release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/tag/v1.2.1-r2) remains available for rollback.
 

@@ -1,13 +1,20 @@
-# DSPi ESP32 Front Panel — Media Player S/PDIF v1.3.0
+# DSPi ESP32 Front Panel — Media Player S/PDIF v1.3.0 r2
 
 This release advances the v1.2.1 r2 front panel and music player with DSPi v1.1.6 controls and a new visualiser. The S/PDIF wiring and playback route are unchanged.
+
+## New in r2
+
+- Smoother Spectrum animation for external DSPi sources using interpolation between readings and partial graph redraws.
+- Prompt downward bar response, two-pixel segmented bars and three-pixel peak markers with a 440 ms hold.
+- Independent per-channel Bar and Peak colour swatches in **Spectrum > Bar Colours**, saved globally and with presets. Existing settings inherit their saved bar colours for peaks.
+- **Effects** replaces the Setup menu name. The Spectrum idle view retains the resting peak lines without a waiting message.
 
 ## New since v1.2.1 r2
 
 - Tube Modeller Basic controls: enable, tube selection, Drive, Mix and enabled outputs. Advanced settings configured in DSPi Console are preserved.
-- Output Limiter controls under Setup, using the available DSPi outputs.
+- Output Limiter controls under Effects, using the available DSPi outputs.
 - Stereo Spectrum replaces the digital bar VU page. Choose an enabled input or output pair, customise each channel's bar colour and see animated peak markers. It is active only while the Spectrum view is selected; analogue VU is retained.
-- Reorganised Setup and System menus, clearer Remote key mapping, continuation arrows for long lists, larger Home feature indicators and full-screen notifications. The Spectrum page also supports volume, mute and feature notifications.
+- Reorganised Effects and System menus, clearer Remote key mapping, continuation arrows for long lists, larger Home feature indicators and full-screen notifications. The Spectrum page also supports volume, mute and feature notifications.
 
 Tube Modeller, Output Limiter and Spectrum require a compatible DSPi v1.1.6 firmware that exposes their commands and telemetry. The earlier `v1.2.1-r2` release remains available for rollback.
 
@@ -21,10 +28,10 @@ Never upload the 16 MB Full image through the browser updater.
 
 ## Build verification
 
-- 24 local test scripts passed.
-- ESP32 Arduino core 3.3.11 build passed: 1,941,577 bytes of program storage and 78,924 bytes of global RAM.
-- OTA image: 1,941,728 bytes; SHA-256 `1C88EB4F7D20816180B55525584E9C9726EED0193EC40FB1D798BA6EA1E2EF9B`.
-- Full image: 16,777,216 bytes; SHA-256 `7012E68A379B82087A8AF104EEFF4FC04D8E2BCFC62D1C7BDD1548EA9DE06FAE`.
+- 187 tests passed across 25 local scripts.
+- ESP32 Arduino core 3.3.11 build passed: 1,943,469 bytes of program storage and 79,132 bytes of global RAM.
+- OTA image: 1,943,616 bytes; SHA-256 `CECDA4509AA467FCA7FC8CCD363F88DBCB9489DBE3B850925FF3BA5BEDDC74D3`.
+- Full image: 16,777,216 bytes; SHA-256 `6945A37773D1EB29BBD1A8D4D7E21FAC5776AAB23B9FBD95441CBF048246E750`.
 
 The images were built locally and were not flashed as part of release preparation.
 
