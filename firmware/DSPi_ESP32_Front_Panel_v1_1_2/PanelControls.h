@@ -319,14 +319,17 @@ inline Result planSum(const Route *fresh, size_t count, uint16_t selectedRoutes,
   if (mode != SumMode::Average && mode != SumMode::Unattenuated) return Result::Unsupported;
   if (!confirmed) return Result::NeedsConfirmation;
   uint16_t seenInputs = 0;
-  uint8_t output = 255;
+  uint8_t output = 0;
+  bool haveOutput = false;
   for (size_t i = 0; i < count; ++i) {
     if (!finite(fresh[i].gainDb)) return Result::NonFinite;
     if (!(selectedRoutes & (uint16_t(1) << i))) continue;
-    if (fresh[i].input >= 8 || (seenInputs & (uint16_t(1) << fresh[i].input))) return Result::InvalidTarget;
+    if (fresh[i].input >= 8 || fresh[i].output >= 9 ||
+        (seenInputs & (uint16_t(1) << fresh[i].input))) return Result::InvalidTarget;
     seenInputs |= uint16_t(1) << fresh[i].input;
-    if (output != 255 && output != fresh[i].output) return Result::InvalidTarget;
+    if (haveOutput && output != fresh[i].output) return Result::InvalidTarget;
     output = fresh[i].output;
+    haveOutput = true;
   }
   const float gain = mode == SumMode::Average ? -20.0f * log10f(static_cast<float>(bitCount(selectedRoutes))) : 0;
   for (size_t i = 0; i < count; ++i) {
@@ -511,16 +514,20 @@ inline Result checkOutputEnable(const ChannelMap &m, uint8_t output, uint16_t en
   return Result::Ok;
 }
 
-// Display cleaning never modifies the DSP's stored channel/source name. Fixed
-// ASCII previews match the panel font; unsupported bytes become '?'. Always
-// terminate and never read beyond sourceBytes (wire replies may have no NUL).
+// Display cleaning never modifies the DSP's stored channel/source name. The
+// common panel fonts contain letters/digits/space/.-/ and a synthetic '+',
+// but no '?': unsupported bytes use the visible '-' glyph, never zero-width
+// punctuation. Always terminate and bound reads even for non-NUL wire names.
 inline bool displayName(const uint8_t *source, size_t sourceBytes, char *out,
                         size_t capacity, size_t maxCharacters) {
   if (!source || !out || capacity == 0) return false;
   size_t n = 0;
   while (n < sourceBytes && n < maxCharacters && n + 1 < capacity && source[n]) {
     const uint8_t ch = source[n];
-    out[n] = ch < 32 || ch == 127 ? ' ' : (ch > 126 ? '?' : static_cast<char>(ch));
+    const bool supported = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                           (ch >= '0' && ch <= '9') || ch == ' ' || ch == '.' ||
+                           ch == '-' || ch == '/' || ch == '+';
+    out[n] = ch < 32 || ch == 127 ? ' ' : (supported ? static_cast<char>(ch) : '-');
     ++n;
   }
   out[n] = 0; return true;

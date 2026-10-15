@@ -172,6 +172,29 @@ static void routes() {
   CHECK(out[0].invert && !out[1].invert && out[2].gainDb == -12 && !out[2].enabled);
   CHECK(planSum(sum, 3, 3, SumMode::Unattenuated, true, out) == Result::Ok && out[0].gainDb == 0 && out[1].gainDb == 0);
   CHECK(planSum(sum, 3, 1, SumMode::Average, true, out) == Result::InvalidTarget);
+  // Invalid wire IDs must not collide with an internal "unset" sentinel or
+  // produce a plan, and every rejected operation must leave out untouched.
+  const Route malformed[][2] = {
+    {{0,255,false,false,-1},{1,1,false,true,-2}},
+    {{0,9,false,false,-1},{1,9,false,true,-2}},
+    {{0,1,false,false,-1},{1,255,false,true,-2}},
+    {{0,1,false,false,-1},{1,2,false,true,-2}}
+  };
+  for (const auto &pair : malformed) {
+    Route unchanged[2] = {{6,7,false,true,-7},{7,8,true,false,-8}};
+    CHECK(planSum(pair, 2, 3, SumMode::Average, true, unchanged) == Result::InvalidTarget);
+    CHECK(unchanged[0].input == 6 && unchanged[0].output == 7 && !unchanged[0].enabled &&
+          unchanged[0].invert && unchanged[0].gainDb == -7);
+    CHECK(unchanged[1].input == 7 && unchanged[1].output == 8 && unchanged[1].enabled &&
+          !unchanged[1].invert && unchanged[1].gainDb == -8);
+  }
+  Route lastOutput[2] = {{0,8,false,false,-3},{1,8,false,true,-4}}, lastPlan[2]{};
+  CHECK(planSum(lastOutput, 2, 3, SumMode::Average, true, lastPlan) == Result::Ok &&
+        lastPlan[0].output == 8 && lastPlan[1].output == 8);
+  Route selected[3] = {{0,255,false,true,-12},{1,2,false,false,-3},{2,2,false,true,-4}};
+  CHECK(planSum(selected, 3, 6, SumMode::Average, true, out) == Result::Ok &&
+        out[0].output == 255 && !out[0].enabled && out[0].gainDb == -12 &&
+        out[1].output == 2 && out[2].output == 2);
 }
 
 // Catches repeated trim accumulating, balance boosting the louder side,
@@ -251,6 +274,23 @@ static void hardware() {
 }
 
 static uint16_t monospace(const char *s, void *) { return static_cast<uint16_t>(std::strlen(s)*8); }
+// Literal FontMedium advances from the panel's actual glyph table. Like the
+// real renderer, unsupported characters contribute ZERO, not an invented
+// monospace width; '+' is the panel's synthetic glyph and space has advance6.
+static uint16_t mediumGlyphWidth(const char *s, void *) {
+  static const uint8_t upper[] = {14,14,14,15,12,11,15,15,6,6,13,11,17,15,16,12,16,14,13,12,14,14,20,14,12,14};
+  static const uint8_t lower[] = {12,13,11,13,12,7,13,13,6,6,11,6,19,13,12,13,13,8,10,8,13,12,16,12,12,10};
+  uint16_t width = 0;
+  for (; *s; ++s) {
+    if (*s >= 'A' && *s <= 'Z') width += upper[*s - 'A'];
+    else if (*s >= 'a' && *s <= 'z') width += lower[*s - 'a'];
+    else if (*s >= '0' && *s <= '9') width += 13;
+    else if (*s == ' ' || *s == '.') width += 6;
+    else if (*s == '-' || *s == '/') width += 7;
+    else if (*s == '+') width += 13;
+  }
+  return width;
+}
 // Catches unterminated/unbounded names, raw control characters on screen,
 // byte-count Home truncation instead of measured width, and an empty-slot load.
 static void namesAndPresets() {
@@ -265,6 +305,23 @@ static void namesAndPresets() {
   CHECK(fitName("Long Speaker Name", 17, out, sizeof(out), 64, monospace, nullptr) && std::strcmp(out, "Long ...") == 0);
   CHECK(fitName("Hi", 2, out, sizeof(out), 16, monospace, nullptr) && std::strcmp(out, "Hi") == 0);
   CHECK(fitName("Long Speaker Name", 17, out, sizeof(out), 8, monospace, nullptr) && std::strcmp(out, ".") == 0);
+  const uint8_t unsafe[] = {'A','?',':','_',0xc3,0xa9,'B',0};
+  const uint8_t original[] = {'A','?',':','_',0xc3,0xa9,'B',0};
+  CHECK(displayName(unsafe, sizeof(unsafe), out, sizeof(out), 31) && std::strcmp(out, "A-----B") == 0);
+  CHECK(mediumGlyphWidth(out, nullptr) == 63);
+  CHECK(std::memcmp(unsafe, original, sizeof(unsafe)) == 0);
+  CHECK(fitName(reinterpret_cast<const char *>(unsafe), sizeof(unsafe), out, sizeof(out),
+                50, mediumGlyphWidth, nullptr) && std::strcmp(out, "A--...") == 0);
+  CHECK(mediumGlyphWidth(out, nullptr) == 46);
+  const char supported[] = "Az09 .-/+";
+  CHECK(displayName(reinterpret_cast<const uint8_t *>(supported), sizeof(supported), out,
+                    sizeof(out), 31) && std::strcmp(out, "Az09 .-/+") == 0);
+  CHECK(mediumGlyphWidth(out, nullptr) == 89);
+  // Every printable byte must have visible advance after display cleaning,
+  // including all punctuation absent from the real common-font glyph set.
+  for (uint8_t ch = 32; ch < 127; ++ch) {
+    CHECK(displayName(&ch, 1, out, sizeof(out), 31) && mediumGlyphWidth(out, nullptr) > 0);
+  }
   CHECK(validStoredName("Room", 4));
   CHECK(!validStoredName("bad\n", 4));
   CHECK(!validStoredName("", 0));
