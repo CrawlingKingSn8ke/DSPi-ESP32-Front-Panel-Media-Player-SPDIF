@@ -53,6 +53,7 @@ class UiPolishR2Contracts(unittest.TestCase):
         self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 0", selection)
         self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 2", selection)
         self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 4", selection)
+        self.assertIn("menuPage == PAGE_SYSTEM && menuIndex == 6", selection)
         for signature in ("String currentEditValue()", "void drawMenuValue(",
                           "void beginEdit()", "void adjustEdit(int direction)",
                           "void applyEdit()"):
@@ -61,7 +62,9 @@ class UiPolishR2Contracts(unittest.TestCase):
 
     def test_dsp_setup_uses_native_font_and_icons_share_meter_colour(self):
         names = body("String menuItemName(MenuPage page, uint8_t index)")
-        self.assertIn('"Input", "Music", "Preset", "Effects", "System"', names)
+        self.assertIn('return PanelControlMenus::mainLabel(index);', names)
+        model = (ROOT / "firmware/DSPi_ESP32_Front_Panel_v1_1_2/PanelControlMenus.h").read_text()
+        self.assertIn('"Input","Music","Preset","Speakers","Effects","System"', model)
         title = body("String pageTitle(MenuPage page)")
         self.assertIn('case PAGE_FEATURES: return "Effects"', title)
         menu = body("void drawMenu()")

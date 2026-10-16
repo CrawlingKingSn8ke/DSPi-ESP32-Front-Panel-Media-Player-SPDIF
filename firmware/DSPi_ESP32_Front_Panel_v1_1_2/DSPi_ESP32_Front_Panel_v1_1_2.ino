@@ -1,5 +1,5 @@
 /*
-  DSPi ESP32 Control Panel v1.3.1
+  DSPi ESP32 Control Panel v1.3.2 speaker-control stage 1
   Target DSPi firmware: compatible v1.1.6 (runtime version readback)
 
   Board:
@@ -100,6 +100,9 @@
 #include "UiMenuLayout.h"
 #include "SpectrumRta.h"
 #include "WifiTransferMode.h"
+
+// Arduino may emit transport prototypes before the late UART definitions.
+enum DspiTxnResult : uint8_t;
 
 #define DSPI_HAVE_NIMBLE 1
 
@@ -2828,6 +2831,7 @@ static const uint8_t FontMenu_54[] PROGMEM = {
   0x01, 0xDD, 0x05, 0xFF, 0x01, 0xCC, 0x10, 0x00
 };
 
+#include "NativeMenuK.h"
 static const GlyphDef FontMenu_glyphs[] = {
   {'B', 40, 45, 40, 0, 16, 686, FontMenu_42},
   {'C', 45, 45, 45, 0, 16, 662, FontMenu_43},
@@ -2863,9 +2867,10 @@ static const GlyphDef FontMenu_glyphs[] = {
   {'t', 20, 41, 20, 0, 20, 334, FontMenu_74},
   {'u', 35, 32, 35, 0, 29, 508, FontMenu_75},
   {'v', 33, 32, 33, 0, 29, 460, FontMenu_76},
-  {'y', 33, 45, 33, 0, 29, 558, FontMenu_79}
+  {'y', 33, 45, 33, 0, 29, 558, FontMenu_79},
+  {'k', 32, 45, 32, 0, 16, 548, FontMenu_6B}
 };
-static const FontDef FontMenu = {FontMenu_glyphs, 35, 76, 15};
+static const FontDef FontMenu = {FontMenu_glyphs, 36, 76, 15};
 
 static const uint8_t FontLarge_41[] PROGMEM = {
   0x14, 0x00, 0x01, 0x11, 0x08, 0xCC, 0x01, 0x66, 0x28, 0x00, 0x01, 0x55, 0x08, 0xFF, 0x01, 0xCC, 0x28, 0x00, 0x01, 0xAA, 0x09, 0xFF, 0x01, 0x33,
@@ -5309,8 +5314,19 @@ enum MenuPage {
   PAGE_TUBE_OUTPUTS,
   PAGE_LIMITER,
   PAGE_LIMITER_OUTPUT,
-  PAGE_FEATURES
+  PAGE_FEATURES,
+  PAGE_SPEAKERS, PAGE_SPEAKER_SETUP, PAGE_SPEAKER_GROUPS, PAGE_SPEAKER_MEMBERS,
+  PAGE_OUTPUTS, PAGE_OUTPUT, PAGE_ROUTING, PAGE_ROUTE, PAGE_SUM, PAGE_SOURCE_PAIR,
+  PAGE_EQUALISER, PAGE_EQ_INPUTS, PAGE_EQ_OUTPUTS, PAGE_EQ_TARGET, PAGE_EQ_BANDS,
+  PAGE_EQ_BAND, PAGE_CROSSOVER, PAGE_XO_BAND, PAGE_PRESET_TOOLS,
+  PAGE_PRESET_DESTINATION, PAGE_PRESET_PREVIEW, PAGE_STARTING_POINT,
+  PAGE_INPUT_NAMES, PAGE_INPUT_NAME, PAGE_HARDWARE, PAGE_HARDWARE_OUTPUTS,
+  PAGE_HARDWARE_PAIR, PAGE_PDM, PAGE_SPDIF_INPUTS, PAGE_SPDIF_INPUT,
+  PAGE_I2S_INPUT, PAGE_I2S_DATA, PAGE_I2S_CLOCKS, PAGE_MASTER_CLOCK, PAGE_ADAT,
+  PAGE_PANEL_CONFIRM, PAGE_PANEL_NAME,
+  PAGE_COUNT
 };
+#include "PanelControlRuntime.h"
 
 enum LegacyUiColourChoice : uint8_t {
   UI_COLOUR_WHITE = 0,
@@ -5764,7 +5780,8 @@ enum DeferredPreferenceFlag : uint32_t {
   PREF_DIRTY_BLE_MAPPINGS = 1u << 1,
   PREF_DIRTY_BLE_DEVICE = 1u << 2,
   PREF_DIRTY_PANEL_SETTINGS = 1u << 3,
-  PREF_DIRTY_BLE_REMOVE = 1u << 4
+  PREF_DIRTY_BLE_REMOVE = 1u << 4,
+  PREF_DIRTY_PANEL_CONTROLS = 1u << 5
 };
 
 portMUX_TYPE deferredPreferenceMux = portMUX_INITIALIZER_UNLOCKED;
@@ -5872,7 +5889,7 @@ int editOriginalInt = 0;
 bool editBool = false;
 bool editOriginalBool = false;
 
-uint8_t rememberedMenuIndex[PAGE_FEATURES + 1] = {};
+uint8_t rememberedMenuIndex[PAGE_COUNT] = {};
 uint8_t limiterDetailOutput = 0xff;
 uint8_t lastMainMenuIndex = 0;
 
@@ -6761,6 +6778,7 @@ bool savePresetPanelSettings(uint8_t slot)
 
 bool applyPresetPanelSettings(uint8_t slot, bool force)
 {
+  panelPresetChanged(slot);
   if (slot >= 10) return false;
   if (!force && presetPanelSettingsSlotApplied &&
       presetPanelSettingsAppliedSlot == slot) return true;
@@ -7475,7 +7493,7 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
                                     uint16_t index, const uint8_t *txPayload,
                                     uint16_t txLength, uint8_t *rxPayload,
                                     uint16_t rxCapacity, uint16_t &rxLength,
-                                    bool affectLinkState);
+                                    bool affectLinkState, bool allowReplay = true);
 DspiTxnResult dspiGetResult(uint8_t request, uint16_t value, uint16_t length,
                            uint8_t *payload, uint16_t capacity, uint16_t &received,
                            bool affectLinkState);
@@ -7535,6 +7553,7 @@ bool dspiReadByteUntil(uint8_t &value, unsigned long deadline)
 
 void acceptDspiNotification(const UartFrame &frame)
 {
+  panelNotification(frame.payload,frame.length);
   // A CRC-valid type-0x40 frame is never eligible to satisfy a request. The
   // full refresh is delayed so PRESET_LOADED/BULK_INVALIDATED cannot race the
   // Console's flash-write blackout or the immediately following apply work.
@@ -7677,14 +7696,15 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
                                     uint16_t index, const uint8_t *txPayload,
                                     uint16_t txLength, uint8_t *rxPayload,
                                     uint16_t rxCapacity, uint16_t &rxLength,
-                                    bool affectLinkState)
+                                    bool affectLinkState, bool allowReplay)
 {
   rxLength = 0;
   if (dspiRequestInFlight) return DSPI_TXN_REENTRANT;
   dspiRequestInFlight = true;
   DspiTxnResult finalResult = DSPI_TXN_TIMEOUT;
 
-  for (uint8_t attempt = 0; attempt < DSPI_TRANSACTION_ATTEMPTS; attempt++) {
+  const uint8_t attempts = allowReplay ? DSPI_TRANSACTION_ATTEMPTS : 1;
+  for (uint8_t attempt = 0; attempt < attempts; attempt++) {
     dspiSendRequest(isGet, request, value, index, txPayload, txLength);
 
     // An occupied preset can require a sector erase before the Pico's UART
@@ -7737,7 +7757,7 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
     }
 
     if (finalResult == DSPI_TXN_TIMEOUT) dspiRecoverAfterTimeout(request);
-    if (!dspiResultCanRetry(finalResult) || attempt + 1 >= DSPI_TRANSACTION_ATTEMPTS) break;
+    if (!dspiResultCanRetry(finalResult) || attempt + 1 >= attempts) break;
     Serial.printf("DSPi retry: req=0x%02X reason=%s attempt=%u/%u\n", request,
                   dspiTxnResultText(finalResult), attempt + 2, DSPI_TRANSACTION_ATTEMPTS);
     delay(DSPI_RETRY_DELAY_MS);
@@ -8616,6 +8636,7 @@ bool syncCurrentState(bool includePresetNames)
 
   const bool sourceChanged = oldSource != dspi.source;
   const bool presetChanged = oldActivePreset != dspi.activePreset;
+  if (sourceChanged) panelSourceChanged();
   const bool spdifBecameInvalid = isSpdifSource(dspi.source) &&
       oldSource == dspi.source &&
       ((oldSpdifState == 2 && (dspi.spdifState != 2 || dspi.spdifNonAudio)) ||
@@ -8800,6 +8821,7 @@ bool pollExternalRuntimeState()
   if (volumeValid) dspi.volumeDb = observedVolume;
   if (presetValid) dspi.activePreset = observedPreset;
   if (sourceValid) dspi.source = (InputSource)observedSource;
+  if (sourceChanged) panelSourceChanged();
   if (loudnessValid) dspi.loudnessEnabled = observedLoudness != 0;
   if (crossfeedValid) dspi.crossfeedEnabled = observedCrossfeed != 0;
   if (levellerValid) dspi.levellerEnabled = observedLeveller != 0;
@@ -9179,7 +9201,6 @@ bool persistIndependentMasterVolumeVerified()
   // In mode 0 the live 0xD2 value is not a preset property. 0xD6 copies it
   // into the DSPi directory so the same safety ceiling returns after boot.
   if (dspi.masterVolumeMode != 0) return true;
-
   uint8_t payload[1] = {0xFF};
   uint16_t length = 0;
   if (!dspiGet(REQ_SAVE_MASTER_VOLUME, 0, 1,
@@ -9247,6 +9268,7 @@ bool setInputSource(InputSource source, bool userInitiated)
   InputSource oldSource = dspi.source;
   dspi.source = (InputSource)readback;
   if (oldSource != dspi.source) {
+    panelSourceChanged();
     mediaDspiSourcePrimed = true;
     Serial.printf("DSPi source change: old=%u new=%u reason=local SET\n",
                   (unsigned)oldSource, (unsigned)dspi.source);
@@ -11100,6 +11122,7 @@ bool loadPreset(uint8_t slot, bool announce)
   mediaPresetRefreshPending = false;
   pendingPresetOverlay = false;
   applyPresetPanelSettings(slot, true);
+  panelPresetLoaded(slot);
   resetMetersForStateChange("preset transaction complete");
   scheduleStateRefresh(180, "preset transaction refresh");
   if (announce) {
@@ -11131,12 +11154,14 @@ bool saveCurrentPreset(uint8_t destinationSlot)
     return false;
   }
 
+  panelLegacySaveCapture(destinationSlot);
   uint8_t payload[1] = {0xFF};
   uint16_t length = 0;
   const DspiTxnResult saveResult = dspiGetResult(
       REQ_PRESET_SAVE, destinationSlot, 1,
       payload, sizeof(payload), length, true);
   if (saveResult != DSPI_TXN_OK || length != 1 || payload[0] != 0) {
+    panelLegacySaveComplete(destinationSlot, false);
     Serial.printf("PRESET SAVE: rejected destination=P%u transport=%s "
                   "length=%u status=0x%02X\n",
                   (unsigned)destinationSlot + 1U,
@@ -11415,7 +11440,7 @@ String sourceText()
 {
   // Music is the ESP32's I2S programme, not a separate DSPi input or Home
   // layer.  Always present the source DSPi is actually listening to.
-  return inputSourceDisplayText(dspi.source);
+  return panelSourceLabel((uint8_t)dspi.source,inputSourceDisplayText(dspi.source),true);
 }
 
 InputSource displayedPhysicalInputSource()
@@ -11425,7 +11450,7 @@ InputSource displayedPhysicalInputSource()
 
 String sourceMenuText(InputSource source)
 {
-  return inputSourceDisplayText(source);
+  return panelSourceLabel((uint8_t)source,inputSourceDisplayText(source),false);
 }
 
 String presetText()
@@ -11514,6 +11539,7 @@ String levellerSpeedText(uint8_t value)
 
 String pageTitle(MenuPage page)
 {
+  if (panelOwnsPage(page)) return panelPageTitle(page);
   switch (page) {
     case PAGE_MAIN: return "Menu";
     case PAGE_FEATURES: return "Effects";
@@ -11636,12 +11662,13 @@ void clampBleMenuIndex()
 
 uint8_t menuItemCount(MenuPage page)
 {
+  if (panelOwnsPage(page)) return panelMenuCount(page);
   switch (page) {
-    case PAGE_MAIN: return 5;
-    case PAGE_FEATURES: return 7;
+    case PAGE_MAIN: return 6;
+    case PAGE_FEATURES: return 8;
     case PAGE_INPUT: return 1;
     case PAGE_MEDIA: return mediaBrowserItemCount();
-    case PAGE_PRESET: return 10;
+    case PAGE_PRESET: return 11;
     case PAGE_LOUDNESS: return 3;
     case PAGE_CROSSFEED: return 4;
     case PAGE_LEVELLER: return 6;
@@ -11657,7 +11684,7 @@ uint8_t menuItemCount(MenuPage page)
         dspi.limiter.outputsKnown ? tubeOutputCount(dspi.limiter.enabledOutputs) : 0);
     case PAGE_LIMITER_OUTPUT: return 4;
     case PAGE_BLUETOOTH: return bleMenuItemCount();
-    case PAGE_SYSTEM: return 5;
+    case PAGE_SYSTEM: return 7;
     case PAGE_MEDIA_SETTINGS: return 1;
     case PAGE_SCREEN_SETTINGS: return 5;
     case PAGE_IDLE_SCREEN:
@@ -11672,14 +11699,14 @@ uint8_t menuItemCount(MenuPage page)
 
 String menuItemName(MenuPage page, uint8_t index)
 {
+  if (panelOwnsPage(page)) return panelMenuName(page,index);
   if (page == PAGE_MAIN) {
-    const char *items[] = {"Input", "Music", "Preset", "Effects", "System"};
-    return items[std::min<uint8_t>(index, 4)];
+    return PanelControlMenus::mainLabel(index);
   }
   if (page == PAGE_FEATURES) {
-    const char *items[] = {"Loudness", "Crossfeed", "Leveller", "Psy Bass",
+    const char *items[] = {"Equaliser", "Loudness", "Crossfeed", "Leveller", "Psy Bass",
                            "Sub Synth", "Tube Modeller", "Output Limiter"};
-    return items[std::min<uint8_t>(index, 6)];
+    return items[std::min<uint8_t>(index, 7)];
   }
   if (page == PAGE_INPUT) return "Source";
   if (page == PAGE_SUB_SYNTH) {
@@ -11717,7 +11744,7 @@ String menuItemName(MenuPage page, uint8_t index)
   if (page == PAGE_MEDIA) {
     return mediaBrowserItemName(index);
   }
-  if (page == PAGE_PRESET) return presetListLabel(index);
+  if (page == PAGE_PRESET) return index < 10 ? presetListLabel(index) : String("Preset Tools");
   if (page == PAGE_LOUDNESS) {
     const char *items[] = {"Enable", "Reference SPL", "Strength"};
     return items[std::min<uint8_t>(index, 2)];
@@ -11740,9 +11767,9 @@ String menuItemName(MenuPage page, uint8_t index)
   if (page == PAGE_SYSTEM) {
     const char *items[] = {
       "Remote", "Volume Limit", "Screen Settings",
-      "WiFi Transfer/Update", "Status"
+      "Input Names", "Hardware", "WiFi Transfer/Update", "Status"
     };
-    return items[std::min<uint8_t>(index, 4)];
+    return items[std::min<uint8_t>(index, 6)];
   }
   if (page == PAGE_MEDIA_SETTINGS) return "Seek Step";
   if (page == PAGE_SCREEN_SETTINGS) {
@@ -11826,6 +11853,7 @@ String screenTimeoutSummary()
 String currentEditValue()
 {
   if (!editActive) return "";
+  if (panelOwnsPage(menuPage)) return panelMenuValue(menuPage,menuIndex);
   if (isSubSynthPage(menuPage)) return subSynthValueText(currentSubSynthParam(), editFloat);
   if (menuPage == PAGE_TUBE) {
     const TubeParam p = menuIndex == 0 ? TUBE_ENABLE :
@@ -11883,6 +11911,7 @@ String currentEditValue()
 
 String menuItemValue(MenuPage page, uint8_t index)
 {
+  if (panelOwnsPage(page)) return panelMenuValue(page,index);
   if (editActive) return currentEditValue();
   if (isSubSynthPage(page)) {
     if (!dspi.subSynth.known || !dspi.subSynth.supported) return "Unavailable";
@@ -11961,7 +11990,8 @@ String menuItemValue(MenuPage page, uint8_t index)
   if (page == PAGE_SYSTEM) {
     if (index == 1) return String(dspi.masterVolumeDb, 1) + " dB";
     if (index == 2) return "Open";
-    if (index == 4) return dspi.connected ? "Ready" : "Fault";
+    if (index == 3 || index == 4) return "Open";
+    if (index == 6) return dspi.connected ? "Ready" : "Fault";
     return "";
   }
   if (page == PAGE_MEDIA_SETTINGS) {
@@ -12004,6 +12034,7 @@ bool menuValueUsesPercent()
 
 const char *menuValueUnit()
 {
+  if (panelOwnsPage(menuPage)) return panelMenuUnit(menuPage,menuIndex);
   if (menuPage == PAGE_PSYBASS && !psybassWritable()) return "";
   if (menuValueUsesPercent()) return "%";
   if (menuPage == PAGE_TUBE && menuIndex == 2) return "dB";
@@ -13289,11 +13320,10 @@ void drawMenuValue(int16_t y, const String &value)
   uint16_t valueColour = selectedForEdit ? uiAccent() : uiMainText();
 
   if (menuPage == PAGE_INPUT) {
-    // FontMenu intentionally contains only the glyphs needed by the main
-    // carousel. FontLarge contains A-Z, digits and slash, so source names such
-    // as ADAT, I2S and S/PDIF are always rendered in full. Even S/PDIF 2/3 fit
-    // the 320 px panel at this native size.
-    drawFontCentredGlowColour(FontLarge, y, value, valueColour);
+    // Retain the existing native source font. Full aliases may be31 bytes;
+    // bound their preview without shrinking or changing routing identity.
+    drawFontCentredGlowColour(FontLarge, y,
+        ellipsizeFontText(FontLarge, value, UI_W - 24), valueColour);
     return;
   }
 
@@ -13756,6 +13786,7 @@ void beginPresetSaveConfirmation(uint8_t destinationSlot)
 
 void beginHighlightedPresetSave()
 {
+  if (menuIndex >= 10) return; // Preset Tools is not a native slot.
   const bool mediaSessionPresent = mediaPlayerPoc.active() ||
       mediaPlaybackSuspended || mediaCurrentPath[0] ||
       mediaTrackTransitionActive();
@@ -13953,6 +13984,7 @@ void drawHome()
 
 void transitionToHome()
 {
+  panelCancel();
   // Album art is nonessential on Home. If its worker has already been
   // admitted, invalidate the job so its next ring-aware I/O boundary stops
   // consuming shared SD/PSRAM bandwidth behind an otherwise idle Home view.
@@ -14511,8 +14543,8 @@ void drawPresetList()
   drawFontCentredGlow(FontMedium, 2, "Presets");
   drawTaperLine(UI_W / 2, 42, 286, 1, uiAccentDark());
 
-  menuIndex = std::min<uint8_t>(menuIndex, 9);
-  const UiPagedWindow window = uiPagedWindow(10, menuIndex, VISIBLE_ROWS,
+  menuIndex = std::min<uint8_t>(menuIndex, 10);
+  const UiPagedWindow window = uiPagedWindow(11, menuIndex, VISIBLE_ROWS,
                                               presetListTopRow);
   presetListTopRow = window.first;
 
@@ -14523,10 +14555,11 @@ void drawPresetList()
     canvas->fillRect(4, y, UI_W - 8, ROW_HEIGHT - 1, C_BLACK);
     if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
 
-    String label = ellipsizeFontText(FontMedium, presetListLabel(slot), UI_W - 35);
-    const uint16_t colour = isPresetOccupied(slot) ? uiMainText() : uiDimText();
+    if (slot >= 11) break;
+    String label = ellipsizeFontText(FontMedium, slot < 10 ? presetListLabel(slot) : String("Preset Tools"), UI_W - 35);
+    const uint16_t colour = slot == 10 || isPresetOccupied(slot) ? uiMainText() : uiDimText();
     drawFontText(FontMedium, 13, y + 3, label, colour);
-    if (slot == dspi.activePreset) {
+    if (slot < 10 && slot == dspi.activePreset) {
       canvas->fillCircle(UI_W - 10, y + 16, 3, uiAccent());
     }
   }
@@ -14548,7 +14581,7 @@ void drawPresetList()
 
 bool isSystemSettingsListPage(MenuPage page)
 {
-  return page == PAGE_FEATURES || page == PAGE_SYSTEM ||
+  return panelOwnsPage(page) || page == PAGE_FEATURES || page == PAGE_SYSTEM ||
          page == PAGE_LOUDNESS || page == PAGE_CROSSFEED ||
          page == PAGE_LEVELLER || page == PAGE_PSYBASS ||
          page == PAGE_BLUETOOTH || page == PAGE_SCREEN_SETTINGS ||
@@ -14570,9 +14603,10 @@ void drawSystemSettingsList()
   static constexpr int16_t ROW_Y = 52;
   static constexpr int16_t ROW_HEIGHT = 36;
 
-  uiView = VIEW_MENU;
+  uiView = editActive ? VIEW_EDIT : VIEW_MENU;
   drawBase();
-  drawFontCentredGlow(FontMedium, 2, pageTitle(menuPage));
+  drawFontCentredGlow(FontMedium, 2,
+      ellipsizeFontText(FontMedium,pageTitle(menuPage),UI_W-16));
   drawTaperLine(UI_W / 2, 44, 286, 1, uiAccentDark());
 
   const uint8_t count = menuItemCount(menuPage);
@@ -14586,9 +14620,10 @@ void drawSystemSettingsList()
     if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
 
     String value = menuItemValue(menuPage, row);
-    const bool tubeUnit = menuPage == PAGE_TUBE &&
-        (row == 2 || row == 3) && value != "Unavailable";
-    const char *unit = tubeUnit ? (row == 2 ? "dB" : "%") : "";
+    const char *unit = panelOwnsPage(menuPage) ? panelMenuUnit(menuPage,row) :
+        menuPage == PAGE_TUBE && row == 2 ? "dB" :
+        menuPage == PAGE_TUBE && row == 3 ? "%" : "";
+    const bool tubeUnit = unit[0] && value != "Unavailable" && value != "Pending" && value != "Unknown";
     const int16_t unitWidth = tubeUnit ? (int16_t)strlen(unit) * 12 + 4 : 0;
     const bool paletteSwatch = (menuPage == PAGE_THEME && row < 4) ||
         (menuPage == PAGE_SPECTRUM_COLOURS && spectrumColourRowCount() > 0);
@@ -14634,8 +14669,17 @@ void drawSystemSettingsList()
       canvas->fillCircle(UI_W - 17, y + 17, 9, swatch);
       canvas->drawCircle(UI_W - 17, y + 17, 10, uiDimText());
     }
+    if (menuPage == PAGE_PANEL_NAME && row == 0) {
+      const String preview = panelNameWindow();
+      const int16_t cursorX = columns.valueRight -
+          fontTextWidth(FontMedium,preview) + panelNameCursorOffset();
+      canvas->drawLine(cursorX,y+33,
+          cursorX+panelNameCursorWidth()-1,y+33,uiAccent());
+    }
     if (menuPage == PAGE_FEATURES) {
-      drawFeatureIconForIndex(row, UI_W - 28, y + 9);
+      const auto feature = PanelControlMenus::featureSemantic(row);
+      if (feature != PanelControlMenus::Feature::Equaliser)
+        drawFeatureIconForIndex(static_cast<uint8_t>(feature)-1, UI_W - 28, y + 9);
     }
 
     if (menuPage == PAGE_IDLE_SCREEN && row < 4 &&
@@ -14666,7 +14710,7 @@ void drawMenu()
     drawPresetList();
     return;
   }
-  if (isSystemSettingsListPage(menuPage) && !editActive) {
+  if (isSystemSettingsListPage(menuPage) && (!editActive || panelOwnsPage(menuPage))) {
     drawSystemSettingsList();
     return;
   }
@@ -14760,7 +14804,7 @@ void drawStatusScreen()
   drawFontCentredGlowColour(FontMedium, rowY, remote,
                             bleConnected ? uiAccent() : uiDimText());
   rowY += 31;
-  drawFontCentredGlow(FontMedium, rowY, "Panel v1.3.1");
+  drawFontCentredGlow(FontMedium, rowY, "Panel v1.3.2");
   if (mediaPlayerPoc.mounted()) {
     rowY += 31;
     drawFontCentredGlowColour(FontMedium, rowY, "SD card mounted", uiAccent());
@@ -14821,6 +14865,7 @@ void dismissFeatureConfirmation()
 
 int8_t mainIndexForPage(MenuPage page)
 {
+  if (panelOwnsPage(page)) return panelMainIndex(page);
   switch (page) {
     case PAGE_INPUT: return 0;
     case PAGE_MEDIA: return 1;
@@ -14836,9 +14881,11 @@ int8_t mainIndexForPage(MenuPage page)
     case PAGE_TUBE:
     case PAGE_TUBE_OUTPUTS:
     case PAGE_LIMITER:
-    case PAGE_LIMITER_OUTPUT: return 3;
-    case PAGE_BLUETOOTH: return 4;
-    case PAGE_SYSTEM: return 4;
+    case PAGE_LIMITER_OUTPUT: return 4;
+    case PAGE_BLUETOOTH: return 5;
+    case PAGE_SYSTEM: return 5;
+    case PAGE_SCREEN_SETTINGS: case PAGE_IDLE_SCREEN: case PAGE_THEME:
+    case PAGE_SPECTRUM: case PAGE_SPECTRUM_COLOURS: return 5;
     default: return -1;
   }
 }
@@ -14846,9 +14893,9 @@ int8_t mainIndexForPage(MenuPage page)
 MenuPage pageForMainIndex(uint8_t index)
 {
   const MenuPage pages[] = {
-    PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_FEATURES, PAGE_SYSTEM
+    PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_SPEAKERS, PAGE_FEATURES, PAGE_SYSTEM
   };
-  return pages[std::min<uint8_t>(index, 4)];
+  return pages[std::min<uint8_t>(index, 5)];
 }
 
 void enterPage(MenuPage page)
@@ -14904,6 +14951,7 @@ void enterPage(MenuPage page)
   }
   menuPage = page;
   editActive = false;
+  panelEnterPage(page);
   if (page == PAGE_MEDIA && mediaPlayerPoc.active()) {
     uiView = VIEW_MEDIA_NOW_PLAYING;
     drawMediaNowPlaying();
@@ -14936,6 +14984,7 @@ void enterPage(MenuPage page)
 
 void cancelActiveEdit()
 {
+  if (panelOwnsPage(menuPage)) panelCancel();
   if (!editActive) return;
   if (menuPage == PAGE_SCREEN_SETTINGS && menuIndex == 0) {
     brightnessPercent = (uint8_t)editOriginalInt;
@@ -14948,6 +14997,7 @@ void cancelActiveEdit()
 
 void goBack()
 {
+  if (panelBack()) return;
   if (uiView == VIEW_MEDIA_NOW_PLAYING) {
     restoreMediaBrowserToQueueTrack();
     uiView = VIEW_MENU;
@@ -15149,6 +15199,7 @@ int wrapEditInt(int current, int direction, int step, int minimum, int maximum)
 void adjustEdit(int direction)
 {
   if (!editActive) return;
+  if (panelOwnsPage(menuPage)) { panelAdjust(direction); drawMenu(); return; }
   if (isSubSynthPage(menuPage)) {
     const SubSynthParam p = currentSubSynthParam();
     if (p < SUB_PARAM_COUNT) {
@@ -15251,6 +15302,7 @@ void adjustEdit(int direction)
 void applyEdit()
 {
   if (!editActive) return;
+  if (panelOwnsPage(menuPage)) { panelApply(); drawMenu(); return; }
 
   if (menuPage == PAGE_INPUT &&
       !inputSourceAvailable((InputSource)editInt)) {
@@ -15459,7 +15511,7 @@ void moveMenu(int direction)
   if (direction == 0) return;
 
   if (menuPage == PAGE_PRESET && !editActive) {
-    menuIndex = (uint8_t)constrain((int)menuIndex + direction, 0, 9);
+    menuIndex = (uint8_t)constrain((int)menuIndex + direction, 0, 10);
     rememberedMenuIndex[PAGE_PRESET] = menuIndex;
     drawMenu();
     return;
@@ -15523,6 +15575,7 @@ void moveMenu(int direction)
 
 void selectMenuItem()
 {
+  if (panelSelect()) return;
   if (editActive) {
     applyEdit();
     return;
@@ -15534,10 +15587,10 @@ void selectMenuItem()
   }
 
   if (menuPage == PAGE_FEATURES) {
-    const MenuPage pages[] = {PAGE_LOUDNESS, PAGE_CROSSFEED, PAGE_LEVELLER,
+    const MenuPage pages[] = {PAGE_EQUALISER, PAGE_LOUDNESS, PAGE_CROSSFEED, PAGE_LEVELLER,
                               PAGE_PSYBASS, PAGE_SUB_SYNTH, PAGE_TUBE,
                               PAGE_LIMITER};
-    enterPage(pages[std::min<uint8_t>(menuIndex, 6)]);
+    enterPage(pages[std::min<uint8_t>(menuIndex, 7)]);
     return;
   }
 
@@ -15552,11 +15605,17 @@ void selectMenuItem()
   }
 
   if (menuPage == PAGE_SYSTEM && menuIndex == 3) {
+    enterPage(PAGE_INPUT_NAMES); return;
+  }
+  if (menuPage == PAGE_SYSTEM && menuIndex == 4) {
+    enterPage(PAGE_HARDWARE); return;
+  }
+  if (menuPage == PAGE_SYSTEM && menuIndex == 5) {
     beginWifiTransferConfirmation();
     return;
   }
 
-  if (menuPage == PAGE_SYSTEM && menuIndex == 4) {
+  if (menuPage == PAGE_SYSTEM && menuIndex == 6) {
     transitionToStatusScreen();
     return;
   }
@@ -15638,6 +15697,7 @@ void selectMenuItem()
   }
 
   if (menuPage == PAGE_PRESET) {
+    if (menuIndex == 10) { enterPage(PAGE_PRESET_TOOLS); return; }
     if (!isPresetOccupied(menuIndex)) {
       showToast("Empty preset");
       drawMenu();
@@ -15890,6 +15950,16 @@ void dispatchUiAction(UiAction action)
   action = contextualizeUiAction(action);
   if (action == ACT_NONE) return;
 
+  // Rare panel operations own their verified mute/context until resolved.
+  // Legacy shortcuts (including media and Mute) must not bypass that guard.
+  if (panelWorkPending()) {
+    if (action == ACT_HOME) transitionToHome();
+    else if (action == ACT_BACK || action == ACT_MENU_TOGGLE) {
+      if (!panelBack()) panelCancel();
+    } else showToast("Pending - wait or Back");
+    return;
+  }
+
   if (mediaVolumeOverlayVisible &&
       action != ACT_VOL_UP && action != ACT_VOL_DOWN) {
     dismissMediaVolumeOverlay(false);
@@ -16025,6 +16095,8 @@ void dispatchUiAction(UiAction action)
     return;
   }
 
+  if ((action == ACT_LEFT || action == ACT_RIGHT) &&
+      panelNameMove(action == ACT_LEFT ? -1 : 1)) return;
   if (uiView == VIEW_EDIT) {
     bool handled = true;
     if (action == ACT_NAV_UP) adjustEdit(1);
@@ -18643,7 +18715,8 @@ void serviceDeferredPreferences()
           ? PREF_DIRTY_BLE_MAPPINGS
           : (flags & PREF_DIRTY_HOME_SHORTCUTS)
               ? PREF_DIRTY_HOME_SHORTCUTS
-              : PREF_DIRTY_PANEL_SETTINGS;
+              : (flags & PREF_DIRTY_PANEL_CONTROLS)
+                  ? PREF_DIRTY_PANEL_CONTROLS : PREF_DIRTY_PANEL_SETTINGS;
   uint32_t startedAt = millis();
   bool ok = false;
   bool terminalFailure = false;
@@ -18688,6 +18761,8 @@ void serviceDeferredPreferences()
 #else
     ok = true;
 #endif
+  } else if (selected == PREF_DIRTY_PANEL_CONTROLS) {
+    ok = panelPersistLocal();
   } else if (selected == PREF_DIRTY_PANEL_SETTINGS) {
     ok = preferences.putUChar("brightness", brightnessPercent) == 1 &&
          preferences.putUChar("screen_to", screenTimeoutOption) == 1 &&
@@ -19771,7 +19846,7 @@ void serviceWifiTransfer()
 void printHelp()
 {
   Serial.println();
-  Serial.println("DSPi ESP32 Control Panel v1.3.1");
+  Serial.println("DSPi ESP32 Control Panel v1.3.2 speaker-control stage 1");
   Serial.println("Media build: native 44.1/48 kHz + Wi-Fi Music Transfer + verified 30 MHz shared SD path");
   Serial.println("u/d = navigate (volume on home), </> = left/right");
   Serial.println("+/- = User Volume");
@@ -19791,20 +19866,26 @@ void servicePresetSaveCompletion()
 
   presetSaveCompletionAttempts++;
   if (syncCurrentState(true)) {
+    const bool rolesConfirmed = dspi.activePreset == presetSaveCompletionSlot &&
+        (dspi.occupiedPresets & (uint16_t(1) << presetSaveCompletionSlot));
+    presetSavePanelSettingsOk = panelLegacySaveComplete(
+        presetSaveCompletionSlot, rolesConfirmed) && presetSavePanelSettingsOk;
     presetSaveCompletionPending = false;
     showToast(presetSavePanelSettingsOk
-        ? "Saved to P" + String((int)presetSaveCompletionSlot + 1)
-        : "DSPi saved; panel error");
+        ? "Save accepted P" + String((int)presetSaveCompletionSlot + 1)
+        : "Accepted; panel error");
     redrawCurrentView();
   } else if (presetSaveCompletionAttempts < 4) {
     presetSaveCompletionAt = millis() + 250;
   } else {
     // 0x90 was accepted, but the post-blackout verification link did not
     // recover in time. Do not incorrectly report a definite flash failure.
+    presetSavePanelSettingsOk = panelLegacySaveComplete(
+        presetSaveCompletionSlot, false) && presetSavePanelSettingsOk;
     presetSaveCompletionPending = false;
     showToast(presetSavePanelSettingsOk
         ? "Save accepted P" + String((int)presetSaveCompletionSlot + 1)
-        : "DSPi saved; panel error");
+        : "Accepted; panel error");
     redrawCurrentView();
   }
 }
@@ -20440,6 +20521,7 @@ void loop()
   serviceMediaPresetRefresh();
   serviceMediaDeferredRedraw();
   serviceMediaBrowserRedraw();
+  servicePanelControls();
 
   if (mediaPlayerPoc.active()) {
     // The decoder owns the time-critical prefill/seek windows, but once its
@@ -20603,3 +20685,5 @@ void loop()
 // before the sketch's types and library headers, producing a cascade of
 // "does not name a type" errors. Function order is irrelevant at link time.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
+#include "PanelControlRuntime.inc"

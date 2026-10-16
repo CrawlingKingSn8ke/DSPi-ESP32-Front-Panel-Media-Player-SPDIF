@@ -10,6 +10,7 @@ INO = (
     / "DSPi_ESP32_Front_Panel_v1_1_2"
     / "DSPi_ESP32_Front_Panel_v1_1_2.ino"
 ).read_text(encoding="utf-8")
+FONT_SOURCE = INO + (ROOT / "firmware/DSPi_ESP32_Front_Panel_v1_1_2/NativeMenuK.h").read_text(encoding="utf-8")
 
 
 def function_body(signature: str) -> str:
@@ -42,14 +43,14 @@ class RenderEfficiencyContracts(unittest.TestCase):
             ]
             for match in re.finditer(
                 r"static const uint8_t (Font\w+)\[\] PROGMEM = \{(.*?)\};",
-                INO,
+                FONT_SOURCE,
                 re.DOTALL,
             )
         }
         glyphs = re.findall(
             r"\{'[^']',\s*(\d+),\s*(\d+),.*?,\s*(Font\w+)\}", INO
         )
-        self.assertEqual(232, len(glyphs))
+        self.assertEqual(233, len(glyphs))
         for width_text, height_text, array_name in glyphs:
             width = int(width_text)
             total = width * int(height_text)

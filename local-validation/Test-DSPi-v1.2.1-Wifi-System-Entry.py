@@ -29,14 +29,14 @@ class WifiSystemEntryContracts(unittest.TestCase):
     def test_system_list_has_wifi_after_volume_limit(self):
         expected = (
             '"Remote", "Volume Limit", "Screen Settings",\n'
-            '      "WiFi Transfer/Update", "Status"'
+            '      "Input Names", "Hardware", "WiFi Transfer/Update", "Status"'
         )
         self.assertIn(expected, INO)
-        self.assertIn("case PAGE_SYSTEM: return 4", INO)
+        self.assertIn("case PAGE_SYSTEM: return 7", INO)
 
     def test_system_wifi_row_opens_existing_confirmation(self):
         self.assertIn(
-            "if (menuPage == PAGE_SYSTEM && menuIndex == 3) {\n"
+            "if (menuPage == PAGE_SYSTEM && menuIndex == 5) {\n"
             "    beginWifiTransferConfirmation();",
             INO,
         )

@@ -20,7 +20,19 @@ int main()
   assert(uiFeatureIconOffset(UI_FEATURE_PSY_BASS | UI_FEATURE_SUB_SYNTH,
                              UI_FEATURE_SUB_SYNTH) == 21);
   assert(uiFeatureIconSpan(UI_FEATURE_PSY_BASS | UI_FEATURE_SUB_SYNTH) == 41);
-  assert(uiFeatureIconSpan(UI_FEATURE_ALL) == 99);
+  assert(uiFeatureIconSpan(UI_FEATURE_ALL) == 138);
+  assert(uiFeatureIconScaledSpan(UI_FEATURE_ALL, 125, 7) == 178);
+  // Every scaled icon and inter-icon gap must sit inside the combined span.
+  for (uint8_t bit = 1; bit <= UI_FEATURE_LIMITER; bit <<= 1) {
+    const int16_t start = uiFeatureIconScaledOffset(UI_FEATURE_ALL, bit, 125, 7);
+    const int16_t end = start + uiFeatureIconScaledWidth(bit, 125);
+    assert(start >= 0 && end <= 178);
+    if (bit < UI_FEATURE_LIMITER) {
+      const int16_t next = uiFeatureIconScaledOffset(
+          UI_FEATURE_ALL, static_cast<uint8_t>(bit << 1), 125, 7);
+      assert(next - end == 7);
+    }
+  }
 
   assert(uiAnalogSwatchX(0) == 65);
   assert(uiAnalogSwatchX(5) == 255);
