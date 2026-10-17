@@ -58,6 +58,9 @@ struct Native {
   std::vector<Call> calls;uint8_t pin=2,pinStatus=0,spdifMask=1,platform=1,adatPin=255,rejectEq=255;bool muted=false;unsigned saveCount=0;bool dropSaveAck=false,watchMono=false,unsafeMono=false,failPlatform=false,failRta=false,notifyDuringRead=false,notifyDuringNameRead=false,echoOwn=false;uint32_t selectedRate=48000;char channelName[32]="Output";
   PanelControls::BandRecipe eq[17][24]{};PanelControls::Route routes[8]{};float gains[9]{},delays[9]{};uint8_t mutes[9]{};uint16_t occupied=1;uint8_t active=0;char names[10][32]{};
   Native(){for(auto &t:eq)for(auto&b:t)b={1,0,1000,.707f,0,123};for(unsigned i=0;i<8;++i)routes[i]={uint8_t(i),0,i==0,true,-4};for(auto &g:gains)g=-12;strcpy(names[0],"Original");}
+  bool deferredEqEcho=false;
+  uint8_t deferredEqSource=0;bool alterDeferredEq=false;
+  bool queueDeferredEq=false;std::vector<uint8_t> pendingEqEvent;
 }nativeWire;
 DspiTxnResult dspiTransactionResult(bool get,uint8_t req,uint16_t value,uint16_t,const uint8_t *tx,uint16_t txLen,uint8_t *rx,uint16_t,uint16_t &size,bool,bool replay){
   Native::Call call{};call.get=get;call.req=req;call.value=value;call.len=txLen;call.replay=replay;if(tx)memcpy(call.bytes,tx,txLen);nativeWire.calls.push_back(call);size=0;
@@ -92,13 +95,21 @@ DspiTxnResult dspiTransactionResult(bool get,uint8_t req,uint16_t value,uint16_t
   if(nativeWire.notifyDuringRead&&get&&req==0x43){nativeWire.notifyDuringRead=false;uint8_t event[13]={2,2,0,8,0,0,1,0,1,0,0,0,1};panelNotification(event,13);}
   if(nativeWire.notifyDuringNameRead&&get&&req==0x9c){nativeWire.notifyDuringNameRead=false;uint8_t event[13]={2,2,0,10,0,0,1,0,1,0,0,0,1};panelNotification(event,13);}
   if(nativeWire.echoOwn&&(!get||req==0x7c||req==0xe9)){uint8_t event[13]={2,2,0,9,0,0,1,0,8,0,0,0,1};panelNotification(event,13);}
+  // DSPi applies EQ later in main.c after vendor dispatch reset the origin.
+  if(nativeWire.deferredEqEcho&&!get&&req==0x42){
+    const unsigned ch=tx[0],band=tx[1];unsigned offset=band<20?824+(ch*12+band)*16:4780+(ch*4+band-20)*16;
+    uint8_t event[28]={2,2};event[4]=offset&255;event[5]=offset>>8;event[6]=16;
+    event[8]=nativeWire.deferredEqSource;event[12]=tx[2];event[13]=tx[3];if(tx[2]==11&&txLen==18){event[14]=tx[16];event[15]=tx[17];}memcpy(event+16,tx+4,12);if(nativeWire.alterDeferredEq)event[16]^=1;
+    if(nativeWire.queueDeferredEq)nativeWire.pendingEqEvent.assign(event,event+28);else panelNotification(event,28);
+  }
   return DSPI_TXN_OK;
 }
 #define DSPI_HAVE_NIMBLE 0
 #include "../firmware/DSPi_ESP32_Front_Panel_v1_1_2/PanelControlRuntime.inc"
 static unsigned checks;
 #define CHECK(x)do{++checks;if(!(x)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);exit(1);}}while(0)
-static void pass(){unsigned before=nativeWire.calls.size();nowMs+=200;servicePanelControls();CHECK(nativeWire.calls.size()<=before+1);}
+static void pass(){unsigned before=nativeWire.calls.size();nowMs+=200;servicePanelControls();CHECK(nativeWire.calls.size()<=before+1);
+ if(!nativeWire.pendingEqEvent.empty()){auto event=nativeWire.pendingEqEvent;nativeWire.pendingEqEvent.clear();panelNotification(event.data(),event.size());}}
 static void passes(unsigned n){while(n--)pass();}
 static void select(uint8_t row){menuIndex=row;CHECK(panelSelect());}
 static void applyTestEdit(){panelApply();if(menuPage==PAGE_PANEL_NUMBER)select(2);}

@@ -13,12 +13,39 @@ static MenuPage native(Page p){
 static bool wireActive=false;
 static bool pendingInvalidation=false,pendingRoleReload=false,externalChangeNotice=false;
 static void drainInvalidation();
+// EQ is applied asynchronously in DSPi main.c, after dispatch resets the
+// notification origin to UNKNOWN. Correlate only exact, recent band echoes;
+// never treat all notifications arriving during a transaction as our own.
+struct EqEcho {bool valid=false;uint16_t offset=0;uint32_t sent=0;uint8_t bytes[16]{};};
+static EqEcho eqEchoes[4];
+static uint8_t eqEchoNext=0;
+static int rememberEqWrite(const Frame &f){
+  if(f.get||f.request!=0x42||(f.length!=16&&f.length!=18)||f.bytes[0]>=17)return -1;
+  const uint8_t band=f.bytes[1];if(band>=10&&(band<20||band>23))return -1;
+  const uint8_t slot=eqEchoNext++%4;EqEcho &e=eqEchoes[slot];e=EqEcho();e.valid=true;e.sent=millis();
+  // Pinned unified WireBulkParams: eq @824, 12 bands/channel; XO @4780,
+  // four slots/channel. Each WireBandParams is 16 bytes on both platforms.
+  e.offset=band<10?824+(f.bytes[0]*12+band)*16:4780+(f.bytes[0]*4+band-20)*16;
+  e.bytes[0]=f.bytes[2];e.bytes[1]=f.bytes[3]==1?1:0;
+  if(f.bytes[2]==11&&f.length==18){e.bytes[2]=f.bytes[16];e.bytes[3]=f.bytes[17];}
+  memcpy(e.bytes+4,f.bytes+4,12);return slot;
+}
+static bool consumeEqEcho(const uint8_t *p,uint16_t n){
+  if(!p||n!=28||p[0]!=2||p[1]!=2||p[2]||p[6]!=16||p[7]||p[8]!=0||p[9]||p[10]||p[11])return false;
+  const uint16_t offset=p[4]|(uint16_t(p[5])<<8);
+  for(auto &e:eqEchoes){if(e.valid&&uint32_t(millis()-e.sent)>2000)e.valid=false;
+    if(e.valid&&e.offset==offset&&memcmp(e.bytes,p+12,16)==0){e.valid=false;return true;}}
+  return false;
+}
+static void clearEqEchoes(){for(auto &e:eqEchoes)e.valid=false;}
 static Reply exchange(void *,const Frame &f){
   Reply r;uint16_t size=0;wireActive=true;
+  const int echo=rememberEqWrite(f); // Register before UART can deliver the event.
   DspiTxnResult status=dspiTransactionResult(f.get,f.request,f.value,2,
       f.get?nullptr:f.bytes,f.length,r.bytes,sizeof(r.bytes),size,false,
       f.get&&!f.action);
   wireActive=false;
+  if(status==DSPI_TXN_ERROR&&echo>=0)eqEchoes[echo].valid=false;
   r.size=size;
   r.status=status==DSPI_TXN_OK?WireStatus::Ok:
       status==DSPI_TXN_ERROR?WireStatus::Rejected:WireStatus::Unknown;
@@ -674,6 +701,7 @@ bool panelPersistLocal(){using namespace PanelRuntime;if(!serialKnown)return fal
   if(rolesDirty){bool remaining=false;for(uint8_t slot=0;slot<10;++slot)if(roleDrafts[slot].dirty){char key[16];RoleDraft &draft=roleDrafts[slot];serialKey(draft.record.serial,"r",slot,key,sizeof(key));bool stored=preferences.putBytes(key,&draft.record,sizeof(draft.record))==sizeof(draft.record);if(stored)draft.dirty=false;else remaining=true;ok&=stored;}rolesDirty=remaining;}return ok;
 }
 void panelInvalidate(){using namespace PanelRuntime;if(wireActive){pendingInvalidation=true;return;}
+  clearEqEchoes();
   ++generation;control.invalidate();gainBaseline.valid=subBaseline.valid=balanceBaseline.valid=false;gainKnownMask=0;savedKnown=false;savedEligible=false;directoryKnown=false;activeInputStep=0;memset(namesKnown,0,sizeof(namesKnown));clearCells();
   if(groupJob||sumStage||copyJob.stage||hardwareGuard||presetStage||nameStage||control.busy())operationCancelled=true;
   copyJob.stage=0;
@@ -683,6 +711,7 @@ void panelInvalidate(){using namespace PanelRuntime;if(wireActive){pendingInvali
 }
 void panelSourceChanged(){using namespace PanelRuntime;model.activeInputs=0;panelInvalidate();}
 void panelNotification(const uint8_t *payload,uint16_t bytes){using namespace PanelRuntime;
+  if(consumeEqEcho(payload,bytes))return;
   // Pinned v2 PARAM_CHANGED identifies exclusive UART-origin echoes with8.
   // Arrival during a transaction alone never identifies an own change.
   if(payload&&bytes>=12&&payload[0]==2&&payload[1]==2&&payload[8]==8){uint16_t size=payload[6]|(uint16_t(payload[7])<<8);if(size<=52&&bytes==12+size)return;}

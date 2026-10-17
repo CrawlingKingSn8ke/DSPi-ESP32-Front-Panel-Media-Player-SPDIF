@@ -1,5 +1,5 @@
 /*
-  DSPi ESP32 Control Panel v1.3.2 Outputs / Inputs stage 3
+  DSPi ESP32 Control Panel v1.3.2 Outputs / Inputs copy fix r2
   Target DSPi firmware: compatible v1.1.6 (runtime version readback)
 
   Board:
@@ -19850,7 +19850,7 @@ void serviceWifiTransfer()
 void printHelp()
 {
   Serial.println();
-  Serial.println("DSPi ESP32 Control Panel v1.3.2 Outputs / Inputs stage 3");
+  Serial.println("DSPi ESP32 Control Panel v1.3.2 Outputs / Inputs copy fix r2");
   Serial.println("Media build: native 44.1/48 kHz + Wi-Fi Music Transfer + verified 30 MHz shared SD path");
   Serial.println("u/d = navigate (volume on home), </> = left/right");
   Serial.println("+/- = User Volume");
