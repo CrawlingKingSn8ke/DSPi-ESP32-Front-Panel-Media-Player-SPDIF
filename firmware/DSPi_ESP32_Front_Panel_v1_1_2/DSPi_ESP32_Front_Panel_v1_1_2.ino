@@ -1,5 +1,5 @@
 /*
-  DSPi ESP32 Control Panel v1.3.2 speaker-control stage 1
+  DSPi ESP32 Control Panel v1.3.2 EQ usability stage 2
   Target DSPi firmware: compatible v1.1.6 (runtime version readback)
 
   Board:
@@ -5323,7 +5323,7 @@ enum MenuPage {
   PAGE_INPUT_NAMES, PAGE_INPUT_NAME, PAGE_HARDWARE, PAGE_HARDWARE_OUTPUTS,
   PAGE_HARDWARE_PAIR, PAGE_PDM, PAGE_SPDIF_INPUTS, PAGE_SPDIF_INPUT,
   PAGE_I2S_INPUT, PAGE_I2S_DATA, PAGE_I2S_CLOCKS, PAGE_MASTER_CLOCK, PAGE_ADAT,
-  PAGE_PANEL_CONFIRM, PAGE_PANEL_NAME,
+  PAGE_PANEL_CONFIRM, PAGE_PANEL_NAME, PAGE_PANEL_NUMBER,
   PAGE_COUNT
 };
 #include "PanelControlRuntime.h"
@@ -14676,6 +14676,16 @@ void drawSystemSettingsList()
       canvas->drawLine(cursorX,y+33,
           cursorX+panelNameCursorWidth()-1,y+33,uiAccent());
     }
+    if (menuPage == PAGE_PANEL_NUMBER && row == 0 && editActive) {
+      const int16_t cursorX = columns.valueRight - unitWidth -
+          fontTextWidth(FontMedium,value) + panelNumberCursorOffset();
+      canvas->drawLine(cursorX,y+33,cursorX+panelNumberCursorWidth()-1,y+33,uiAccent());
+      canvas->drawLine(cursorX,y+34,cursorX+panelNumberCursorWidth()-1,y+34,uiAccent());
+    } else if (panelEditUnderline(menuPage,row) && value.length()) {
+      const int16_t x = columns.valueRight - unitWidth - fontTextWidth(FontMedium,value);
+      canvas->drawLine(x,y+33,columns.valueRight-unitWidth,y+33,uiAccent());
+      canvas->drawLine(x,y+34,columns.valueRight-unitWidth,y+34,uiAccent());
+    }
     if (menuPage == PAGE_FEATURES) {
       const auto feature = PanelControlMenus::featureSemantic(row);
       if (feature != PanelControlMenus::Feature::Equaliser)
@@ -19846,7 +19856,7 @@ void serviceWifiTransfer()
 void printHelp()
 {
   Serial.println();
-  Serial.println("DSPi ESP32 Control Panel v1.3.2 speaker-control stage 1");
+  Serial.println("DSPi ESP32 Control Panel v1.3.2 EQ usability stage 2");
   Serial.println("Media build: native 44.1/48 kHz + Wi-Fi Music Transfer + verified 30 MHz shared SD path");
   Serial.println("u/d = navigate (volume on home), </> = left/right");
   Serial.println("+/- = User Volume");

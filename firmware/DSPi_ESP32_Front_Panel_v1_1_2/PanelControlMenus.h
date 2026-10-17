@@ -11,7 +11,7 @@ enum class Page : uint8_t { Main, Input, Music, Preset, Effects, System,
   Crossover, XoBand, PresetTools, PresetDestination, PresetPreview,
   StartingPoint, InputNames, InputName, Hardware, HardwareOutputs,
   HardwarePair, Pdm, SpdifInputs, SpdifInput, I2sInput, I2sData,
-  I2sClocks, MasterClock, Adat, Confirm, Name, Count };
+  I2sClocks, MasterClock, Adat, Confirm, Name, Number, Count };
 enum class Feature : uint8_t { Equaliser, Loudness, Crossfeed, Leveller,
   PsyBass, SubSynth, Tube, Limiter };
 inline uint8_t mainCount(){return 6;}
@@ -38,10 +38,10 @@ struct Model {
     switch(p){
       case Page::Main:return 6;case Page::Speakers:return 6;case Page::Setup:return 2;
       case Page::Groups:return 3;case Page::GroupMembers:case Page::Outputs:case Page::EqOutputs:return map.outputs?map.outputs:1;
-      case Page::Output:return 8;case Page::Routing:return visibleInputs()?visibleInputs()+1:1;
+      case Page::Output:return 7;case Page::Routing:return visibleInputs()?visibleInputs()+1:1;
       case Page::Route:return 3;case Page::Sum:return 4;case Page::SourcePair:return visibleInputs()>=2?visibleInputs()/2:1;
       case Page::Equaliser:return 2;case Page::EqInputs:return visibleInputs()?visibleInputs():1;
-      case Page::EqTarget:return 2;case Page::Bands:return 10;case Page::Band:return 5;
+      case Page::EqTarget:return eqOutput?3:2;case Page::Bands:return 10;case Page::Band:return 5;
       case Page::Crossover:return 4;case Page::XoBand:return 5;case Page::PresetTools:return 5;
       case Page::PresetDestination:return 10;case Page::PresetPreview:return 7;case Page::StartingPoint:return 2;
       case Page::InputNames:return 8;case Page::InputName:return 3;case Page::Hardware:return 8;
@@ -49,7 +49,7 @@ struct Model {
       case Page::Pdm:return 1;case Page::SpdifInputs:return 4;case Page::SpdifInput:return 2;
       case Page::I2sInput:return 2;case Page::I2sData:return map.inputs>=2?map.inputs/2:1;
       case Page::I2sClocks:return 6;case Page::MasterClock:return 3;case Page::Adat:return 7;
-      case Page::Confirm:return 4;case Page::Name:return 4;default:return 1;
+      case Page::Confirm:return 4;case Page::Name:case Page::Number:return 4;default:return 1;
     }
   }
   uint8_t nativeBand(uint8_t row,bool xo)const{return static_cast<uint8_t>(row+(xo?20:0));}
@@ -60,8 +60,8 @@ struct Model {
     if(enabled)v|=bit;else v&=~bit;return true;
   }
   Page parent(Page p)const{
-    switch(p){case Page::Setup:return Page::Speakers;case Page::Groups:case Page::Outputs:return Page::Setup;
-      case Page::GroupMembers:return Page::Groups;case Page::Output:return Page::Outputs;case Page::Routing:case Page::Crossover:return Page::Output;
+    switch(p){case Page::Setup:case Page::Outputs:return Page::Speakers;case Page::Groups:return Page::Setup;
+      case Page::GroupMembers:return Page::Groups;case Page::Output:return Page::Outputs;case Page::Routing:return Page::Output;case Page::Crossover:return Page::EqTarget;
       case Page::Route:case Page::Sum:return Page::Routing;case Page::SourcePair:return Page::Sum;
       case Page::EqInputs:case Page::EqOutputs:return Page::Equaliser;case Page::EqTarget:return eqParent;
       case Page::Bands:return Page::EqTarget;case Page::Band:return Page::Bands;case Page::XoBand:return Page::Crossover;
@@ -127,6 +127,12 @@ class Controller {
     if(b<20||b>23||eq<map.inputs||!startBand(eq,b,PanelControls::BandField::Bypass,enabled?0:1))return false;
     createXoIfFlat=enabled;return true;
   }
+  // Only the explicit per-band copy confirmation may call this path.
+  bool startBandCopy(uint8_t eq,uint8_t b,const PanelControls::BandRecipe &source){
+    PanelControls::EqPacket packet{};
+    if(PanelControls::packEq(map,eq,b,source,sampleRate,packet)!=PanelControls::Result::Ok||!startBand(eq,b,PanelControls::BandField::Type,source.type))return false;
+    copyRecipe=source;copyBand=true;return true;
+  }
   bool startRoute(uint8_t in,uint8_t out,PanelControls::RouteField f,float desired){
     uint16_t s;if(!PanelControls::routeSelector(map,in,out,s)||!begin(Route,desired))return false;
     valueSelector=s;routeField=f;return true;}
@@ -159,7 +165,8 @@ class Controller {
       if(++field<6)return;field=0;
       if(phase==Read){PanelControls::BandRecipe fresh=recipe;
         if(createXoIfFlat&&fresh.type==0&&PanelControls::editBand(recipe,PanelControls::BandField::Type,32,sampleRate,fresh)!=PanelControls::Result::Ok){finish(PanelControls::Completion::Failed);return;}
-        if(PanelControls::editBand(fresh,bandField,desiredValue,sampleRate,planned)!=PanelControls::Result::Ok){finish(PanelControls::Completion::Failed);return;}phase=Write;}
+        if(copyBand){planned=copyRecipe;if(planned.type!=11)planned.qpX512=fresh.qpX512;}
+        else if(PanelControls::editBand(fresh,bandField,desiredValue,sampleRate,planned)!=PanelControls::Result::Ok){finish(PanelControls::Completion::Failed);return;}phase=Write;}
       else {bool ok=readback.type==planned.type&&readback.bypass==planned.bypass&&near(readback.frequencyHz,planned.frequencyHz)&&near(readback.q,planned.q)&&near(readback.gainDb,planned.gainDb)&&readback.qpX512==planned.qpX512;recipe=readback;finish(ok?PanelControls::Completion::Confirmed:PanelControls::Completion::Failed);}return;
     }
     if(operation==Route){if(r.size!=8||r.bytes[0]!=(valueSelector>>8)||r.bytes[1]!=(valueSelector&255)){finish(PanelControls::Completion::Unknown);return;}
@@ -181,7 +188,7 @@ class Controller {
   uint32_t generation=0;bool didWrite=false,invalid=false,cancelled=false,createXoIfFlat=false;float desiredValue=0;
   uint8_t getRequest=0,setRequest=0,eqId=0,band=0,field=0;uint16_t valueSelector=0,readValue=0;
   PanelControls::BandField bandField=PanelControls::BandField::Type;PanelControls::RouteField routeField=PanelControls::RouteField::Gain;
-  PanelControls::BandRecipe planned{},readback{};PanelControls::Route plannedRoute{};
+  PanelControls::BandRecipe planned{},readback{},copyRecipe{};PanelControls::Route plannedRoute{};bool copyBand=false;
   bool validScalar(uint8_t get,uint8_t set,uint16_t selector,float v,ValueKind k)const{
     if(!PanelControls::finite(v))return false;
     if(k==ValueKind::Byte&&(v<0||v>255||v!=floorf(v)))return false;
@@ -197,7 +204,7 @@ class Controller {
     if(get==0x3f&&set==0x3e)return selector==0&&k==ValueKind::Float&&(v==0||v==1);
     return false;
   }
-  bool begin(Operation op,float v){if(busy()||!PanelControls::finite(v))return false;operation=op;desiredValue=v;phase=Read;field=0;didWrite=invalid=cancelled=createXoIfFlat=false;nativeStatus=0;readBytes=readOffset=readMask=0;completion=PanelControls::Completion::Pending;return true;}
+  bool begin(Operation op,float v){if(busy()||!PanelControls::finite(v))return false;operation=op;desiredValue=v;phase=Read;field=0;didWrite=invalid=cancelled=createXoIfFlat=copyBand=false;nativeStatus=0;readBytes=readOffset=readMask=0;completion=PanelControls::Completion::Pending;return true;}
   void finish(PanelControls::Completion c){completion=c;phase=Idle;}
 };
 }

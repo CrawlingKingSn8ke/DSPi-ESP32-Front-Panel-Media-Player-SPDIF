@@ -51,6 +51,10 @@ static bool legacySaveRolesKnown=false;
 static uint8_t roleSlot=255;
 static bool rolesDirty=false,aliasesDirty=false;
 static float localValue=0,originalValue=0;
+static PanelNumberEditor number;
+static MenuPage numberParent=PAGE_EQ_BAND;
+static uint8_t numberRow=0;
+static const char *numberUnit="";
 static const char *statusText="";
 static MenuPage editPage=PAGE_SPEAKERS;
 static uint8_t editRow=0;
@@ -59,10 +63,13 @@ static bool lastControlBusy=false;
 static uint8_t activeInputStep=0;
 static bool uartAttempted=false,operationCancelled=false,presetCancelled=false;
 static uint8_t linkedTarget=255;
+static uint8_t linkStage=0,linkedBand=0,linkedSource=0,linkType=0;
+static uint32_t linkGeneration=0;
+static bool linkedCopy=false,linkedSecond=false,linkedXoEnable=false;
 static PanelControls::BandField linkedField=PanelControls::BandField::Type;
 static float linkedValue=0;
 static uint8_t confirmedTargets=0;
-enum class ConfirmAction:uint8_t {None,Hardware,Restore,Save,SaveNew,New,Rename,Revert,Sum};
+enum class ConfirmAction:uint8_t {None,Hardware,Restore,Save,SaveNew,New,Rename,Revert,Sum,LinkBand};
 static ConfirmAction confirmation=ConfirmAction::None;
 static ConfirmAction presetJobAction=ConfirmAction::None;
 static uint8_t presetJobSlot=0,presetActiveBefore=0,captureOutput=0;
@@ -154,10 +161,10 @@ static uint8_t eqBand(){return menuPage==PAGE_XO_BAND?20+model.band:model.band;}
 static Field field(MenuPage p,uint8_t row){
   const uint8_t out=model.output,pair=model.pair;
   if(p==PAGE_OUTPUTS||p==PAGE_SPEAKER_MEMBERS||p==PAGE_EQ_OUTPUTS)return scalar("",0x73,0,row,ValueKind::Byte,0,1,1);
-  if(p==PAGE_OUTPUT){switch(row){case 0:{Field f=scalar("Enabled",0x73,0x72,out,ValueKind::Byte,0,1,1);f.hardware=true;return f;}
-    case 1:return scalar("Mute",0x77,0x76,out,ValueKind::Byte,0,1,1);
-    case 2:return scalar("Gain",0x75,0x74,out,ValueKind::Float,-60,0,0.5f,"dB");
-    case 3:return scalar("Delay",0x79,0x78,out,ValueKind::Float,0,PanelControlMenus::maxDelayMs(model.map,out,control.sampleRate),0.1f,"ms");default:break;}}
+  if(p==PAGE_OUTPUT){switch(row){case 6:{Field f=scalar("Enabled",0x73,0x72,out,ValueKind::Byte,0,1,1);f.hardware=true;return f;}
+    case 0:return scalar("Mute",0x77,0x76,out,ValueKind::Byte,0,1,1);
+    case 1:return scalar("Gain",0x75,0x74,out,ValueKind::Float,-60,0,0.5f,"dB");
+    case 2:return scalar("Delay",0x79,0x78,out,ValueKind::Float,0,PanelControlMenus::maxDelayMs(model.map,out,control.sampleRate),0.1f,"ms");default:break;}}
   if(p==PAGE_ROUTE){Field f=scalar(row==0?"Enabled":row==1?"Gain":"Invert",0x71,0x70,(uint16_t(model.input)<<8)|out,
       row==1?ValueKind::Float:ValueKind::Byte,row==1?-60:0,row==1?0:1,row==1?0.5f:1,row==1?"dB":"");return f;}
   if(p==PAGE_HARDWARE_PAIR){if(row==0){Field f=hardware("Format",0xc1,0,pair,0,1);f.readonly=true;return f;}return hardware("Data Pin",0x7d,0x7c,pair,0,29,1,true);}
@@ -261,6 +268,20 @@ static bool guardedStop(){
 }
 static uint16_t rolesMask(uint8_t row){return row==1||row==2?model.roles.subs:(model.roles.left|model.roles.right);}
 static void beginLocal(float value){localValue=originalValue=value;editGeneration=generation;editPage=menuPage;editRow=menuIndex;editActive=true;awaitingEdit=false;drawMenu();}
+static bool openNumber(float value){
+  auto f=menuPage==PAGE_EQ_BAND?bandField(menuIndex):PanelControls::BandField::Frequency;
+  if(f==PanelControls::BandField::Type||f==PanelControls::BandField::Bypass)return false;
+  float low=10,high=control.sampleRate*(uint8_t(cells[0].value)==11?.15f:.45f);uint8_t dp=1;numberUnit="Hz";
+  if(f==PanelControls::BandField::GainDb){low=-24;high=12;numberUnit="dB";}
+  if(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ){low=.1f;high=20;dp=2;numberUnit="";}
+  // Native Qp0.10 rounds to51/512. Normalize only that valid boundary;
+  // no-op Apply of0.10 re-encodes identically to51 (not a subminimum float).
+  const bool quantizedMinimum=f==PanelControls::BandField::TargetQ&&value==51.0f/512.0f;
+  if(!number.begin(quantizedMinimum?.1f:value,low,high,dp)){showToast("Outside panel range - Console");return true;}
+  numberParent=menuPage;numberRow=menuIndex;editGeneration=generation;
+  enterPage(PAGE_PANEL_NUMBER);editPage=menuPage;editRow=0;editActive=true;uiView=VIEW_EDIT;drawMenu();return true;
+}
+static void closeNumber(){menuPage=numberParent;menuIndex=numberRow;editPage=numberParent;editRow=numberRow;editActive=false;uiView=VIEW_MENU;}
 static void resultToast(){
   if(operationCancelled){showToast("Stopped - verify changed fields");return;}
   const Completion c=control.completion;
@@ -274,23 +295,26 @@ static void resultToast(){
 
 bool panelOwnsPage(MenuPage p){return p>=PAGE_SPEAKERS&&p<PAGE_COUNT;}
 String panelPageTitle(MenuPage p){using namespace PanelRuntime;static const char *titles[]={"Speakers","Speaker Setup","Groups","Assign Outputs","Outputs","Output","Routing","Route","Sum Mode","Source Pair","Equaliser","Inputs","Outputs","Equaliser","Bands","Band","Crossover","Crossover","Preset Tools","Choose Slot","Preset Preview","Starting Point","Input Names","Input Name","Hardware","Stereo Outputs","Stereo Slot","PDM Out","S/PDIF Inputs","S/PDIF Input","I2S Input","I2S Data Pins","I2S Clocks","Master Clock","ADAT","Confirm","Edit Name"};
+  if(p==PAGE_PANEL_NUMBER)return panelMenuName(numberParent,numberRow);
+  if(p==PAGE_EQ_TARGET)return model.eqOutput?outputLabel(model.target):inputLabel(model.target);
   if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::Hardware)return String("DSP ")+String(field(editPage,editRow).label);
   if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::Sum)return sumMode==3?"Replace Mono L+R":sumMode==1?"Replace Left":"Replace Right";
+  if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::LinkBand)return String("Copy ")+(linkedBand>=20?String("XO ")+String(linkedBand-19):String("Band ")+String(linkedBand+1));
   if(p==PAGE_OUTPUT)return outputLabel(model.output);if(p==PAGE_EQ_BAND)return String("Band ")+String(model.band+1);if(p==PAGE_XO_BAND)return String("XO ")+String(model.band+1);return titles[int(p)-int(PAGE_SPEAKERS)];}
 uint8_t panelMenuCount(MenuPage p){using namespace PanelRuntime;if(p==PAGE_EQ_BAND)return bandRows();if(p==PAGE_INPUT_NAMES)return aliasSourceCount();return model.count(page(p));}
 String panelMenuName(MenuPage p,uint8_t r){using namespace PanelRuntime;
-  switch(p){case PAGE_SPEAKERS:{static const char *s[]={"Speakers","Subwoofer","Sub Gain","Balance","Restore","Setup"};return r==2&&PanelControls::bitCount(model.roles.subs)>1?String("Sub Trim"):String(s[r<6?r:5]);}
-    case PAGE_SPEAKER_SETUP:return r?"Outputs":"Groups";
+  switch(p){case PAGE_SPEAKERS:{static const char *s[]={"Speakers","Subwoofer","Sub Level","Balance","Channels","Setup"};return s[r<6?r:5];}
+    case PAGE_SPEAKER_SETUP:return r?"Restore Saved":"Speaker Groups";
     case PAGE_SPEAKER_GROUPS:return r==0?"Left":r==1?"Right":"Subs";
     case PAGE_SPEAKER_MEMBERS:case PAGE_OUTPUTS:case PAGE_EQ_OUTPUTS:return outputLabel(r);
-    case PAGE_OUTPUT:{static const char *s[]={"Enabled","Mute","Gain","Delay","Output Name","Routing","Equaliser","Crossover"};return s[r<8?r:7];}
+    case PAGE_OUTPUT:{static const char *s[]={"Mute","Gain","Delay","EQ / Crossover","Routing","Output Name","Enabled"};return s[r<7?r:6];}
     case PAGE_ROUTING:return r<model.visibleInputs()?inputLabel(r):String("Sum Mode");
     case PAGE_ROUTE:return r==0?"Enabled":r==1?"Gain":"Invert";
     case PAGE_SUM:return r==0?"Custom":r==1?"Left":r==2?"Right":"Mono L+R";
     case PAGE_SOURCE_PAIR:return String("Inputs ")+String(r*2+1)+"/"+String(r*2+2);
     case PAGE_EQUALISER:return r?"Outputs":"Inputs";
     case PAGE_EQ_INPUTS:return inputLabel(r);
-    case PAGE_EQ_TARGET:return r?"Bands":"Link L/R";
+    case PAGE_EQ_TARGET:return r==0?"Link L/R":r==1?"Bands":"Crossover";
     case PAGE_EQ_BANDS:return String("Band ")+String(r+1);
     case PAGE_EQ_BAND:{auto f=bandField(r);switch(f){case PanelControls::BandField::Type:return "Type";case PanelControls::BandField::Bypass:return "Enabled";
       case PanelControls::BandField::Frequency:return uint8_t(cells[0].value)==11?"f0":"Frequency";case PanelControls::BandField::Q:return uint8_t(cells[0].value)==11?"Q0":"Q";
@@ -308,20 +332,23 @@ String panelMenuName(MenuPage p,uint8_t r){using namespace PanelRuntime;
     case PAGE_SPDIF_INPUTS:return String("S/PDIF ")+String(r+1);
     case PAGE_I2S_INPUT:if(r==1)return "Data Pins";break;
     case PAGE_I2S_DATA:return String("Pair ")+String(r+1);
-    case PAGE_PANEL_CONFIRM:return r==0?"Current":r==1?"Proposed":r==2?"No - Cancel":"Yes - Apply";
+    case PAGE_PANEL_CONFIRM:if(confirmation==ConfirmAction::LinkBand)return r==0?"From":r==1?"Replace":r==2?"Cancel":"Copy Band";return r==0?"Current":r==1?"Proposed":r==2?"No - Cancel":"Yes - Apply";
     case PAGE_PANEL_NAME:return r==0?"Name":r==1?"Position":r==2?"Save Name":"Cancel";
+    case PAGE_PANEL_NUMBER:return r==0?"Value":r==1?"Digit":r==2?"Apply":"Cancel";
     default:break;
   }Field f=field(p,r);return f.label;
 }
 String panelMenuValue(MenuPage p,uint8_t r){using namespace PanelRuntime;
   if(p==PAGE_PANEL_CONFIRM){if(r>=2)return r==2?"Default":"Confirm";
+    if(confirmation==ConfirmAction::LinkBand)return String(model.eqOutput?"Out ":"In ")+String(int((r?linkedTarget:linkedSource)-(model.eqOutput?model.map.inputs:0))+1);
     if(confirmation==ConfirmAction::Hardware)return String(r?localValue:originalValue,field(editPage,editRow).step<1?1:0);
     if(confirmation==ConfirmAction::Sum)return r?"Replace all":"Keep custom";
     if(confirmation==ConfirmAction::Restore)return r?"Saved fields only":"Live adjustments";
     return r?String(presetSlot+1)+" "+String(presetNameDraft):String("P")+String(dspi.activePreset+1);}
   if(p==PAGE_PANEL_NAME)return r==0?panelNameWindow():r==1?String(name.cursor+1):r==2?"Explicit":"";
+  if(p==PAGE_PANEL_NUMBER){char text[16];number.format(text,sizeof(text));return r==0?String(text):r==1?String(float(number.step())/number.scale,number.place<number.decimals?number.decimals-number.place:0):r==2?"Confirm":"";}
   if(editActive&&p==editPage&&r==editRow){if(p==PAGE_XO_BAND)return xoValue(r,localValue);if(p==PAGE_EQ_BAND){auto f=bandField(r);if(f==PanelControls::BandField::Bypass)return localValue?"On":"Off";if(f==PanelControls::BandField::Type)return filterName(uint8_t(localValue));return String(localValue,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}return String(localValue,field(p,r).step<1?1:0);}
-  if(p==PAGE_SPEAKERS){if(r==5)return "Open";if(r==4)return savedContext()?"Confirm":"Unavailable";
+  if(p==PAGE_SPEAKERS){if(r>=4)return "Open";
     if(!rolesMask(r))return "Unassigned";if(r==2){if(PanelControls::bitCount(model.roles.subs)==1){uint8_t out=__builtin_ctz(model.roles.subs);return (gainKnownMask&(1u<<out))?String(freshGains[out],1):String("Pending");}return subBaseline.valid?String(subTrim,1):String("Set");}if(r==3)return balanceBaseline.valid?String(balance,1):String("Set");
     uint16_t mask=rolesMask(r);unsigned muted=0,known=0;for(unsigned i=0;i<model.map.outputs;++i)if(mask&(1u<<i)){if(cells[i].known){++known;muted+=cells[i].value!=0;}}
     if(known!=PanelControls::bitCount(mask))return "Pending";return muted==0?"On":muted==known?"Off":"Mixed";}
@@ -329,7 +356,8 @@ String panelMenuValue(MenuPage p,uint8_t r){using namespace PanelRuntime;
   if(p==PAGE_SPEAKER_MEMBERS){uint16_t mask=model.group==0?model.roles.left:model.group==1?model.roles.right:model.roles.subs;return mask&(1u<<r)?"Assigned":"No";}
   if(p==PAGE_OUTPUTS||p==PAGE_EQ_OUTPUTS)return cells[r].known?(cells[r].value?"On":"Off"):cells[r].attempted?"Unknown":"Pending";
   if(p==PAGE_SUM)return r==0?"Preserve":r==3?"-6.02 each":"0 dB";
-  if(p==PAGE_EQ_TARGET)return r?"Open":(model.target%2==0&&model.target+1<(model.eqOutput?model.map.outputs:model.map.inputs)?(model.link?"On":"Off"):"Unavailable");
+  if(p==PAGE_SPEAKER_SETUP)return r?(savedContext()?"Confirm":"Unavailable"):"Open";
+  if(p==PAGE_EQ_TARGET)return r?"Open":((model.target^1)<(model.eqOutput?model.map.outputs:model.visibleInputs())?(model.link?String(model.target/2*2+1)+" + "+String(model.target/2*2+2):String("Off")):String("Unavailable"));
   if(p==PAGE_EQ_BAND){if(readField<6)return "Pending";for(auto &c:cells)if(c.attempted&&!c.known)return "Unknown";auto f=bandField(r);float v=bandValue(f);if(f==PanelControls::BandField::Type)return filterName(uint8_t(v));if(f==PanelControls::BandField::Bypass)return cells[0].value!=0&&v==0?"On":"Off";return String(v,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}
   if(p==PAGE_XO_BAND){if(readField<6)return "Pending";if(!cells[0].known)return "Unknown";PanelControls::XoFamily family;uint8_t order;bool high;
     bool valid=PanelControls::decodeCrossover(cells[0].value,family,order,high);if(r==0)return xoValue(r,cells[0].value!=0&&cells[4].value==0);if(r==4)return xoValue(r,cells[1].value);if(!valid)return "Unset";return xoValue(r,r==1?float(high):r==2?float(uint8_t(family)):float(order));}
@@ -348,12 +376,14 @@ String panelMenuValue(MenuPage p,uint8_t r){using namespace PanelRuntime;
   return "Open";
 }
 const char *panelMenuUnit(MenuPage p,uint8_t r){using namespace PanelRuntime;
+  if(p==PAGE_PANEL_NUMBER)return r==0?numberUnit:"";
   String shown=panelMenuValue(p,r);const char *t=shown.c_str();bool digit=false;
   for(unsigned i=0;t[i];++i){if(t[i]>='0'&&t[i]<='9')digit=true;else if(t[i]!='.'&&t[i]!='-'&&t[i]!='+')return "";}if(!digit)return "";
   if(p==PAGE_SPEAKERS&&(r==2||r==3))return "dB";if(p==PAGE_EQ_BAND){auto f=bandField(r);return f==PanelControls::BandField::GainDb?"dB":f==PanelControls::BandField::Frequency||f==PanelControls::BandField::TargetFrequency?"Hz":"";}
   if(p==PAGE_XO_BAND)return r==4?"Hz":r==3?"dB/oct":"";return field(p,r).unit;}
-int8_t panelMainIndex(MenuPage p){using namespace PanelRuntime;Page q=page(p);for(unsigned i=0;i<8;++i){if(q==Page::Effects||q==Page::Equaliser)return 4;if(q==Page::Preset||q==Page::PresetTools)return 2;if(q==Page::System||q==Page::Hardware||q==Page::InputNames)return 5;if(q==Page::Speakers)return 3;q=model.parent(q);}return 3;}
+int8_t panelMainIndex(MenuPage p){using namespace PanelRuntime;if(p==PAGE_PANEL_NUMBER)return panelMainIndex(numberParent);Page q=page(p);for(unsigned i=0;i<8;++i){if(q==Page::Effects||q==Page::Equaliser)return 4;if(q==Page::Preset||q==Page::PresetTools)return 2;if(q==Page::System||q==Page::Hardware||q==Page::InputNames)return 5;if(q==Page::Speakers)return 3;q=model.parent(q);}return 3;}
 void panelEnterPage(MenuPage p){using namespace PanelRuntime;
+  if(p==PAGE_PANEL_NUMBER)return; // retain originating confirmed recipe until Apply
   awaitingEdit=false;if(control.busy()&&!control.sent())control.cancel();cachePage=uint16_t(p);clearCells();statusText="";
   if(!panelOwnsPage(p))return;
   if(p==PAGE_SPEAKERS){gainKnownMask=gainAttemptedMask=0;}
@@ -391,13 +421,16 @@ static bool startFieldWrite(MenuPage p,uint8_t row,float desired){
   if(ok&&f.get==0xee){control.readBytes=8;control.readOffset=4;}return ok;
 }
 static void startRoleRead(uint8_t job,uint16_t mask){groupJob=job;groupMask=mask;groupAt=0;confirmedTargets=0;operationCancelled=false;}
+static bool launchLinkedSource(){linkStage=0;return linkedXoEnable?control.startXoEnabled(linkedSource,linkedBand,linkedValue==0):control.startBand(linkedSource,linkedBand,linkedField,linkedValue);}
 static bool startBandWrite(float value){
   PanelControls::BandField f=menuPage==PAGE_EQ_BAND?bandField(menuIndex):PanelControls::BandField::Frequency;
   if((menuPage==PAGE_XO_BAND&&menuIndex==0)||(menuPage==PAGE_EQ_BAND&&f==PanelControls::BandField::Bypass)){
     bool current=cells[0].value!=0&&cells[4].value==0;
-    if((value!=0)==current){showToast("Unchanged");return true;}
-    if(menuPage==PAGE_XO_BAND){hardwareAction=false;confirmedTargets=0;operationCancelled=false;return control.startXoEnabled(eqId(),eqBand(),value!=0);}
-    if(value&&cells[0].value==0){showToast("Choose filter Type first");return false;}value=value?0:1;
+    if((value!=0)==current&&!model.link){showToast("Unchanged");return true;}
+    if(menuPage==PAGE_XO_BAND){hardwareAction=false;confirmedTargets=0;operationCancelled=false;
+      if(!model.link)return control.startXoEnabled(eqId(),eqBand(),value!=0);
+    }
+    if(menuPage==PAGE_EQ_BAND&&value&&cells[0].value==0){showToast("Choose filter Type first");return false;}value=value?0:1;
   }
   if(menuPage==PAGE_XO_BAND){
     uint8_t type=uint8_t(cells[0].value);PanelControls::XoFamily family=PanelControls::XoFamily::LinkwitzRiley;uint8_t order=2;bool high=false;
@@ -409,8 +442,21 @@ static bool startBandWrite(float value){
       uint8_t packed=0;if(!PanelControls::crossoverType(family,order*6,high,packed)){showToast("Unsupported native slope");return false;}f=PanelControls::BandField::Type;value=packed;}
   }
   hardwareAction=false;confirmedTargets=0;operationCancelled=false;
-  if(menuPage==PAGE_EQ_BAND&&model.link){linkedTarget=eqId()+1;linkedField=f;linkedValue=value;}
+  if(model.link){
+    const uint8_t partner=model.target^1,limit=model.eqOutput?model.map.outputs:model.visibleInputs();
+    if(partner>=limit)return false;
+    linkedSource=eqId();linkedTarget=(model.eqOutput?model.map.inputs:0)+partner;linkedBand=eqBand();linkedField=f;linkedValue=value;
+    linkType=uint8_t(cells[0].value);linkGeneration=generation;linkedCopy=linkedSecond=false;linkedXoEnable=menuPage==PAGE_XO_BAND&&menuIndex==0;linkStage=1;return true;
+  }
   return control.startBand(eqId(),eqBand(),f,value);
+}
+static bool linkService(){
+  if(linkStage!=1)return false;
+  if(linkGeneration!=generation){linkStage=0;linkedTarget=255;showToast("Changed - edit again");return true;}
+  uint16_t selector=0;if(!PanelControls::eqSelector(model.map,linkedTarget,linkedBand,PanelControls::ScalarField::Type,selector)){linkStage=0;linkedTarget=255;return true;}
+  Reply r=query(0x43,selector,4);if(!validReply(r,4)||linkGeneration!=generation){linkStage=0;linkedTarget=255;showToast("Linked channel unavailable");return true;}
+  if(r.bytes[0]!=linkType){linkStage=2;startConfirmation(ConfirmAction::LinkBand);showToast("Different band - copy required");}
+  else if(!launchLinkedSource()){linkedTarget=255;showToast("Linked edit rejected");}return true;
 }
 static void beginPresetFlow(uint8_t tool){presetTool=tool;effectsOff=false;presetSlot=dspi.activePreset;strncpy(presetNameDraft,dspi.presetNames[presetSlot],31);presetNameDraft[31]=0;
   if(tool==0||tool==4){startConfirmation(tool==0?ConfirmAction::Save:ConfirmAction::Revert);return;}
@@ -421,7 +467,7 @@ static bool directoryRead(){Reply r=query(0x95,0,7);directoryKnown=false;
   return directoryKnown;
 }
 }
-bool panelWorkPending(){using namespace PanelRuntime;return control.busy()||hardwareGuard||groupJob||presetStage||nameStage||sumStage;}
+bool panelWorkPending(){using namespace PanelRuntime;return control.busy()||linkStage==1||hardwareGuard||groupJob||presetStage||nameStage||sumStage;}
 bool panelSelect(){using namespace PanelRuntime;
   if(menuPage==PAGE_PRESET&&menuIndex==10){enterPage(PAGE_PRESET_TOOLS);return true;}
   if(!panelOwnsPage(menuPage))return false;
@@ -431,13 +477,13 @@ bool panelSelect(){using namespace PanelRuntime;
   switch(menuPage){
     case PAGE_SPEAKERS:
       if(r==5){enterPage(PAGE_SPEAKER_SETUP);return true;}
-      if(r==4){if(savedContext())startConfirmation(ConfirmAction::Restore);else showToast("No confirmed saved adjustments");break;}
+      if(r==4){enterPage(PAGE_OUTPUTS);return true;}
       if(!rolesMask(r)){showToast("Assign roles in Setup");break;}
       if(!model.map.writable){showToast("Read-only firmware");break;}
       if(r<2){bool allMuted=true,allKnown=true;for(unsigned i=0;i<model.map.outputs;++i)if(rolesMask(r)&(1u<<i)){allKnown&=cells[i].known;allMuted&=cells[i].value!=0;}
         if(!allKnown){showToast("Wait for confirmed reads");break;}localValue=allMuted?0:1;startRoleRead(1,rolesMask(r));break;}
       startRoleRead(r==2?2:3,rolesMask(r));break;
-    case PAGE_SPEAKER_SETUP:enterPage(r?PAGE_OUTPUTS:PAGE_SPEAKER_GROUPS);return true;
+    case PAGE_SPEAKER_SETUP:if(!r){enterPage(PAGE_SPEAKER_GROUPS);return true;}if(savedContext())startConfirmation(ConfirmAction::Restore);else showToast("No confirmed saved adjustments");break;
     case PAGE_SPEAKER_GROUPS:model.group=r;enterPage(PAGE_SPEAKER_MEMBERS);return true;
     case PAGE_SPEAKER_MEMBERS:{if(!serialKnown||!model.map.writable){showToast("Confirmed identity required");break;}
       uint16_t mask=model.group==0?model.roles.left:model.group==1?model.roles.right:model.roles.subs;
@@ -446,21 +492,25 @@ bool panelSelect(){using namespace PanelRuntime;
       gainBaseline.valid=subBaseline.valid=balanceBaseline.valid=false;savedKnown=false;markDeferredPreference(PREF_DIRTY_PANEL_CONTROLS);break;}
     case PAGE_OUTPUTS:model.output=r;enterPage(PAGE_OUTPUT);return true;
     case PAGE_OUTPUT:
-      if(r==4){uint8_t id=model.map.inputs+model.output;if(!model.map.writable||!namesKnown[id]){showToast("Wait for name read");break;}if(!namesEditable[id]){showToast("Native name needs Console ASCII");break;}openName(2,channelNames[id],Page::Output);return true;}
-      if(r==5){enterPage(PAGE_ROUTING);return true;}
-      if(r>=6){model.eqOutput=true;model.target=model.output;model.link=false;model.eqParent=Page::Output;enterPage(r==6?PAGE_EQ_TARGET:PAGE_CROSSOVER);return true;}
+      if(r==5){uint8_t id=model.map.inputs+model.output;if(!model.map.writable||!namesKnown[id]){showToast("Wait for name read");break;}if(!namesEditable[id]){showToast("Native name needs Console ASCII");break;}openName(2,channelNames[id],Page::Output);return true;}
+      if(r==4){enterPage(PAGE_ROUTING);return true;}
+      if(r==3){model.eqOutput=true;model.target=model.output;model.link=false;model.eqParent=Page::Output;enterPage(PAGE_EQ_TARGET);return true;}
       beginFieldEdit();break;
     case PAGE_ROUTING:if(r>=model.visibleInputs())enterPage(PAGE_SUM);else{model.input=r;enterPage(PAGE_ROUTE);}return true;
     case PAGE_SUM:if(r==0){showToast("Custom routes retained");break;}if(!model.map.writable||model.visibleInputs()<2){showToast("Read-only firmware");break;}sumMode=r;if(model.visibleInputs()>2)enterPage(PAGE_SOURCE_PAIR);else{sourcePair=0;startConfirmation(ConfirmAction::Sum);}return true;
     case PAGE_SOURCE_PAIR:sourcePair=r;startConfirmation(ConfirmAction::Sum);return true;
     case PAGE_EQUALISER:enterPage(r?PAGE_EQ_OUTPUTS:PAGE_EQ_INPUTS);return true;
     case PAGE_EQ_INPUTS:case PAGE_EQ_OUTPUTS:if(!model.map.writable){showToast("Read-only firmware");break;}model.eqOutput=menuPage==PAGE_EQ_OUTPUTS;model.target=r;model.link=false;model.eqParent=page(menuPage);enterPage(PAGE_EQ_TARGET);return true;
-    case PAGE_EQ_TARGET:if(r){enterPage(PAGE_EQ_BANDS);return true;}if(model.target%2==0&&model.target+1<(model.eqOutput?model.map.outputs:model.visibleInputs()))model.link=!model.link;else showToast("No matching pair");break;
+    case PAGE_EQ_TARGET:if(r){enterPage(r==1?PAGE_EQ_BANDS:PAGE_CROSSOVER);return true;}if((model.target^1)<(model.eqOutput?model.map.outputs:model.visibleInputs()))model.link=!model.link;else showToast("No matching pair");break;
     case PAGE_EQ_BANDS:model.band=r;enterPage(PAGE_EQ_BAND);return true;
     case PAGE_CROSSOVER:model.band=r;enterPage(PAGE_XO_BAND);return true;
-    case PAGE_EQ_BAND:if(!allBandKnown()){showToast("Wait for confirmed band");break;}beginLocal(bandField(r)==PanelControls::BandField::Bypass?(cells[0].value!=0&&cells[4].value==0?1:0):bandValue(bandField(r)));break;
+    case PAGE_EQ_BAND:if(!allBandKnown()){showToast("Wait for confirmed band");break;}if(openNumber(bandValue(bandField(r))))return true;beginLocal(bandField(r)==PanelControls::BandField::Bypass?(cells[0].value!=0&&cells[4].value==0?1:0):bandValue(bandField(r)));break;
     case PAGE_XO_BAND:{if(!allBandKnown()){showToast("Wait for confirmed crossover");break;}PanelControls::XoFamily family=PanelControls::XoFamily::LinkwitzRiley;uint8_t order=2;bool high=false;PanelControls::decodeCrossover(cells[0].value,family,order,high);
-      beginLocal(r==0?(cells[0].value!=0&&cells[4].value==0?1:0):r==1?float(high):r==2?float(uint8_t(family)):r==3?float(order):cells[1].value);break;}
+      if(r==4){openNumber(cells[1].value);return true;}beginLocal(r==0?(cells[0].value!=0&&cells[4].value==0?1:0):r==1?float(high):r==2?float(uint8_t(family)):r==3?float(order):cells[1].value);break;}
+    case PAGE_PANEL_NUMBER:
+      if(r==3){closeNumber();drawMenu();return true;}
+      if(r<2){editActive=true;editPage=menuPage;editRow=r;break;}
+      localValue=number.value();closeNumber();panelApply();drawMenu();return true;
     case PAGE_PRESET_TOOLS:if(!dspi.connected){showToast("No DSPi");break;}beginPresetFlow(r);return true;
     case PAGE_PRESET_DESTINATION:if(!directoryKnown){showToast("Unknown directory");break;}
       if(presetTool==3){if(!(occupiedMask&(1u<<r))){showToast("Choose occupied slot");break;}presetSlot=r;strncpy(presetNameDraft,dspi.presetNames[r],31);openName(3,presetNameDraft,Page::PresetPreview);return true;}
@@ -488,7 +538,8 @@ bool panelSelect(){using namespace PanelRuntime;
       nameJobTarget=model.map.inputs+model.output;strncpy(nameJobValue,name.text,32);nameReturnAllowed=true;nameStage=1;showToast("Pending name read/write");break;
     case PAGE_PANEL_CONFIRM:
       if(r<2)break;
-      if(r==2){enterPage(returnPage);menuIndex=returnRow;confirmation=ConfirmAction::None;drawMenu();return true;}
+      if(r==2){if(confirmation==ConfirmAction::LinkBand){linkStage=0;linkedTarget=255;}enterPage(returnPage);menuIndex=returnRow;confirmation=ConfirmAction::None;drawMenu();return true;}
+      if(confirmation==ConfirmAction::LinkBand){if(linkStage!=2||linkGeneration!=generation){linkStage=0;linkedTarget=255;showToast("Changed - edit again");break;}linkedCopy=true;enterPage(returnPage);menuIndex=returnRow;if(!launchLinkedSource()){linkedTarget=255;showToast("Copy rejected");}return true;}
       if(confirmation==ConfirmAction::Hardware){if(!guardedStop()){showToast("Music stop failed");break;}if(editGeneration!=generation){showToast("Changed - edit again");break;}hardwareGuard=1;hardwareGeneration=generation;hardwareAction=true;hardwareLeaveMuted=hardwareCancel=false;hardwareReadbacks=0;enterPage(editPage);menuIndex=editRow;showToast("Guarding hardware change");break;}
       if(confirmation==ConfirmAction::Restore){if(!savedContext()){showToast("Saved fields unavailable");break;}memcpy(plannedGains,savedGains,sizeof(plannedGains));startRoleRead(6,savedMask);enterPage(PAGE_SPEAKERS);break;}
       if(confirmation==ConfirmAction::Sum){sumStage=1;groupAt=0;confirmedTargets=0;enterPage(PAGE_ROUTING);showToast("Replacing selected output routes");break;}
@@ -505,6 +556,7 @@ bool panelSelect(){using namespace PanelRuntime;
   drawMenu();return true;
 }
 void panelAdjust(int direction){using namespace PanelRuntime;
+  if(menuPage==PAGE_PANEL_NUMBER){if(editRow==1)number.move(direction>0?1:-1);else number.adjust(direction);return;}
   if(menuPage==PAGE_PANEL_NAME){if(editRow==1)name.move(direction>0?1:-1);else name.adjust(direction);return;}
   if(menuPage==PAGE_SPEAKERS){float low=menuIndex==2&&PanelControls::bitCount(model.roles.subs)==1?-60:-24;float high=menuIndex==2&&PanelControls::bitCount(model.roles.subs)==1?0:24;if(!PanelControlMenus::safeAdjust(localValue,direction,0.5f,low,high,localValue))showToast("Outside panel range - Console");return;}
   if(menuPage==PAGE_EQ_BAND){auto f=bandField(menuIndex);float low=0,high=1,step=1;
@@ -523,6 +575,7 @@ void panelAdjust(int direction){using namespace PanelRuntime;
   localValue=next;
 }
 void panelApply(){using namespace PanelRuntime;
+  if(menuPage==PAGE_PANEL_NUMBER){editActive=false;return;}
   if(menuPage==PAGE_PANEL_NAME){editActive=false;return;}
   if(editGeneration!=generation){editActive=false;showToast("Changed - read and edit again");return;}
   editActive=false;
@@ -531,7 +584,10 @@ void panelApply(){using namespace PanelRuntime;
   Field f=field(menuPage,menuIndex);if(f.pin&&localValue==255){showToast("Choose a valid DSP pin");return;}if(f.hardware){startConfirmation(ConfirmAction::Hardware);return;}
   if(!startFieldWrite(menuPage,menuIndex,localValue))showToast("Unavailable");
 }
-bool panelNameMove(int direction){using namespace PanelRuntime;if(menuPage!=PAGE_PANEL_NAME)return false;name.move(direction);drawMenu();return true;}
+bool panelNameMove(int direction){using namespace PanelRuntime;if(menuPage==PAGE_PANEL_NUMBER){number.move(-direction);drawMenu();return true;}if(menuPage!=PAGE_PANEL_NAME)return false;name.move(direction);drawMenu();return true;}
+bool panelEditUnderline(MenuPage p,uint8_t row){return editActive&&p==PanelRuntime::editPage&&row==PanelRuntime::editRow&&p!=PAGE_PANEL_NAME;}
+int16_t panelNumberCursorOffset(){char text[16];PanelRuntime::number.format(text,sizeof(text));text[PanelRuntime::number.cursor(text)]=0;return fontTextWidth(FontMedium,String(text));}
+int16_t panelNumberCursorWidth(){char text[16],digit[2]{};PanelRuntime::number.format(text,sizeof(text));digit[0]=text[PanelRuntime::number.cursor(text)];return fontTextWidth(FontMedium,String(digit));}
 namespace PanelRuntime {
 static uint16_t nameMeasure(const char *s,void *){return fontTextWidth(FontMedium,String(s));}
 static void namePreview(char *out,uint16_t &offset,uint16_t &width){if(!name.preview(out,32,132,nameMeasure,nullptr,offset,width)){out[0]=0;offset=0;width=1;}}
@@ -569,7 +625,7 @@ bool panelPersistLocal(){using namespace PanelRuntime;if(!serialKnown)return fal
 void panelInvalidate(){using namespace PanelRuntime;if(wireActive){pendingInvalidation=true;return;}
   ++generation;control.invalidate();gainBaseline.valid=subBaseline.valid=balanceBaseline.valid=false;gainKnownMask=0;savedKnown=false;savedEligible=false;directoryKnown=false;activeInputStep=0;memset(namesKnown,0,sizeof(namesKnown));clearCells();
   if(groupJob||sumStage||hardwareGuard||presetStage||nameStage||control.busy())operationCancelled=true;
-  groupJob=sumStage=0;linkedTarget=255;hardwareGuard=0;hardwareCancel=true;
+  groupJob=sumStage=linkStage=0;linkedTarget=255;linkedSecond=false;hardwareGuard=0;hardwareCancel=true;
   if(presetStage)presetStage=saveAttempted?12:renameAttempted?16:0;
   if(nameStage<3)nameStage=0;externalChangeNotice=true;
 }
@@ -584,10 +640,11 @@ void panelNotification(const uint8_t *payload,uint16_t bytes){using namespace Pa
 namespace PanelRuntime {static void drainInvalidation(){pendingInvalidation=false;panelInvalidate();if(pendingRoleReload){roleSlot=255;pendingRoleReload=false;}}}
 void panelCancel(){using namespace PanelRuntime;awaitingEdit=false;name.cancel();
   if(control.busy()||groupJob||sumStage)operationCancelled=true;
-  control.cancel();linkedTarget=255;hardwareCancel=true;if(hardwareGuard<=2)hardwareGuard=0;groupJob=0;sumStage=0;
+  control.cancel();linkedTarget=255;linkStage=0;linkedSecond=false;hardwareCancel=true;if(hardwareGuard<=2)hardwareGuard=0;groupJob=0;sumStage=0;
   if(!saveAttempted&&!renameAttempted)presetStage=0;else presetCancelled=true;
   if(nameStage<=2)nameStage=0;else nameReturnAllowed=false;editActive=false;}
 bool panelBack(){using namespace PanelRuntime;if(!panelOwnsPage(menuPage))return false;
+  if(menuPage==PAGE_PANEL_NUMBER){panelCancel();closeNumber();drawMenu();return true;}
   if(editActive){panelCancel();drawMenu();return true;}
   if(menuPage==PAGE_PANEL_NAME){panelCancel();enterPage(native(model.nameParent));return true;}
   if(menuPage==PAGE_PANEL_CONFIRM){panelCancel();if(!presetStage)confirmation=ConfirmAction::None;enterPage(returnPage);menuIndex=returnRow;drawMenu();return true;}
@@ -603,7 +660,7 @@ static void controlFinished(){
     hardwareGuard=6;settleUntil=millis()+120;return;}
   if(control.completion!=Completion::Confirmed){
     if(groupJob){failGroup(control.completion==Completion::Unknown?"Unknown - verify outputs":"Output change rejected");}
-    else{resultToast();if(presetStage)presetStage=0;sumStage=0;linkedTarget=255;}
+    else{resultToast();if(presetStage)presetStage=0;sumStage=0;linkedTarget=255;linkedSecond=false;}
     clearCells();return;
   }
   if(groupJob==1||groupJob==8||groupJob==6||groupJob==9){
@@ -613,7 +670,9 @@ static void controlFinished(){
   if(presetStage==3){++cleanEffect;return;}
   if(presetStage==4){if(++cleanBand>=10){cleanBand=0;++cleanInput;}return;}
   if(linkedTarget!=255){uint8_t target=linkedTarget;linkedTarget=255;confirmedTargets=1;
-    if(!control.startBand(target,model.band,linkedField,linkedValue))showToast("Partial - linked target unavailable");return;}
+    bool started=linkedCopy?control.startBandCopy(target,linkedBand,control.recipe):linkedXoEnable?control.startXoEnabled(target,linkedBand,linkedValue==0):control.startBand(target,linkedBand,linkedField,linkedValue);
+    linkedSecond=started;if(!started)showToast("Partial - linked target unavailable");return;}
+  if(linkedSecond){linkedSecond=false;showToast("Applied both channels");clearCells();return;}
   resultToast();clearCells();
 }
 static bool groupService(){
@@ -805,10 +864,10 @@ void servicePanelControls(){using namespace PanelRuntime;
   if(!identityAttempted){identityAttempted=true;Reply r=query(0x7e,0,16);serialKnown=validReply(r,16);
     if(serialKnown){for(unsigned i=0;i<16;++i){if(r.bytes[i]<33||r.bytes[i]>126)serialKnown=false;serial[i]=r.bytes[i];}serial[16]=0;}
     if(serialKnown)loadLocal();if(visible)drawMenu();return;}
-  if(!visible&&!control.busy()&&!hardwareGuard&&!nameStage&&!presetStage&&!groupJob&&!sumStage)return;
+  if(!visible&&!control.busy()&&!hardwareGuard&&!nameStage&&!presetStage&&!groupJob&&!sumStage&&!linkStage)return;
   control.sampleRate=dspi.sampleRate;
   if(control.busy()){control.service();if(!control.busy())controlFinished();if(visible)drawMenu();return;}
-  if(hardwareService()||nameService()||groupService()||sumService()||presetService()){if(visible)drawMenu();return;}
+  if(linkService()||hardwareService()||nameService()||groupService()||sumService()||presetService()){if(visible)drawMenu();return;}
   if(!visible||editActive)return;
   if(!capabilityAttempted){capabilityService();drawMenu();return;}
   if(roleSlot!=dspi.activePreset)panelPresetChanged(dspi.activePreset);

@@ -1,6 +1,7 @@
 #ifndef DSPI_PANEL_CONTROL_RUNTIME_H
 #define DSPI_PANEL_CONTROL_RUNTIME_H
 #include "PanelControlMenus.h"
+#include "PanelNumberEditor.h"
 // Sketch integration declarations; all definitions are late in the .inc, after
 // the existing transport, list renderer and guarded preset/media machinery.
 bool panelOwnsPage(MenuPage page);
@@ -31,5 +32,8 @@ bool panelNameMove(int direction);
 String panelNameWindow();
 int16_t panelNameCursorOffset();
 int16_t panelNameCursorWidth();
+bool panelEditUnderline(MenuPage page,uint8_t row);
+int16_t panelNumberCursorOffset();
+int16_t panelNumberCursorWidth();
 String panelSourceLabel(uint8_t source,const String &fallback,bool shortName);
 #endif
