@@ -13,12 +13,12 @@ static void ready(){
 }
 int main(){
   ready();enterPage(PAGE_EQ_TARGET);
-  CHECK(panelMenuCount(PAGE_EQ_TARGET)==3);
-  CHECK(panelMenuName(PAGE_EQ_TARGET,2)=="Crossover");
-  select(2);CHECK(menuPage==PAGE_CROSSOVER);CHECK(panelBack());CHECK(menuPage==PAGE_EQ_TARGET);
-  PanelRuntime::model.eqOutput=false;CHECK(panelMenuCount(PAGE_EQ_TARGET)==2);
-  ready();enterPage(PAGE_SPEAKERS);CHECK(panelMenuName(menuPage,4)=="Channels");select(4);CHECK(menuPage==PAGE_OUTPUTS);
-  ready();PanelRuntime::model.target=1;enterPage(PAGE_EQ_TARGET);select(0);CHECK(PanelRuntime::model.link);
+  CHECK(panelMenuCount(PAGE_EQ_TARGET)==2);
+  CHECK(panelMenuName(PAGE_EQ_TARGET,1)=="Crossover");
+  select(1);CHECK(menuPage==PAGE_CROSSOVER);CHECK(panelBack());CHECK(menuPage==PAGE_EQ_TARGET);
+  PanelRuntime::model.eqOutput=false;CHECK(panelMenuCount(PAGE_EQ_TARGET)==1);
+  ready();enterPage(PAGE_OUTPUTS);CHECK(panelMenuName(menuPage,9)=="Quick Controls");select(9);CHECK(menuPage==PAGE_SPEAKERS);
+  ready();PanelRuntime::model.target=1;enterPage(PAGE_EQ_TARGET);select(0);CHECK(!PanelRuntime::model.link&&menuPage==PAGE_EQ_BANDS);
   // Existing numeric source 126.5 must allow the requested 0.1 Hz edit.
   ready();nativeWire.eq[8][0].frequencyHz=126.5f;enterPage(PAGE_EQ_BAND);passes(8);select(2);
   CHECK(menuPage!=PAGE_EQ_BAND); // dedicated numeric screen, not ambiguous inline editing

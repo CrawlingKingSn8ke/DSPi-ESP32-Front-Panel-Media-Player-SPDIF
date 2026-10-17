@@ -52,11 +52,11 @@ class UiPolishR3Contracts(unittest.TestCase):
         names = body("String menuItemName(MenuPage page, uint8_t index)")
         self.assertIn('return PanelControlMenus::mainLabel(index);', names)
         model = (ROOT / "firmware/DSPi_ESP32_Front_Panel_v1_1_2/PanelControlMenus.h").read_text()
-        self.assertIn('"Input","Music","Preset","Speakers","Effects","System"', model)
+        self.assertIn('"Input","Music","Preset","Outputs","Effects","System"', model)
         glyph_table = SKETCH.split("static const GlyphDef FontMenu_glyphs[] = {", 1)[1].split("};", 1)[0]
         advances = dict((letter, int(advance)) for letter, advance in
                         re.findall(r"\{'(.)',\s*\d+,\s*\d+,\s*(\d+),", glyph_table))
-        for title in ("Input", "Music", "Preset", "Speakers", "Effects", "System"):
+        for title in ("Input", "Music", "Preset", "Outputs", "Effects", "System"):
             self.assertTrue(all(ch == " " or ch in advances for ch in title), title)
             width = sum(15 if ch == " " else advances[ch] for ch in title)
             self.assertLessEqual(width, 320 - 16, title)

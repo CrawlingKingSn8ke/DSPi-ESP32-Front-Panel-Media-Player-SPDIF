@@ -64,7 +64,7 @@ class UiPolishR2Contracts(unittest.TestCase):
         names = body("String menuItemName(MenuPage page, uint8_t index)")
         self.assertIn('return PanelControlMenus::mainLabel(index);', names)
         model = (ROOT / "firmware/DSPi_ESP32_Front_Panel_v1_1_2/PanelControlMenus.h").read_text()
-        self.assertIn('"Input","Music","Preset","Speakers","Effects","System"', model)
+        self.assertIn('"Input","Music","Preset","Outputs","Effects","System"', model)
         title = body("String pageTitle(MenuPage page)")
         self.assertIn('case PAGE_FEATURES: return "Effects"', title)
         menu = body("void drawMenu()")

@@ -32,14 +32,14 @@ struct FakeWire {
 };
 static void drain(Controller &c){ for(unsigned i=0;i<120&&c.busy();++i)c.service(); CHECK(!c.busy()); }
 int main(){
-  CHECK(mainCount()==6);CHECK(strcmp(mainLabel(3),"Speakers")==0);CHECK(strcmp(mainLabel(5),"System")==0);
+  CHECK(mainCount()==6);CHECK(strcmp(mainLabel(3),"Outputs")==0);CHECK(strcmp(mainLabel(5),"System")==0);
   CHECK(featureSemantic(0)==Feature::Equaliser);CHECK(featureSemantic(7)==Feature::Limiter);
   CHECK(featureMask(Feature::Equaliser)==0);CHECK(featureMask(Feature::Loudness)==1);CHECK(featureMask(Feature::Limiter)==64);
-  Model m; CHECK(m.count(Page::Speakers)==6);CHECK(m.count(Page::Outputs)==1);
+  Model m; CHECK(m.count(Page::Speakers)==4);CHECK(m.count(Page::Outputs)==3);
   m.map=PanelControls::channelMap(PanelControls::Profile::Rp2350Current);
   m.activeInputs=2;CHECK(m.count(Page::EqInputs)==2);CHECK(m.count(Page::Routing)==3);uint8_t outputEq=0;CHECK(PanelControls::outputEqId(m.map,0,outputEq)&&outputEq==8);
   m.activeInputs=0;
-  CHECK(m.count(Page::Outputs)==9);CHECK(m.parent(Page::Output)==Page::Outputs);
+  CHECK(m.count(Page::Outputs)==11);CHECK(m.parent(Page::Output)==Page::Outputs);
   CHECK(m.count(Page::Bands)==10);CHECK(m.count(Page::Crossover)==4);
   CHECK(m.nativeBand(3,true)==23);CHECK(m.nativeBand(9,false)==9);
   CHECK(m.roles.left==0&&m.roles.right==0&&m.roles.subs==0);

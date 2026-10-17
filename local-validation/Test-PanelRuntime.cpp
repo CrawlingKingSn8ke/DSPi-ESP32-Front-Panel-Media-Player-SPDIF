@@ -21,7 +21,7 @@ class String {
 };
 inline String operator+(const char *a,const String &b){return String(a)+b;}
 enum MenuPage{PAGE_MAIN,PAGE_INPUT,PAGE_MEDIA,PAGE_PRESET,PAGE_LOUDNESS,PAGE_CROSSFEED,PAGE_LEVELLER,PAGE_PSYBASS,PAGE_BLUETOOTH,PAGE_SYSTEM,PAGE_MEDIA_SETTINGS,PAGE_SCREEN_SETTINGS,PAGE_IDLE_SCREEN,PAGE_SPECTRUM,PAGE_SPECTRUM_COLOURS,PAGE_THEME,PAGE_SUB_SYNTH,PAGE_SUB_SELECT,PAGE_SUB_OUTPUTS,PAGE_TUBE,PAGE_TUBE_OUTPUTS,PAGE_LIMITER,PAGE_LIMITER_OUTPUT,PAGE_FEATURES,
-  PAGE_SPEAKERS,PAGE_SPEAKER_SETUP,PAGE_SPEAKER_GROUPS,PAGE_SPEAKER_MEMBERS,PAGE_OUTPUTS,PAGE_OUTPUT,PAGE_ROUTING,PAGE_ROUTE,PAGE_SUM,PAGE_SOURCE_PAIR,PAGE_EQUALISER,PAGE_EQ_INPUTS,PAGE_EQ_OUTPUTS,PAGE_EQ_TARGET,PAGE_EQ_BANDS,PAGE_EQ_BAND,PAGE_CROSSOVER,PAGE_XO_BAND,PAGE_PRESET_TOOLS,PAGE_PRESET_DESTINATION,PAGE_PRESET_PREVIEW,PAGE_STARTING_POINT,PAGE_INPUT_NAMES,PAGE_INPUT_NAME,PAGE_HARDWARE,PAGE_HARDWARE_OUTPUTS,PAGE_HARDWARE_PAIR,PAGE_PDM,PAGE_SPDIF_INPUTS,PAGE_SPDIF_INPUT,PAGE_I2S_INPUT,PAGE_I2S_DATA,PAGE_I2S_CLOCKS,PAGE_MASTER_CLOCK,PAGE_ADAT,PAGE_PANEL_CONFIRM,PAGE_PANEL_NAME,PAGE_PANEL_NUMBER,PAGE_COUNT};
+  PAGE_SPEAKERS,PAGE_SPEAKER_SETUP,PAGE_SPEAKER_GROUPS,PAGE_SPEAKER_MEMBERS,PAGE_OUTPUTS,PAGE_OUTPUT,PAGE_ROUTING,PAGE_ROUTE,PAGE_SUM,PAGE_SOURCE_PAIR,PAGE_EQUALISER,PAGE_EQ_INPUTS,PAGE_EQ_OUTPUTS,PAGE_EQ_TARGET,PAGE_EQ_BANDS,PAGE_EQ_BAND,PAGE_CROSSOVER,PAGE_XO_BAND,PAGE_PRESET_TOOLS,PAGE_PRESET_DESTINATION,PAGE_PRESET_PREVIEW,PAGE_STARTING_POINT,PAGE_INPUT_NAMES,PAGE_INPUT_NAME,PAGE_HARDWARE,PAGE_HARDWARE_OUTPUTS,PAGE_HARDWARE_PAIR,PAGE_PDM,PAGE_SPDIF_INPUTS,PAGE_SPDIF_INPUT,PAGE_I2S_INPUT,PAGE_I2S_DATA,PAGE_I2S_CLOCKS,PAGE_MASTER_CLOCK,PAGE_ADAT,PAGE_PANEL_CONFIRM,PAGE_PANEL_NAME,PAGE_PANEL_NUMBER,PAGE_COPY_DESTINATION,PAGE_COPY_PREVIEW,PAGE_COUNT};
 #include "../firmware/DSPi_ESP32_Front_Panel_v1_1_2/PanelControlRuntime.h"
 enum InputSource:uint8_t{SRC_USB,SRC_OPTICAL,SRC_I2S,SRC_ADAT,SRC_OPTICAL2,SRC_OPTICAL3,SRC_OPTICAL4,SRC_MAX=SRC_OPTICAL4};
 enum {VIEW_HOME,VIEW_MENU,VIEW_EDIT,VIEW_BLE};
@@ -30,9 +30,9 @@ struct Dspi {bool connected=true,muted=false,spdifNonAudio=false;float sampleRat
 struct Player {bool playing=false;bool active()const{return playing;}bool seeking()const{return false;}}mediaPlayerPoc;
 bool mediaPlaybackSuspended=false,mediaRouteRestorePending=false,mediaPresetRefreshPending=false,presetSaveCompletionPending=false,dspiRequestInFlight=false;
 char mediaCurrentPath[1]{};bool mediaTrackTransitionActive(){return false;}bool mediaPlaybackBufferLow(){return false;}bool wifiTransferExclusive(){return false;}void stopMediaPlayback(const char*){}
-struct Preferences {std::map<std::string,std::vector<uint8_t>> data;bool fail=false;
+struct Preferences {std::map<std::string,std::vector<uint8_t>> data;bool fail=false;std::string failKey;
   size_t getBytesLength(const char *k){return data[k].size();}size_t getBytes(const char *k,void *out,size_t n){if(data[k].size()!=n)return 0;memcpy(out,data[k].data(),n);return n;}
-  size_t putBytes(const char*k,const void*p,size_t n){if(fail)return 0;data[k]=std::vector<uint8_t>((const uint8_t*)p,(const uint8_t*)p+n);return n;}
+  size_t putBytes(const char*k,const void*p,size_t n){if(fail||failKey==k)return 0;data[k]=std::vector<uint8_t>((const uint8_t*)p,(const uint8_t*)p+n);return n;}
 }preferences;
 enum {PREF_DIRTY_PANEL_CONTROLS=32,PRESET_PANEL_SETTINGS_VERSION=2,PRESET_SAVE_REFRESH_MS=250,REQ_GET_USER_MUTE=0xdd,REQ_SET_USER_MUTE=0xdc};
 unsigned dirty=0;void markDeferredPreference(unsigned f){dirty|=f;}
@@ -56,7 +56,7 @@ enum DspiTxnResult{DSPI_TXN_OK,DSPI_TXN_ERROR,DSPI_TXN_TIMEOUT};
 struct Native {
   struct Call{bool get;uint8_t req;uint16_t value,len;bool replay;uint8_t bytes[32];};
   std::vector<Call> calls;uint8_t pin=2,pinStatus=0,spdifMask=1,platform=1,adatPin=255,rejectEq=255;bool muted=false;unsigned saveCount=0;bool dropSaveAck=false,watchMono=false,unsafeMono=false,failPlatform=false,failRta=false,notifyDuringRead=false,notifyDuringNameRead=false,echoOwn=false;uint32_t selectedRate=48000;char channelName[32]="Output";
-  PanelControls::BandRecipe eq[17][24]{};PanelControls::Route routes[8]{};float gains[9]{};uint8_t mutes[9]{};uint16_t occupied=1;uint8_t active=0;char names[10][32]{};
+  PanelControls::BandRecipe eq[17][24]{};PanelControls::Route routes[8]{};float gains[9]{},delays[9]{};uint8_t mutes[9]{};uint16_t occupied=1;uint8_t active=0;char names[10][32]{};
   Native(){for(auto &t:eq)for(auto&b:t)b={1,0,1000,.707f,0,123};for(unsigned i=0;i<8;++i)routes[i]={uint8_t(i),0,i==0,true,-4};for(auto &g:gains)g=-12;strcpy(names[0],"Original");}
 }nativeWire;
 DspiTxnResult dspiTransactionResult(bool get,uint8_t req,uint16_t value,uint16_t,const uint8_t *tx,uint16_t txLen,uint8_t *rx,uint16_t,uint16_t &size,bool,bool replay){
@@ -70,8 +70,8 @@ DspiTxnResult dspiTransactionResult(bool get,uint8_t req,uint16_t value,uint16_t
   else if(req==0xf6){uint8_t b[]={1,16,17,1,0,0,0,0};memcpy(rx,b,8);size=8;}
   else if(req==0x9c){memcpy(rx,nativeWire.channelName,32);size=32;}
   else if(req==0x9b){memcpy(nativeWire.channelName,tx,txLen);}
-  else if(req==0x73)byte(0);else if(req==0x77)byte(nativeWire.mutes[value]);else if(req==0x75)flt(nativeWire.gains[value]);else if(req==0x79)flt(0);
-  else if(req==0x76)nativeWire.mutes[value]=tx[0];else if(req==0x74)memcpy(&nativeWire.gains[value],tx,4);
+  else if(req==0x73)byte(0);else if(req==0x77)byte(nativeWire.mutes[value]);else if(req==0x75)flt(nativeWire.gains[value]);else if(req==0x79)flt(nativeWire.delays[value]);
+  else if(req==0x76)nativeWire.mutes[value]=tx[0];else if(req==0x74)memcpy(&nativeWire.gains[value],tx,4);else if(req==0x78)memcpy(&nativeWire.delays[value],tx,4);
   else if(req==0x43){auto &b=nativeWire.eq[value>>8][(value>>3)&31];unsigned field=value&7;memset(rx,0,4);size=4;if(field==0)rx[0]=b.type;else if(field==4)rx[0]=b.bypass;else if(field==5){rx[0]=b.qpX512&255;rx[1]=b.qpX512>>8;}else PanelControls::putFloatLE(rx,field==1?b.frequencyHz:field==2?b.q:b.gainDb);}
   else if(req==0x42){if(tx[0]==nativeWire.rejectEq)return DSPI_TXN_ERROR;auto &b=nativeWire.eq[tx[0]][tx[1]];b.type=tx[2];b.bypass=tx[3];memcpy(&b.frequencyHz,tx+4,4);memcpy(&b.q,tx+8,4);memcpy(&b.gainDb,tx+12,4);if(txLen==18)b.qpX512=tx[16]|(uint16_t(tx[17])<<8);}
   else if(req==0x71){auto &r=nativeWire.routes[value>>8];rx[0]=r.input;rx[1]=r.output;rx[2]=r.enabled;rx[3]=r.invert;PanelControls::putFloatLE(rx+4,r.gainDb);size=8;}
@@ -104,11 +104,11 @@ static void select(uint8_t row){menuIndex=row;CHECK(panelSelect());}
 static void applyTestEdit(){panelApply();if(menuPage==PAGE_PANEL_NUMBER)select(2);}
 int main(){
   strcpy(dspi.presetNames[0],"Original");passes(10);CHECK(nativeWire.calls.size()==1); // one boot identity read, then no Home polling
-  enterPage(PAGE_SPEAKERS);passes(12);CHECK(PanelRuntime::model.map.inputs==8&&PanelRuntime::model.activeInputs==2);CHECK(panelMenuCount(PAGE_SPEAKERS)==6);
+  enterPage(PAGE_SPEAKERS);passes(12);CHECK(PanelRuntime::model.map.inputs==8&&PanelRuntime::model.activeInputs==2);CHECK(panelMenuCount(PAGE_SPEAKERS)==4);
   strcpy(PanelRuntime::aliases.full[0],"TV");PanelRuntime::model.source=0;enterPage(PAGE_INPUT_NAME);select(0);CHECK(panelMenuCount(menuPage)==4);select(1);CHECK(editActive);for(unsigned i=0;i<4;++i)panelAdjust(1);applyTestEdit();CHECK(PanelRuntime::name.cursor==4);select(0);panelAdjust(1);applyTestEdit();select(2);CHECK(strcmp(PanelRuntime::aliases.full[0],"TV  A")==0);
-  enterPage(PAGE_SPEAKERS);
-  CHECK(PanelRuntime::model.roles.left==0);select(4);CHECK(menuPage==PAGE_OUTPUTS&&panelMenuCount(menuPage)==9);
-  select(0);passes(10);select(3);CHECK(menuPage==PAGE_EQ_TARGET&&PanelRuntime::eqId()==8);select(1);select(0);passes(8);
+  enterPage(PAGE_OUTPUTS);
+  CHECK(PanelRuntime::model.roles.left==0);CHECK(menuPage==PAGE_OUTPUTS&&panelMenuCount(menuPage)==11);
+  select(0);passes(10);select(3);CHECK(menuPage==PAGE_EQ_TARGET&&PanelRuntime::eqId()==8);select(0);select(0);passes(8);
   CHECK(menuPage==PAGE_EQ_BAND);menuIndex=2;select(2);CHECK(editActive);panelAdjust(1);applyTestEdit();passes(20);CHECK(nativeWire.eq[8][0].frequencyHz==1001&&nativeWire.eq[8][0].qpX512==123);
   enterPage(PAGE_ROUTING);select(2);CHECK(menuPage==PAGE_SUM);select(3);CHECK(menuPage==PAGE_PANEL_CONFIRM&&menuIndex==2);unsigned before=nativeWire.calls.size();select(2);passes(2);CHECK(nativeWire.calls.size()==before);
   enterPage(PAGE_SUM);select(3);select(3);nativeWire.watchMono=true;passes(170);nativeWire.watchMono=false;CHECK(nativeWire.routes[0].enabled&&nativeWire.routes[1].enabled);CHECK(fabsf(nativeWire.routes[0].gainDb+6.0206f)<.001f);CHECK(nativeWire.routes[0].invert);for(unsigned i=2;i<8;++i)CHECK(!nativeWire.routes[i].enabled);CHECK(!nativeWire.unsafeMono);
@@ -131,7 +131,7 @@ int main(){
   enterPage(PAGE_PRESET_TOOLS);select(1);passes(2);select(2);select(2);select(6);brightnessPercent=35;select(3);brightnessPercent=95;before=nativeWire.calls.size();passes(60);nativeWire.dropSaveAck=false;
   CHECK(nativeWire.saveCount==2);bool resolvedDir=false,resolvedActive=false,sawSave=false;for(unsigned i=before;i<nativeWire.calls.size();++i){const auto&f=nativeWire.calls[i];if(f.req==0x90){CHECK(!sawSave);sawSave=true;}else if(sawSave&&f.req==0x95)resolvedDir=true;else if(sawSave&&f.req==0x9a)resolvedActive=true;}CHECK(resolvedDir&&resolvedActive);CHECK(preferences.data["preset_ui2"][1]==35);
   CHECK(PanelRuntime::savedKnown&&PanelRuntime::savedSlot==2&&PanelRuntime::savedGains[0]==-10&&PanelRuntime::savedGains[1]==-14);
-  PanelRuntime::model.output=0;enterPage(PAGE_OUTPUT);passes(8);select(1);panelAdjust(1);applyTestEdit();passes(8);CHECK(nativeWire.gains[0]==-9.5f&&PanelRuntime::savedKnown);
+  PanelRuntime::model.output=0;enterPage(PAGE_OUTPUT);passes(8);select(1);panelAdjust(1);applyTestEdit();passes(8);CHECK(nativeWire.gains[0]==-9.f&&PanelRuntime::savedKnown);
   enterPage(PAGE_SPEAKER_SETUP);passes(5);dspi.activePreset=1;CHECK(panelMenuValue(PAGE_SPEAKER_SETUP,1)=="Unavailable");dspi.activePreset=2;PanelRuntime::savedSerial[0]='X';CHECK(panelMenuValue(PAGE_SPEAKER_SETUP,1)=="Unavailable");PanelRuntime::savedSerial[0]='0';PanelRuntime::subBaseline.valid=PanelRuntime::balanceBaseline.valid=true;select(1);select(3);passes(45);CHECK(nativeWire.gains[0]==-10&&nativeWire.gains[1]==-14);CHECK(!PanelRuntime::subBaseline.valid&&!PanelRuntime::balanceBaseline.valid);
   panelPresetLoaded(2);nativeWire.gains[0]=-2;enterPage(PAGE_SPEAKER_SETUP);before=nativeWire.calls.size();passes(15);CHECK(!PanelRuntime::savedKnown&&panelMenuValue(PAGE_SPEAKER_SETUP,1)=="Unavailable");for(unsigned i=before;i<nativeWire.calls.size();++i)CHECK(nativeWire.calls[i].req!=0x75);
   dspi.activePreset=0;PanelRuntime::roleSlot=0;PanelRuntime::model.roles.left=4;panelPresetLoaded(0);CHECK(PanelRuntime::model.roles.left==1);

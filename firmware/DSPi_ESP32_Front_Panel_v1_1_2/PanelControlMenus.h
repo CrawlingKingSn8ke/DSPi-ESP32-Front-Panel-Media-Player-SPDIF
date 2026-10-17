@@ -11,11 +11,11 @@ enum class Page : uint8_t { Main, Input, Music, Preset, Effects, System,
   Crossover, XoBand, PresetTools, PresetDestination, PresetPreview,
   StartingPoint, InputNames, InputName, Hardware, HardwareOutputs,
   HardwarePair, Pdm, SpdifInputs, SpdifInput, I2sInput, I2sData,
-  I2sClocks, MasterClock, Adat, Confirm, Name, Number, Count };
+  I2sClocks, MasterClock, Adat, Confirm, Name, Number, CopyDestination, CopyPreview, Count };
 enum class Feature : uint8_t { Equaliser, Loudness, Crossfeed, Leveller,
   PsyBass, SubSynth, Tube, Limiter };
 inline uint8_t mainCount(){return 6;}
-inline const char *mainLabel(uint8_t row){static const char *v[]={"Input","Music","Preset","Speakers","Effects","System"};return v[row<6?row:5];}
+inline const char *mainLabel(uint8_t row){static const char *v[]={"Input","Music","Preset","Outputs","Effects","System"};return v[row<6?row:5];}
 inline Feature featureSemantic(uint8_t row){return static_cast<Feature>(row<8?row:7);}
 inline uint8_t featureMask(Feature f){return f==Feature::Equaliser?0:static_cast<uint8_t>(1u<<(static_cast<uint8_t>(f)-1));}
 inline bool safeAdjust(float current,int direction,float step,float minimum,float maximum,float &out){
@@ -36,19 +36,21 @@ struct Model {
   bool eqOutput=false,link=false;
   uint8_t count(Page p)const {
     switch(p){
-      case Page::Main:return 6;case Page::Speakers:return 6;case Page::Setup:return 2;
-      case Page::Groups:return 3;case Page::GroupMembers:case Page::Outputs:case Page::EqOutputs:return map.outputs?map.outputs:1;
-      case Page::Output:return 7;case Page::Routing:return visibleInputs()?visibleInputs()+1:1;
+      case Page::Main:return 6;case Page::Speakers:return 4;case Page::Setup:return 2;
+      case Page::Outputs:return (map.outputs?map.outputs:1)+2;
+      case Page::Groups:return 3;case Page::GroupMembers:case Page::EqOutputs:case Page::CopyDestination:return map.outputs?map.outputs:1;
+      case Page::Output:return 8;case Page::Routing:return visibleInputs()?visibleInputs()+1:1;
       case Page::Route:return 3;case Page::Sum:return 4;case Page::SourcePair:return visibleInputs()>=2?visibleInputs()/2:1;
       case Page::Equaliser:return 2;case Page::EqInputs:return visibleInputs()?visibleInputs():1;
-      case Page::EqTarget:return eqOutput?3:2;case Page::Bands:return 10;case Page::Band:return 5;
+      case Page::EqTarget:return eqOutput?2:1;case Page::Bands:return 10;case Page::Band:return 5;
       case Page::Crossover:return 4;case Page::XoBand:return 5;case Page::PresetTools:return 5;
       case Page::PresetDestination:return 10;case Page::PresetPreview:return 7;case Page::StartingPoint:return 2;
-      case Page::InputNames:return 8;case Page::InputName:return 3;case Page::Hardware:return 8;
+      case Page::InputNames:return 8;case Page::InputName:return 5;case Page::Hardware:return 8;
       case Page::HardwareOutputs:return map.stereoPairs?map.stereoPairs:1;case Page::HardwarePair:return 2;
       case Page::Pdm:return 1;case Page::SpdifInputs:return 4;case Page::SpdifInput:return 2;
       case Page::I2sInput:return 2;case Page::I2sData:return map.inputs>=2?map.inputs/2:1;
       case Page::I2sClocks:return 6;case Page::MasterClock:return 3;case Page::Adat:return 7;
+      case Page::CopyPreview:return 6;
       case Page::Confirm:return 4;case Page::Name:case Page::Number:return 4;default:return 1;
     }
   }
@@ -60,10 +62,11 @@ struct Model {
     if(enabled)v|=bit;else v&=~bit;return true;
   }
   Page parent(Page p)const{
-    switch(p){case Page::Setup:case Page::Outputs:return Page::Speakers;case Page::Groups:return Page::Setup;
+    switch(p){case Page::Outputs:return Page::Main;case Page::Setup:case Page::Speakers:return Page::Outputs;case Page::Groups:return Page::Setup;
       case Page::GroupMembers:return Page::Groups;case Page::Output:return Page::Outputs;case Page::Routing:return Page::Output;case Page::Crossover:return Page::EqTarget;
       case Page::Route:case Page::Sum:return Page::Routing;case Page::SourcePair:return Page::Sum;
-      case Page::EqInputs:case Page::EqOutputs:return Page::Equaliser;case Page::EqTarget:return eqParent;
+      case Page::EqInputs:return Page::Effects;case Page::EqOutputs:return Page::Equaliser;case Page::EqTarget:return eqParent;
+      case Page::CopyDestination:return Page::Output;case Page::CopyPreview:return Page::CopyDestination;
       case Page::Bands:return Page::EqTarget;case Page::Band:return Page::Bands;case Page::XoBand:return Page::Crossover;
       case Page::Equaliser:return Page::Effects;case Page::PresetTools:return Page::Preset;
       case Page::PresetDestination:case Page::PresetPreview:return Page::PresetTools;case Page::StartingPoint:return Page::PresetPreview;

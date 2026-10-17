@@ -1,5 +1,5 @@
 /*
-  DSPi ESP32 Control Panel v1.3.2 EQ usability stage 2
+  DSPi ESP32 Control Panel v1.3.2 Outputs / Inputs stage 3
   Target DSPi firmware: compatible v1.1.6 (runtime version readback)
 
   Board:
@@ -5323,7 +5323,7 @@ enum MenuPage {
   PAGE_INPUT_NAMES, PAGE_INPUT_NAME, PAGE_HARDWARE, PAGE_HARDWARE_OUTPUTS,
   PAGE_HARDWARE_PAIR, PAGE_PDM, PAGE_SPDIF_INPUTS, PAGE_SPDIF_INPUT,
   PAGE_I2S_INPUT, PAGE_I2S_DATA, PAGE_I2S_CLOCKS, PAGE_MASTER_CLOCK, PAGE_ADAT,
-  PAGE_PANEL_CONFIRM, PAGE_PANEL_NAME, PAGE_PANEL_NUMBER,
+  PAGE_PANEL_CONFIRM, PAGE_PANEL_NAME, PAGE_PANEL_NUMBER, PAGE_COPY_DESTINATION, PAGE_COPY_PREVIEW,
   PAGE_COUNT
 };
 #include "PanelControlRuntime.h"
@@ -8459,14 +8459,7 @@ bool inputSourceAvailable(InputSource source)
 
 InputSource nextInputSourceChoice(InputSource current, int direction)
 {
-  // Only sources present in the last verified Console inventory are exposed.
-  // USB, first S/PDIF and I2S are always available, so this always terminates.
-  for (uint8_t step = 0; step < SRC_COUNT; step++) {
-    current = (InputSource)(((int)current +
-                             (direction >= 0 ? 1 : -1) + SRC_COUNT) % SRC_COUNT);
-    if (inputSourceAvailable(current)) return current;
-  }
-  return current;
+  return static_cast<InputSource>(panelNextInput(static_cast<uint8_t>(current),direction));
 }
 
 String inputSourceDisplayText(InputSource source)
@@ -11704,7 +11697,7 @@ String menuItemName(MenuPage page, uint8_t index)
     return PanelControlMenus::mainLabel(index);
   }
   if (page == PAGE_FEATURES) {
-    const char *items[] = {"Equaliser", "Loudness", "Crossfeed", "Leveller", "Psy Bass",
+    const char *items[] = {"Input EQ", "Loudness", "Crossfeed", "Leveller", "Psy Bass",
                            "Sub Synth", "Tube Modeller", "Output Limiter"};
     return items[std::min<uint8_t>(index, 7)];
   }
@@ -11767,7 +11760,7 @@ String menuItemName(MenuPage page, uint8_t index)
   if (page == PAGE_SYSTEM) {
     const char *items[] = {
       "Remote", "Volume Limit", "Screen Settings",
-      "Input Names", "Hardware", "WiFi Transfer/Update", "Status"
+      "Inputs", "Hardware", "WiFi Transfer/Update", "Status"
     };
     return items[std::min<uint8_t>(index, 6)];
   }
@@ -13665,11 +13658,12 @@ void drawChangeOverlay()
     }
   } else {
     drawFontCentredGlowColour(FontSmall, 24, "Input", uiAccent());
-    String source = inputSourceDisplayText(changeOverlaySource);
+    String source = sourceMenuText(changeOverlaySource);
     // Keep every input announcement in FontLarge. Previously S/PDIF 2/3/4
     // crossed a width threshold and abruptly fell back to the much smaller
     // FontMedium. Scale the same large glyphs only as much as required.
     const int16_t maximumWidth = UI_W - 20;
+    source = ellipsizeFontText(FontLarge,source,(maximumWidth*100L)/68);
     const int16_t sourceWidth = fontTextWidthKerned(FontLarge, source);
     const uint8_t sourceScale = sourceWidth > maximumWidth
         ? (uint8_t)std::max<int16_t>(68,
@@ -14903,7 +14897,7 @@ int8_t mainIndexForPage(MenuPage page)
 MenuPage pageForMainIndex(uint8_t index)
 {
   const MenuPage pages[] = {
-    PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_SPEAKERS, PAGE_FEATURES, PAGE_SYSTEM
+    PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_OUTPUTS, PAGE_FEATURES, PAGE_SYSTEM
   };
   return pages[std::min<uint8_t>(index, 5)];
 }
@@ -15597,7 +15591,7 @@ void selectMenuItem()
   }
 
   if (menuPage == PAGE_FEATURES) {
-    const MenuPage pages[] = {PAGE_EQUALISER, PAGE_LOUDNESS, PAGE_CROSSFEED, PAGE_LEVELLER,
+    const MenuPage pages[] = {PAGE_EQ_INPUTS, PAGE_LOUDNESS, PAGE_CROSSFEED, PAGE_LEVELLER,
                               PAGE_PSYBASS, PAGE_SUB_SYNTH, PAGE_TUBE,
                               PAGE_LIMITER};
     enterPage(pages[std::min<uint8_t>(menuIndex, 7)]);
@@ -19856,7 +19850,7 @@ void serviceWifiTransfer()
 void printHelp()
 {
   Serial.println();
-  Serial.println("DSPi ESP32 Control Panel v1.3.2 EQ usability stage 2");
+  Serial.println("DSPi ESP32 Control Panel v1.3.2 Outputs / Inputs stage 3");
   Serial.println("Media build: native 44.1/48 kHz + Wi-Fi Music Transfer + verified 30 MHz shared SD path");
   Serial.println("u/d = navigate (volume on home), </> = left/right");
   Serial.println("+/- = User Volume");
