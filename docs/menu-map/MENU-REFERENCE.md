@@ -1,0 +1,356 @@
+# DSPi ESP32 Front Panel — Menu reference
+
+Release: **v1.4.0**.
+Available controls depend on the connected DSPi firmware and configuration.
+
+
+## Input, Music & Preset
+
+- Input
+  - Source [EDIT] — USB · S/PDIF 1–4 · I2S · ADAT, where available
+  - Custom source labels [READ] — Set full/short names, visibility and order in System → Inputs.
+- Music
+  - Folders → tracks — Folder and playing-track highlights follow the active track.
+    - Select a track — Start playback and open Now Playing.
+  - Now Playing — Available when a track is loaded; album artwork and track information.
+    - Play / Pause [EDIT]
+    - Previous / Next track [EDIT]
+    - Seek [EDIT] — Uses the selected Seek Step.
+  - Playback Settings
+    - Seek Step [EDIT]
+  - Scan SD / Refresh SD — Or Check SD card when unavailable.
+- Preset
+  - P1 … P10 — Named and empty slots remain visible. Select an occupied slot to load.
+  - Hold Select for 5 seconds [CONFIRM] — Save current preset; playback is stopped when required.
+  - Preset Tools
+    - Save Changes [CONFIRM] — Save to the current occupied slot.
+    - Save As New
+      - Choose empty slot
+      - Preset Preview
+        - Destination [READ]
+        - Name [EDIT]
+        - Starting Point [READ] — Current settings.
+        - Output EQ / XO [READ]
+        - Wiring / Limiter [READ]
+        - Input PEQ / FX [READ]
+        - Continue → confirm save [CONFIRM]
+    - New Preset
+      - Choose empty slot
+      - Preset Preview — Same destination and preservation fields as Save As New.
+        - Name [EDIT]
+        - Starting Point
+          - Current [EDIT]
+          - Effects Off [EDIT] — Bypasses input PEQ and turns supported effects off; retains output EQ/XO, routing, wiring and limiter.
+        - Continue → confirm save [CONFIRM]
+    - Rename
+      - Choose occupied slot
+      - Name [EDIT]
+      - Continue → confirm rename [CONFIRM]
+    - Revert [CONFIRM] — Reload the active saved preset.
+- Shared editors
+  - Numeric editor — Gain controls in Outputs/EQ support 0.01 dB.
+    - Value [EDIT] — Move across digits, then adjust the selected digit.
+    - Digit [EDIT] — Select the adjustment place.
+    - Apply
+    - Cancel
+  - Name editor
+    - Name [EDIT]
+    - Position [EDIT]
+    - Save Name
+    - Cancel
+- Confirmation screens
+  - Current / Proposed [READ] — Or action-specific source/destination or Left/Right gains.
+  - No – Cancel — Default selection; Back also cancels.
+  - Yes – Apply [CONFIRM] — Action-specific Save/Copy text is used where appropriate.
+
+Music, source availability and preset actions are contextual; placeholder/status rows are not additional features.
+
+## Outputs, EQ & Routing
+
+- Outputs
+  - Choose named output — Disabled outputs stay listed; labels and output count follow DSPi.
+    - Mute [EDIT]
+    - Gain [EDIT] — 0.01 dB editor; two-decimal display.
+    - Delay [EDIT]
+    - EQ / Crossover — Full editor shown in the next column.
+    - Routing — Individual input routes or editable Mono L+R.
+    - Rename [EDIT] — Native DSPi channel name.
+    - Enabled [CONFIRM] — Explicit hardware-change confirmation.
+    - Copy Parameters
+      - Copy To → destination
+      - Preview
+        - From / Replace [READ]
+        - EQ / Crossover [READ]
+        - Gain / Delay [READ]
+        - Mute [READ]
+      - Confirm copy [CONFIRM] — Copies all 10 EQ bands + 4 XO slots, gain, delay and mute.
+- EQ / Crossover
+  - Bands
+    - Band 1 … Band 10
+      - Enabled [EDIT]
+      - Type [EDIT]
+      - Frequency / Gain / Q [EDIT] — Only parameters used by the chosen filter are shown.
+      - f0 / Q0 / fp / Qp [EDIT] — Linkwitz Transform uses these four parameters instead.
+  - Crossover
+    - XO 1 … XO 4
+      - Enabled [EDIT]
+      - Direction [EDIT] — Low Pass / High Pass
+      - Family [EDIT] — Linkwitz / Butterworth / Bessel
+      - Slope [EDIT]
+      - Frequency [EDIT]
+- Routing
+  - Choose logical input
+    - Enabled [EDIT]
+    - Gain [EDIT] — 0.01 dB
+    - Invert [EDIT]
+  - Sum Mode
+    - Choose input pair — Only shown when more than two logical inputs are active.
+    - Left [EDIT] — Starts from the current route gain.
+    - Right [EDIT] — Starts from the current route gain.
+    - Mono L+R → Save [CONFIRM] — Uses your gains exactly; no automatic attenuation.
+- Quick Controls
+  - Speakers [EDIT] — Mute/unmute assigned left + right speaker outputs.
+  - Subwoofer [EDIT] — Mute/unmute assigned sub outputs.
+  - Sub Level [EDIT] — Single-output gain, or a relative trim for multiple subs.
+  - Balance [EDIT] — Relative left/right level adjustment.
+- Setup
+  - Speaker Groups — Manual roles; initially Unassigned. Does not change routing or GPIO.
+    - Left
+      - Assign outputs [EDIT]
+    - Right
+      - Assign outputs [EDIT]
+    - Subs
+      - Assign outputs [EDIT]
+  - Restore Saved [CONFIRM] — Only available for confirmed saved quick-control adjustments.
+- Copy / Sum boundaries
+  - Copy leaves routing and GPIO alone [READ]
+  - Sum leaves output gain alone [READ]
+  - Save Preset is separate [READ] — Live parameter changes are not automatically written to a DSPi preset.
+
+Sum replaces routes to the chosen output with the selected pair. An interrupted Copy or Sum can leave a partial change; inspect the target.
+
+## Effects
+
+- Input EQ — Output EQ/Crossover lives under Outputs.
+  - Choose logical input
+    - Bands → Band 1 … 10
+      - Enabled [EDIT]
+      - Type [EDIT]
+      - Frequency / Gain / Q [EDIT] — Filter-dependent fields.
+      - f0 / Q0 / fp / Qp [EDIT] — Linkwitz Transform only.
+- Loudness
+  - Enable [EDIT]
+  - Reference SPL [EDIT]
+  - Strength [EDIT]
+- Crossfeed
+  - Enable [EDIT]
+  - Profile [EDIT]
+  - Frequency [EDIT]
+  - Feed Level [EDIT]
+- Leveller
+  - Enable [EDIT]
+  - Amount [EDIT]
+  - Speed [EDIT]
+  - Max Gain [EDIT]
+  - Gate [EDIT]
+  - Lookahead [EDIT]
+- Psy Bass
+  - Enable [EDIT]
+  - Cutoff [EDIT]
+  - Harmonics [EDIT]
+  - Drive [EDIT]
+  - Character [EDIT]
+  - Original Bass [EDIT]
+- Sub Synth
+  - Enable [EDIT]
+  - 24-36 Hz [EDIT]
+  - 36-56 Hz [EDIT]
+  - 56-80 Hz [EDIT]
+  - Selectivity
+    - Material [EDIT]
+    - Depth [EDIT]
+    - Hold [EDIT]
+  - Sub Ceiling [EDIT]
+  - LF Boost [EDIT]
+  - Outputs
+    - Choose enabled outputs [EDIT]
+  - Link Pairs [EDIT]
+  - Headroom [READ]
+- Tube Modeller — Basic controls; Console-configured advanced parameters are retained.
+  - Enable [EDIT]
+  - Tube Type [EDIT]
+  - Drive [EDIT]
+  - Mix [EDIT]
+  - Outputs
+    - Choose enabled outputs [EDIT]
+- Output Limiter
+  - Choose enabled output
+    - Enable [EDIT]
+    - Threshold [EDIT]
+    - Release [EDIT]
+    - Link Group [EDIT]
+
+DSPi performs the processing. Feature availability follows the connected firmware; output selectors only expose applicable enabled outputs.
+
+## System & Display
+
+- System
+  - Remote — Full pairing, mapping and shortcut branches are in sheet 06.
+  - Volume Limit [EDIT] — DSPi master-volume ceiling.
+  - Screen Settings — Full branch in the middle column.
+  - Inputs — Full branch in the right column.
+  - Hardware — Full branch in sheet 07.
+  - WiFi Transfer/Update
+    - Start local Wi-Fi session [CONFIRM] — Transfer/update mode pauses normal playback/control ownership.
+    - Network / Password / Address [READ]
+    - Local browser portal
+      - Music files — Browse, upload and manage SD files.
+      - Firmware update — Upload the OTA application .bin; SD card is not required for OTA.
+      - Finish Safely — Close the transfer session in the browser.
+  - Status
+    - DSPi platform / firmware [READ]
+    - UART link [READ]
+    - Remote state [READ]
+    - Panel version [READ]
+    - SD card mounted [READ] — Shown when mounted.
+    - Communication fault [READ] — Shown if DSPi is offline.
+- Screen Settings
+  - Brightness [EDIT]
+  - Idle Settings [EDIT] — Timeout: Off / 30 seconds / 1 / 3 / 5 minutes.
+  - Idle Screen
+    - Dim Brightness [EDIT]
+    - Screen Off [EDIT]
+    - Spectrum [EDIT]
+    - Analog VU [EDIT]
+    - Dim Level [EDIT] — Shown/edited within this menu.
+  - Spectrum
+    - Source [EDIT] — Inputs / Outputs
+    - Upper Channel [EDIT]
+    - Lower Channel [EDIT]
+    - Bar Colours
+      - Each available channel
+        - Channel Bar [EDIT] — Independent colour palette.
+        - Channel Peak [EDIT] — Independent falling-peak colour palette.
+  - Theme
+    - Main Text Colour [EDIT] — Colour-swatch palette.
+    - Accent Colour [EDIT] — Independent colour-swatch palette.
+    - Volume Meters Colour [EDIT] — Independent colour-swatch palette.
+    - Analog VU Colour [EDIT] — Cyan / Green / Amber / Magenta / Warm White / Red.
+- Inputs — ESP-local labels/order/visibility; does not disable native DSPi inputs.
+  - Choose physical source
+    - Name [EDIT] — Full label, including input announcements.
+    - Short Name [EDIT] — Compact Home label.
+    - Show in Menu [EDIT] — At least one available source must remain visible.
+    - Position [EDIT] — Order in the panel source selector.
+    - Reset Name
+- Spectrum / idle behaviour
+  - Two channels shown at a time [READ]
+  - Selection follows matrix availability [READ]
+  - Each channel has bar + peak colours [READ]
+  - VU shortcut opens/cycles displays [READ]
+  - Manual VU/Spectrum does not dim [READ] — Idle timeout display selection is a separate setting.
+
+Screen and theme options belong to the panel. Native DSPi settings, preset operations and ESP-local preferences have distinct save behaviour.
+
+## Remote & Shortcuts
+
+- Remote
+  - Connected / Reconnecting [READ] — Displays the saved device name; Not paired when no profile exists.
+  - Find Remote — Available without a saved profile, when scanning is safe.
+    - Scan → choose remote → pair
+  - Key Map — Available with a saved remote; full action list in the next column.
+  - D-pad Shortcuts — Full options in the right column.
+  - Restore Defaults [CONFIRM] — Restore mapping / shortcut defaults.
+  - Remove Remote [CONFIRM] — Confirm removal of the saved remote and bond.
+- Learn a button — A mapped key is shown in accent colour; None is shown when unset.
+  - Choose Key Map action
+  - Press then release remote button
+  - Mapping stored
+- Key Map
+  - Context Up [EDIT]
+  - Context Down [EDIT]
+  - Context Left [EDIT]
+  - Context Right [EDIT]
+  - Select [EDIT]
+  - Back [EDIT]
+  - Home [EDIT]
+  - Open Menu [EDIT]
+  - User Volume + [EDIT]
+  - User Volume - [EDIT]
+  - Mute [EDIT]
+  - Previous preset [EDIT]
+  - Next preset [EDIT]
+  - Cycle input [EDIT]
+  - VU meter [EDIT]
+  - Music Play/Pause [EDIT]
+  - Music Previous [EDIT]
+  - Music Next [EDIT]
+  - Music Stop [EDIT]
+  - Open Music [EDIT]
+  - Playback Settings [EDIT]
+- D-pad Shortcuts — Each Home D-pad direction has its own action choice.
+  - Up / Down / Left / Right / Centre
+    - None [EDIT]
+    - Toggle Loudness [EDIT]
+    - Toggle Crossfeed [EDIT]
+    - Toggle Leveller [EDIT]
+    - Toggle Psy Bass [EDIT]
+    - Previous preset [EDIT]
+    - Next preset [EDIT]
+    - Previous input [EDIT]
+    - Next input [EDIT]
+    - Cycle input [EDIT]
+    - Open Menu [EDIT]
+    - VU meter [EDIT]
+    - Mute [EDIT]
+    - Toggle Sub Synth [EDIT]
+    - Toggle Tube [EDIT]
+
+Context keys navigate menus and the player. Home D-pad actions are separate, configurable shortcuts; remote rows depend on pairing state.
+
+## Hardware
+
+- Outputs
+  - Slot 1/2 … available stereo slots
+    - Format [READ] — Reported S/PDIF or I2S; Console-owned format change.
+    - Data Pin [EDIT] — Native GPIO assignment; confirmed hardware change.
+- PDM Out
+  - Data Pin [EDIT]
+- S/PDIF Inputs
+  - S/PDIF 1 … S/PDIF 4
+    - Enabled [EDIT] — First S/PDIF enable is read-only; extra inputs are configurable.
+    - Data Pin [EDIT]
+- I2S Input
+  - Channels [EDIT]
+  - Data Pins
+    - Pair 1 … available pairs
+      - Data Pin [EDIT]
+- I2S Clocks
+  - Clock Mode [EDIT] — Master / Slave
+  - Clock Pins [EDIT] — Unified / Split
+  - Master BCLK [EDIT]
+  - Slave BCLK [EDIT]
+  - LRCLK [READ] — Derived from the clock-pin arrangement.
+  - Sample Rate [EDIT] — Selected rate, not a player resampling option.
+- Master Clock
+  - Enabled [EDIT]
+  - Data Pin [EDIT]
+  - Multiplier [EDIT] — 128x / 256x
+- Preset Mode [EDIT] — Independent / With Preset
+- ADAT — Only available on compatible RP2350 firmware.
+  - Input Enabled [EDIT]
+  - Input Pin [EDIT]
+  - Input Clock [EDIT]
+  - Output Enabled [EDIT]
+  - Output Pin [EDIT]
+  - Input State [READ]
+  - Output State [READ]
+- Hardware safeguards
+  - Confirmed DSPi identity required [READ]
+  - GPIO validity is checked [READ]
+  - Protected UART pins excluded [READ]
+  - Check pin conflicts in Console [READ] — Verify all existing input/output/clock assignments and actual wiring.
+  - Playback may be stopped [READ]
+  - Current → Proposed → confirm [CONFIRM] — Guarded changes use verified readback.
+
+Counts, GPIO choices and supported controls depend on the DSPi platform. Read-only or unavailable controls are not promised as editable.
