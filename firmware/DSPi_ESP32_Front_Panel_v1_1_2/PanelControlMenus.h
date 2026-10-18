@@ -40,7 +40,7 @@ struct Model {
       case Page::Outputs:return (map.outputs?map.outputs:1)+2;
       case Page::Groups:return 3;case Page::GroupMembers:case Page::EqOutputs:case Page::CopyDestination:return map.outputs?map.outputs:1;
       case Page::Output:return 8;case Page::Routing:return visibleInputs()?visibleInputs()+1:1;
-      case Page::Route:return 3;case Page::Sum:return 4;case Page::SourcePair:return visibleInputs()>=2?visibleInputs()/2:1;
+      case Page::Route:return 3;case Page::Sum:return 3;case Page::SourcePair:return visibleInputs()>=2?visibleInputs()/2:1;
       case Page::Equaliser:return 2;case Page::EqInputs:return visibleInputs()?visibleInputs():1;
       case Page::EqTarget:return eqOutput?2:1;case Page::Bands:return 10;case Page::Band:return 5;
       case Page::Crossover:return 4;case Page::XoBand:return 5;case Page::PresetTools:return 5;
@@ -64,7 +64,7 @@ struct Model {
   Page parent(Page p)const{
     switch(p){case Page::Outputs:return Page::Main;case Page::Setup:case Page::Speakers:return Page::Outputs;case Page::Groups:return Page::Setup;
       case Page::GroupMembers:return Page::Groups;case Page::Output:return Page::Outputs;case Page::Routing:return Page::Output;case Page::Crossover:return Page::EqTarget;
-      case Page::Route:case Page::Sum:return Page::Routing;case Page::SourcePair:return Page::Sum;
+      case Page::Route:case Page::SourcePair:return Page::Routing;case Page::Sum:return visibleInputs()>2?Page::SourcePair:Page::Routing;
       case Page::EqInputs:return Page::Effects;case Page::EqOutputs:return Page::Equaliser;case Page::EqTarget:return eqParent;
       case Page::CopyDestination:return Page::Output;case Page::CopyPreview:return Page::CopyDestination;
       case Page::Bands:return Page::EqTarget;case Page::Band:return Page::Bands;case Page::XoBand:return Page::Crossover;

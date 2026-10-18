@@ -139,9 +139,19 @@ static bool savedKnown=false,savedEligible=false;
 static bool savedContext(){return savedKnown&&serialKnown&&savedSlot==dspi.activePreset&&memcmp(savedSerial,serial,17)==0;}
 static PanelControls::GainBaseline gainBaseline{},subBaseline{},balanceBaseline{};
 static float balance=0,subTrim=0;
-static uint8_t sumMode=0,sourcePair=0;
+static uint8_t sourcePair=0;
 static PanelControls::Route sumRoutes[8]{};
 static uint8_t sumStage=0;
+static PanelControls::Route sumOriginal[2]{};
+static float sumGains[2]{};
+static uint8_t sumKnown=0,sumAttempted=0,sumOutput=0,sumPair=0;
+static uint32_t sumGeneration=0;
+static bool sumContext(){return sumGeneration==generation&&sumOutput==model.output&&sumPair==sourcePair&&sumPair*2+1<model.visibleInputs()&&model.map.writable;}
+static bool sumReady(){return sumKnown==3&&sumContext();}
+static String gainText(float value){
+  long ticks=lroundf(value*100),m=ticks<0?-ticks:ticks;char text[20];
+  snprintf(text,sizeof(text),"%s%02ld.%02ld",ticks<0?"-":"",m/100,m%100);return String(text);
+}
 struct CopyParametersJob {
   uint8_t source=0,target=0,stage=0,read=0,write=0,mute=0;
   uint32_t generation=0;
@@ -318,7 +328,7 @@ static bool openNumber(float value){
   auto f=menuPage==PAGE_EQ_BAND?bandField(menuIndex):PanelControls::BandField::Frequency;
   if(f==PanelControls::BandField::Type||f==PanelControls::BandField::Bypass)return false;
   float low=10,high=control.sampleRate*(uint8_t(cells[0].value)==11?.15f:.45f);uint8_t dp=1;numberUnit="Hz";
-  if(f==PanelControls::BandField::GainDb){low=-24;high=12;numberUnit="dB";}
+  if(f==PanelControls::BandField::GainDb){low=-24;high=12;dp=2;numberUnit="dB";}
   if(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ){low=.1f;high=20;dp=2;numberUnit="";}
   // Native Qp0.10 rounds to51/512. Normalize only that valid boundary;
   // no-op Apply of0.10 re-encodes identically to51 (not a subminimum float).
@@ -349,7 +359,7 @@ String panelPageTitle(MenuPage p){using namespace PanelRuntime;static const char
   if(p==PAGE_PANEL_NUMBER)return panelMenuName(numberParent,numberRow);
   if(p==PAGE_EQ_TARGET)return model.eqOutput?outputLabel(model.target):inputLabel(model.target);
   if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::Hardware)return String("DSP ")+String(field(editPage,editRow).label);
-  if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::Sum)return sumMode==3?"Replace Mono L+R":sumMode==1?"Replace Left":"Replace Right";
+  if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::Sum)return "Replace Mono L+R";
   if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::LinkBand)return String("Copy ")+(linkedBand>=20?String("XO ")+String(linkedBand-19):String("Band ")+String(linkedBand+1));
   if(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::CopyParameters)return "Copy Parameters";
   if(p==PAGE_OUTPUT)return outputLabel(model.output);if(p==PAGE_EQ_BAND)return String("Band ")+String(model.band+1);if(p==PAGE_XO_BAND)return String("XO ")+String(model.band+1);return titles[int(p)-int(PAGE_SPEAKERS)];}
@@ -363,7 +373,7 @@ String panelMenuName(MenuPage p,uint8_t r){using namespace PanelRuntime;
     case PAGE_OUTPUT:{static const char *s[]={"Mute","Gain","Delay","EQ / Crossover","Routing","Rename","Enabled","Copy Parameters"};return s[r<8?r:7];}
     case PAGE_ROUTING:return r<model.visibleInputs()?inputLabel(r):String("Sum Mode");
     case PAGE_ROUTE:return r==0?"Enabled":r==1?"Gain":"Invert";
-    case PAGE_SUM:return r==0?"Custom":r==1?"Left":r==2?"Right":"Mono L+R";
+    case PAGE_SUM:return r==0?"Left":r==1?"Right":"Mono L+R";
     case PAGE_SOURCE_PAIR:return String("Inputs ")+String(r*2+1)+"/"+String(r*2+2);
     case PAGE_EQUALISER:return r?"Outputs":"Inputs";
     case PAGE_EQ_INPUTS:return inputLabel(r);
@@ -385,7 +395,7 @@ String panelMenuName(MenuPage p,uint8_t r){using namespace PanelRuntime;
     case PAGE_SPDIF_INPUTS:return String("S/PDIF ")+String(r+1);
     case PAGE_I2S_INPUT:if(r==1)return "Data Pins";break;
     case PAGE_I2S_DATA:return String("Pair ")+String(r+1);
-    case PAGE_PANEL_CONFIRM:if(confirmation==ConfirmAction::LinkBand)return r==0?"From":r==1?"Replace":r==2?"Cancel":"Copy Band";return r==0?"Current":r==1?"Proposed":r==2?"No - Cancel":"Yes - Apply";
+    case PAGE_PANEL_CONFIRM:if(confirmation==ConfirmAction::Sum)return r==0?"Left":r==1?"Right":r==2?"Cancel":"Save";if(confirmation==ConfirmAction::LinkBand)return r==0?"From":r==1?"Replace":r==2?"Cancel":"Copy Band";return r==0?"Current":r==1?"Proposed":r==2?"No - Cancel":"Yes - Apply";
     case PAGE_PANEL_NAME:return r==0?"Name":r==1?"Position":r==2?"Save Name":"Cancel";
     case PAGE_PANEL_NUMBER:return r==0?"Value":r==1?"Digit":r==2?"Apply":"Cancel";
     case PAGE_COPY_DESTINATION:return outputLabel(r);
@@ -400,6 +410,7 @@ static String fieldValueText(const Field &f,float value){
   if(f.get==0x89)return value?"Slave":"Master";if(f.get==0x99)return value?"With Preset":"Independent";
   if(f.max==1&&f.min==0&&f.kind==ValueKind::Byte)return value?"On":"Off";
   if(f.get==0x6e||f.get==0xce)return String("State ")+String(int(value));
+  if(f.kind==ValueKind::Float&&strcmp(f.unit,"dB")==0)return gainText(value);
   return String(value,f.step<1?1:0);
 }
 }
@@ -408,26 +419,26 @@ String panelMenuValue(MenuPage p,uint8_t r){using namespace PanelRuntime;
     if(confirmation==ConfirmAction::CopyParameters)return String("Out ")+String((r?copyJob.target:copyJob.source)+1);
     if(confirmation==ConfirmAction::LinkBand)return String(model.eqOutput?"Out ":"In ")+String(int((r?linkedTarget:linkedSource)-(model.eqOutput?model.map.inputs:0))+1);
     if(confirmation==ConfirmAction::Hardware)return fieldValueText(field(editPage,editRow),r?localValue:originalValue);
-    if(confirmation==ConfirmAction::Sum)return r?"Replace all":"Keep custom";
+    if(confirmation==ConfirmAction::Sum)return gainText(sumGains[r]);
     if(confirmation==ConfirmAction::Restore)return r?"Saved fields only":"Live adjustments";
     return r?String(presetSlot+1)+" "+String(presetNameDraft):String("P")+String(dspi.activePreset+1);}
   if(p==PAGE_PANEL_NAME)return r==0?panelNameWindow():r==1?String(name.cursor+1):r==2?"Explicit":"";
   if(p==PAGE_PANEL_NUMBER){char text[16];number.format(text,sizeof(text));return r==0?String(text):r==1?String(float(number.step())/number.scale,number.place<number.decimals?number.decimals-number.place:0):r==2?"Confirm":"";}
   if(p==PAGE_COPY_DESTINATION)return r==copyJob.source?"Source":"Choose";
   if(p==PAGE_COPY_PREVIEW)return r<2?String("Out ")+String((r?copyJob.target:copyJob.source)+1):r==2||r==3?"Replace":r==4?"Copy":"Confirm";
-  if(editActive&&p==editPage&&r==editRow){if(p==PAGE_XO_BAND)return xoValue(r,localValue);if(p==PAGE_EQ_BAND){auto f=bandField(r);if(f==PanelControls::BandField::Bypass)return localValue?"On":"Off";if(f==PanelControls::BandField::Type)return filterName(uint8_t(localValue));return String(localValue,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}if(p==PAGE_INPUT_NAME)return r==2?(localValue?"On":"Off"):String(int(localValue));if(p==PAGE_SPEAKERS)return String(localValue,1);return fieldValueText(field(p,r),localValue);}
+  if(editActive&&p==editPage&&r==editRow){if(p==PAGE_XO_BAND)return xoValue(r,localValue);if(p==PAGE_EQ_BAND){auto f=bandField(r);if(f==PanelControls::BandField::Bypass)return localValue?"On":"Off";if(f==PanelControls::BandField::Type)return filterName(uint8_t(localValue));if(f==PanelControls::BandField::GainDb)return gainText(localValue);return String(localValue,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}if(p==PAGE_INPUT_NAME)return r==2?(localValue?"On":"Off"):String(int(localValue));if(p==PAGE_SPEAKERS)return gainText(localValue);return fieldValueText(field(p,r),localValue);}
   if(p==PAGE_SPEAKERS){if(r>=4)return "Open";
-    if(!rolesMask(r))return "Unassigned";if(r==2){if(PanelControls::bitCount(model.roles.subs)==1){uint8_t out=__builtin_ctz(model.roles.subs);return (gainKnownMask&(1u<<out))?String(freshGains[out],1):String("Pending");}return subBaseline.valid?String(subTrim,1):String("Set");}if(r==3)return balanceBaseline.valid?String(balance,1):String("Set");
+    if(!rolesMask(r))return "Unassigned";if(r==2){if(PanelControls::bitCount(model.roles.subs)==1){uint8_t out=__builtin_ctz(model.roles.subs);return (gainKnownMask&(1u<<out))?gainText(freshGains[out]):String("Pending");}return subBaseline.valid?gainText(subTrim):String("Set");}if(r==3)return balanceBaseline.valid?gainText(balance):String("Set");
     uint16_t mask=rolesMask(r);unsigned muted=0,known=0;for(unsigned i=0;i<model.map.outputs;++i)if(mask&(1u<<i)){if(cells[i].known){++known;muted+=cells[i].value!=0;}}
     if(known!=PanelControls::bitCount(mask))return "Pending";return muted==0?"On":muted==known?"Off":"Mixed";}
   if(p==PAGE_SPEAKER_GROUPS){uint16_t mask=r==0?model.roles.left:r==1?model.roles.right:model.roles.subs;return mask?String(PanelControls::bitCount(mask)):String("Unassigned");}
   if(p==PAGE_SPEAKER_MEMBERS){uint16_t mask=model.group==0?model.roles.left:model.group==1?model.roles.right:model.roles.subs;return mask&(1u<<r)?"Assigned":"No";}
   if(p==PAGE_OUTPUTS&&r>=model.map.outputs)return r>=(model.map.outputs?model.map.outputs:1)?"Open":"Read-only";
   if(p==PAGE_OUTPUTS||p==PAGE_EQ_OUTPUTS)return cells[r].known?(cells[r].value?"On":"Off"):cells[r].attempted?"Unknown":"Pending";
-  if(p==PAGE_SUM)return r==0?"Preserve":r==3?"-6.02 each":"0 dB";
+  if(p==PAGE_SUM)return r>=2?String("Save"):!sumContext()?String("Reopen"):sumKnown&(1u<<r)?gainText(sumGains[r]):String(sumAttempted&(1u<<r)?"Unknown":"Pending");
   if(p==PAGE_SPEAKER_SETUP)return r?(savedContext()?"Confirm":"Unavailable"):"Open";
   if(p==PAGE_EQ_TARGET)return "Open";
-  if(p==PAGE_EQ_BAND){if(readField<6)return "Pending";for(auto &c:cells)if(c.attempted&&!c.known)return "Unknown";auto f=bandField(r);float v=bandValue(f);if(f==PanelControls::BandField::Type)return filterName(uint8_t(v));if(f==PanelControls::BandField::Bypass)return cells[0].value!=0&&v==0?"On":"Off";return String(v,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}
+  if(p==PAGE_EQ_BAND){if(readField<6)return "Pending";for(auto &c:cells)if(c.attempted&&!c.known)return "Unknown";auto f=bandField(r);float v=bandValue(f);if(f==PanelControls::BandField::Type)return filterName(uint8_t(v));if(f==PanelControls::BandField::Bypass)return cells[0].value!=0&&v==0?"On":"Off";if(f==PanelControls::BandField::GainDb)return gainText(v);return String(v,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}
   if(p==PAGE_XO_BAND){if(readField<6)return "Pending";if(!cells[0].known)return "Unknown";PanelControls::XoFamily family;uint8_t order;bool high;
     bool valid=PanelControls::decodeCrossover(cells[0].value,family,order,high);if(r==0)return xoValue(r,cells[0].value!=0&&cells[4].value==0);if(r==4)return xoValue(r,cells[1].value);if(!valid)return "Unset";return xoValue(r,r==1?float(high):r==2?float(uint8_t(family)):float(order));}
   if(p==PAGE_PRESET_TOOLS)return r==0||r==4?String(dspi.activePreset+1):String("Open");
@@ -442,6 +453,7 @@ String panelMenuValue(MenuPage p,uint8_t r){using namespace PanelRuntime;
 }
 const char *panelMenuUnit(MenuPage p,uint8_t r){using namespace PanelRuntime;
   if(p==PAGE_PANEL_NUMBER)return r==0?numberUnit:"";
+  if((p==PAGE_SUM&&r<2&&sumKnown&(1u<<r))||(p==PAGE_PANEL_CONFIRM&&confirmation==ConfirmAction::Sum&&r<2))return "dB";
   String shown=panelMenuValue(p,r);const char *t=shown.c_str();bool digit=false;
   for(unsigned i=0;t[i];++i){if(t[i]>='0'&&t[i]<='9')digit=true;else if(t[i]!='.'&&t[i]!='-'&&t[i]!='+')return "";}if(!digit)return "";
   if(p==PAGE_SPEAKERS&&(r==2||r==3))return "dB";if(p==PAGE_EQ_BAND){auto f=bandField(r);return f==PanelControls::BandField::GainDb?"dB":f==PanelControls::BandField::Frequency||f==PanelControls::BandField::TargetFrequency?"Hz":"";}
@@ -452,6 +464,7 @@ void panelEnterPage(MenuPage p){using namespace PanelRuntime;
   awaitingEdit=false;if(control.busy()&&!control.sent())control.cancel();cachePage=uint16_t(p);clearCells();statusText="";
   if(!panelOwnsPage(p))return;
   if(p==PAGE_EQ_TARGET)model.link=false;
+  if(p==PAGE_SUM){if(sourcePair*2+1>=model.visibleInputs())sourcePair=0;sumOutput=model.output;sumPair=sourcePair;sumGeneration=generation;sumKnown=sumAttempted=0;}
   if(p==PAGE_SPEAKERS){gainKnownMask=gainAttemptedMask=0;}
   if(p==PAGE_PRESET_DESTINATION)directoryKnown=false;
   if(p==PAGE_PANEL_CONFIRM||p==PAGE_PANEL_NAME)return;
@@ -469,7 +482,7 @@ static bool beginFieldEdit(){
   if(!f.set||f.readonly){showToast(f.get==0xc1?"Format clocks need Console preflight":f.hardware?"Console-owned / read-only":"Unavailable");return false;}
   if(!cells[menuIndex].known){showToast("Wait for confirmed read");return false;}
   if(!(f.pin&&cells[menuIndex].value==255)&&(cells[menuIndex].value<f.min||cells[menuIndex].value>f.max)){showToast("Outside panel range - Console");return false;}
-  if(f.kind==ValueKind::Float)return openDecimal(cells[menuIndex].value,f.min,f.max,1,f.unit);
+  if(f.kind==ValueKind::Float)return openDecimal(cells[menuIndex].value,f.min,f.max,strcmp(f.unit,"dB")==0?2:1,f.unit);
   beginLocal(cells[menuIndex].value);return true;
 }
 static bool startFieldWrite(MenuPage p,uint8_t row,float desired){
@@ -562,9 +575,9 @@ bool panelSelect(){using namespace PanelRuntime;
       if(r==4){enterPage(PAGE_ROUTING);return true;}
       if(r==3){model.eqOutput=true;model.target=model.output;model.link=false;model.eqParent=Page::Output;enterPage(PAGE_EQ_TARGET);return true;}
       beginFieldEdit();break;
-    case PAGE_ROUTING:if(r>=model.visibleInputs())enterPage(PAGE_SUM);else{model.input=r;enterPage(PAGE_ROUTE);}return true;
-    case PAGE_SUM:if(r==0){showToast("Custom routes retained");break;}if(!model.map.writable||model.visibleInputs()<2){showToast("Read-only firmware");break;}sumMode=r;if(model.visibleInputs()>2)enterPage(PAGE_SOURCE_PAIR);else{sourcePair=0;startConfirmation(ConfirmAction::Sum);}return true;
-    case PAGE_SOURCE_PAIR:sourcePair=r;startConfirmation(ConfirmAction::Sum);return true;
+    case PAGE_ROUTING:if(r>=model.visibleInputs()){sourcePair=0;enterPage(model.visibleInputs()>2?PAGE_SOURCE_PAIR:PAGE_SUM);}else{model.input=r;enterPage(PAGE_ROUTE);}return true;
+    case PAGE_SUM:if(!sumReady()){showToast("Wait for current routes / reopen");break;}if(r<2){openDecimal(sumGains[r],-60,0,2,"dB");return true;}startConfirmation(ConfirmAction::Sum);return true;
+    case PAGE_SOURCE_PAIR:sourcePair=r;enterPage(PAGE_SUM);return true;
     case PAGE_EQUALISER:enterPage(r?PAGE_EQ_OUTPUTS:PAGE_EQ_INPUTS);return true;
     case PAGE_EQ_INPUTS:case PAGE_EQ_OUTPUTS:if(!model.map.writable){showToast("Read-only firmware");break;}model.eqOutput=menuPage==PAGE_EQ_OUTPUTS;model.target=r;model.link=false;model.eqParent=page(menuPage);enterPage(PAGE_EQ_TARGET);return true;
     case PAGE_EQ_TARGET:enterPage(r==0?PAGE_EQ_BANDS:PAGE_CROSSOVER);return true;
@@ -608,7 +621,7 @@ bool panelSelect(){using namespace PanelRuntime;
       nameJobTarget=model.map.inputs+model.output;strncpy(nameJobValue,name.text,32);nameReturnAllowed=true;nameStage=1;showToast("Pending name read/write");break;
     case PAGE_PANEL_CONFIRM:
       if(r<2)break;
-      if(r==2){if(confirmation==ConfirmAction::LinkBand){linkStage=0;linkedTarget=255;}enterPage(returnPage);menuIndex=returnRow;confirmation=ConfirmAction::None;drawMenu();return true;}
+      if(r==2){if(confirmation==ConfirmAction::LinkBand){linkStage=0;linkedTarget=255;}if(confirmation==ConfirmAction::Sum){menuPage=returnPage;uiView=VIEW_MENU;editActive=false;}else enterPage(returnPage);menuIndex=returnRow;confirmation=ConfirmAction::None;drawMenu();return true;}
       if(confirmation==ConfirmAction::CopyParameters){
         if(copyJob.generation!=generation||!model.map.writable||!serialKnown||copyJob.target>=model.map.outputs||copyJob.source>=model.map.outputs||copyJob.source==copyJob.target){showToast("Changed - reopen copy");break;}
         copyJob.stage=1;copyJob.read=copyJob.write=0;operationCancelled=false;hardwareAction=false;confirmedTargets=0;enterPage(PAGE_OUTPUT);menuIndex=7;showToast("Reading source parameters");return true;
@@ -616,7 +629,7 @@ bool panelSelect(){using namespace PanelRuntime;
       if(confirmation==ConfirmAction::LinkBand){if(linkStage!=2||linkGeneration!=generation){linkStage=0;linkedTarget=255;showToast("Changed - edit again");break;}linkedCopy=true;enterPage(returnPage);menuIndex=returnRow;if(!launchLinkedSource()){linkedTarget=255;showToast("Copy rejected");}return true;}
       if(confirmation==ConfirmAction::Hardware){if(!guardedStop()){showToast("Music stop failed");break;}if(editGeneration!=generation){showToast("Changed - edit again");break;}hardwareGuard=1;hardwareGeneration=generation;hardwareAction=true;hardwareLeaveMuted=hardwareCancel=false;hardwareReadbacks=0;enterPage(editPage);menuIndex=editRow;showToast("Guarding hardware change");break;}
       if(confirmation==ConfirmAction::Restore){if(!savedContext()){showToast("Saved fields unavailable");break;}memcpy(plannedGains,savedGains,sizeof(plannedGains));startRoleRead(6,savedMask);enterPage(PAGE_SPEAKERS);break;}
-      if(confirmation==ConfirmAction::Sum){sumStage=1;groupAt=0;confirmedTargets=0;enterPage(PAGE_ROUTING);showToast("Replacing selected output routes");break;}
+      if(confirmation==ConfirmAction::Sum){if(!sumReady()){showToast("Routes changed - reopen Sum");break;}for(float v:sumGains)if(!PanelControls::finite(v)||v<-60||v>0){showToast("Gain outside panel range");return true;}sumStage=1;groupAt=0;confirmedTargets=0;operationCancelled=false;enterPage(PAGE_ROUTING);showToast("Replacing selected output routes");break;}
       if(!guardedStop()){showToast("Music stop failed");break;}
       if(confirmation==ConfirmAction::Revert){MenuPage target=PAGE_PRESET_TOOLS;if(dspi.activePreset<10)roleDrafts[dspi.activePreset].dirty=false;
         if(loadPreset(dspi.activePreset,false)){panelPresetLoaded(dspi.activePreset);enterPage(target);showToast("Reverted");}else showToast("Load unresolved");break;}
@@ -654,6 +667,7 @@ void panelApply(){using namespace PanelRuntime;
   if(menuPage==PAGE_PANEL_NAME){editActive=false;return;}
   if(editGeneration!=generation){editActive=false;showToast("Changed - read and edit again");return;}
   editActive=false;
+  if(menuPage==PAGE_SUM){if(!sumReady()||menuIndex>=2){showToast("Routes changed - reopen Sum");return;}sumGains[menuIndex]=localValue;showToast("Draft - choose Mono L+R Save");return;}
   if(menuPage==PAGE_INPUT_NAME){if(!serialKnown){showToast("Unknown identity");return;}bool ok=menuIndex==2?inputMenu.setVisible(model.source,localValue!=0,availableSourceMask()):inputMenu.moveTo(model.source,uint8_t(localValue),availableSourceMask());if(!ok){showToast("Keep one available input visible");return;}inputMenuDirty=true;markDeferredPreference(PREF_DIRTY_PANEL_CONTROLS);showToast("Applied - pending storage");return;}
   if(menuPage==PAGE_SPEAKERS){startRoleRead(menuIndex==2?4:5,rolesMask(menuIndex));return;}
   if(menuPage==PAGE_EQ_BAND||menuPage==PAGE_XO_BAND){if(!startBandWrite(localValue))showToast("Invalid native field");return;}
@@ -702,6 +716,7 @@ bool panelPersistLocal(){using namespace PanelRuntime;if(!serialKnown)return fal
 }
 void panelInvalidate(){using namespace PanelRuntime;if(wireActive){pendingInvalidation=true;return;}
   clearEqEchoes();
+  sumKnown=0;
   ++generation;control.invalidate();gainBaseline.valid=subBaseline.valid=balanceBaseline.valid=false;gainKnownMask=0;savedKnown=false;savedEligible=false;directoryKnown=false;activeInputStep=0;memset(namesKnown,0,sizeof(namesKnown));clearCells();
   if(groupJob||sumStage||copyJob.stage||hardwareGuard||presetStage||nameStage||control.busy())operationCancelled=true;
   copyJob.stage=0;
@@ -729,7 +744,7 @@ bool panelBack(){using namespace PanelRuntime;if(!panelOwnsPage(menuPage))return
   if(menuPage==PAGE_PANEL_NUMBER){panelCancel();closeNumber();drawMenu();return true;}
   if(editActive){panelCancel();drawMenu();return true;}
   if(menuPage==PAGE_PANEL_NAME){panelCancel();enterPage(native(model.nameParent));return true;}
-  if(menuPage==PAGE_PANEL_CONFIRM){panelCancel();if(!presetStage)confirmation=ConfirmAction::None;enterPage(returnPage);menuIndex=returnRow;drawMenu();return true;}
+  if(menuPage==PAGE_PANEL_CONFIRM){const bool sum=confirmation==ConfirmAction::Sum;panelCancel();if(!presetStage)confirmation=ConfirmAction::None;if(sum){menuPage=returnPage;uiView=VIEW_MENU;}else enterPage(returnPage);menuIndex=returnRow;drawMenu();return true;}
   const bool resolving=control.busy()&&control.sent();panelCancel();if(resolving)showToast("Resolving sent change");
   enterPage(native(model.parent(page(menuPage))));return true;
 }
@@ -802,7 +817,7 @@ static bool groupService(){
       if(job==2)subBaseline=gainBaseline;else balanceBaseline=gainBaseline;
       groupJob=0;menuPage=PAGE_SPEAKERS;menuIndex=job==2?2:3;
       float value=job==2?(PanelControls::bitCount(groupMask)==1?freshGains[nextMember(0)]:subTrim):balance;
-      openDecimal(value,job==2&&PanelControls::bitCount(groupMask)==1?-60:-24,job==2&&PanelControls::bitCount(groupMask)==1?0:24,1,"dB");return true;
+      openDecimal(value,job==2&&PanelControls::bitCount(groupMask)==1?-60:-24,job==2&&PanelControls::bitCount(groupMask)==1?0:24,2,"dB");return true;
     }
     if(job==4||job==5){gainBaseline=job==4?subBaseline:balanceBaseline;PanelControls::Result result=job==4?
         PanelControls::planSubGain(gainBaseline,freshGains,model.map.outputs,generation,localValue,plannedGains):
@@ -830,8 +845,19 @@ static bool groupService(){
     if(groupJob==7)roleCaptureMute=true;else ++groupAt;}
   return true;
 }
+static bool sumDraftService(){
+  if(!sumContext()||sumAttempted==3)return false;
+  const uint8_t row=(sumAttempted&1)?1:0,input=sumPair*2+row;
+  Reply r=query(0x71,(uint16_t(input)<<8)|sumOutput,8);
+  if(!sumContext())return true;sumAttempted|=1u<<row;
+  if(validReply(r,8)&&r.bytes[0]==input&&r.bytes[1]==sumOutput&&r.bytes[2]<=1&&r.bytes[3]<=1){
+    float gain=PanelControlMenus::wireFloat(r.bytes+4);
+    if(PanelControls::finite(gain)){sumOriginal[row]={input,sumOutput,r.bytes[2]!=0,r.bytes[3]!=0,gain};sumGains[row]=gain;sumKnown|=1u<<row;}}
+  return true;
+}
 static bool sumService(){
   if(!sumStage)return false;
+  if(!sumReady()){sumStage=0;showToast("Routes changed - Sum stopped");return true;}
   if(groupAt>=model.map.inputs){
     groupAt=0;
     if(sumStage==1){sumStage=2;return true;}
@@ -840,17 +866,19 @@ static bool sumService(){
     if(sumStage==5){sumStage=0;showToast("Routing replaced");clearCells();return true;}
   }
   if(sumStage==1){Reply r=query(0x71,(uint16_t(groupAt)<<8)|model.output,8);
-    if(!validReply(r,8)||r.bytes[0]!=groupAt||r.bytes[1]!=model.output){sumStage=0;showToast("Unknown route - unchanged");return true;}
-    sumRoutes[groupAt]={r.bytes[0],r.bytes[1],r.bytes[2]!=0,r.bytes[3]!=0,PanelControlMenus::wireFloat(r.bytes+4)};++groupAt;return true;}
+    if(!validReply(r,8)||r.bytes[0]!=groupAt||r.bytes[1]!=sumOutput||r.bytes[2]>1||r.bytes[3]>1||!PanelControls::finite(PanelControlMenus::wireFloat(r.bytes+4))){sumStage=0;showToast("Unknown route - unchanged");return true;}
+    sumRoutes[groupAt]={r.bytes[0],r.bytes[1],r.bytes[2]!=0,r.bytes[3]!=0,PanelControlMenus::wireFloat(r.bytes+4)};
+    if(groupAt==sumPair*2||groupAt==sumPair*2+1){const auto &old=sumOriginal[groupAt-sumPair*2];const auto &fresh=sumRoutes[groupAt];if(old.enabled!=fresh.enabled||old.invert!=fresh.invert||old.gainDb!=fresh.gainDb){sumStage=0;showToast("Route changed - reopen Sum");return true;}}
+    ++groupAt;return true;}
   if(sumStage==2){sumStage=3;groupAt=0;return true;}
   // Each route is read again by Controller immediately before this field
   // update. Disable first, set gains while silent, then enable selected routes.
-  // No intermediate state can enable two old-unattenuated mono routes.
-  const uint8_t left=sourcePair*2,right=left+1;
-  bool selected=sumMode==1?groupAt==left:sumMode==2?groupAt==right:groupAt==left||groupAt==right;
+  // Both user-selected gains are verified before either route is enabled.
+  const uint8_t left=sumPair*2,right=left+1;
+  bool selected=groupAt==left||groupAt==right;
   if((sumStage==4||sumStage==5)&&!selected){++groupAt;return true;}
   if(!control.startRoute(groupAt,model.output,sumStage==4?PanelControls::RouteField::Gain:PanelControls::RouteField::Enabled,
-      sumStage==4?(sumMode==3?-6.0206f:0):(sumStage==5?1:0))){sumStage=0;showToast("Route unavailable");}
+      sumStage==4?sumGains[groupAt-left]:(sumStage==5?1:0))){sumStage=0;showToast("Route unavailable");}
   return true;
 }
 static bool hardwareService(){
@@ -987,6 +1015,7 @@ void servicePanelControls(){using namespace PanelRuntime;
   if(!activeInputStep&&model.map.writable){Reply r=query(0x50,23,4);activeInputStep=1;if(validReply(r,4)){uint32_t n;memcpy(&n,r.bytes,4);if(n>0&&n<=model.map.inputs)model.activeInputs=n;}drawMenu();return;}
   if(menuPage>=PAGE_HARDWARE&&!uartAttempted){uartAttempted=true;Reply r=query(0xf6,0,8);uartKnown=validReply(r,8)&&r.bytes[0]==1;if(uartKnown){uartTx=r.bytes[1];uartRx=r.bytes[2];}drawMenu();return;}
   if(!model.map.writable)return;
+  if(menuPage==PAGE_SUM){if(sumDraftService())drawMenu();return;}
   if(menuPage==PAGE_EQ_BAND||menuPage==PAGE_XO_BAND){if(bandService())drawMenu();return;}
   if(menuPage==PAGE_PRESET_DESTINATION&&!directoryKnown){directoryRead();drawMenu();return;}
   const uint8_t first=(menuIndex/4)*4,count=panelMenuCount(menuPage),end=std::min<uint8_t>(first+4,count);
