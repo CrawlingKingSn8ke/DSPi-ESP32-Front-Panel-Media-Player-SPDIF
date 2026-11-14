@@ -1,0 +1,281 @@
+/* -*-  mode:c; tab-width:8; c-basic-offset:8; indent-tabs-mode:nil;  -*- */
+/*
+   Copyright (C) 2019 by Ronnie Sahlberg <ronniesahlberg@gmail.com>
+
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU Lesser General Public License as published by
+   the Free Software Foundation; either version 2.1 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Lesser General Public License for more details.
+
+   You should have received a copy of the GNU Lesser General Public License
+   along with this program; if not, see <http://www.gnu.org/licenses/>.
+*/
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
+#ifdef HAVE_STDINT_H
+#include <stdint.h>
+#endif
+
+#ifdef HAVE_STDLIB_H
+#include <stdlib.h>
+#endif
+
+#ifdef HAVE_STRING_H
+#include <string.h>
+#endif
+
+#ifdef HAVE_SYS_UIO_H
+#include <sys/uio.h>
+#endif
+
+#ifdef HAVE_SYS__IOVEC_H
+#include <sys/_iovec.h>
+#endif
+
+#ifdef HAVE_TIME_H
+#include <time.h>
+#endif
+
+#ifdef HAVE_SYS_TIME_H
+#include <sys/time.h>
+#endif
+
+#include <stdio.h>
+
+#include "compat.h"
+
+#include "portable-endian.h"
+
+#include "aes128ccm.h"
+#include "slist.h"
+#include "smb2.h"
+#include "libsmb2.h"
+#include "libsmb2-raw.h"
+#include "libsmb2-private.h"
+#include "smb3-seal.h"
+
+static const char xfer[4] = {0xFD, 'S', 'M', 'B'};
+
+#ifdef HAVE_OPENSSL
+#include <limits.h>
+#include <openssl/evp.h>
+
+static int smb3_aesgcm(int enc, uint16_t cypher, uint8_t *key, uint8_t nonce[12], uint8_t aad[32],
+                       uint8_t *p, size_t plen, uint8_t tag[16])
+{
+        EVP_CIPHER_CTX *ctx;
+        int outl, rc = -1;
+
+        if (plen > INT_MAX) {
+                return -1;
+        }
+        ctx = EVP_CIPHER_CTX_new();
+        if (ctx == NULL) {
+                return -1;
+        }
+        if (EVP_CipherInit_ex(ctx, cypher == SMB2_ENCRYPTION_AES_256_GCM ? EVP_aes_256_gcm() : EVP_aes_128_gcm(),
+                              NULL, key, nonce, enc) != 1 ||
+            EVP_CipherUpdate(ctx, NULL, &outl, aad, 32) != 1 ||
+            EVP_CipherUpdate(ctx, p, &outl, p, (int)plen) != 1 ||
+            (!enc && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_TAG, 16, tag) != 1) ||
+            EVP_CipherFinal_ex(ctx, p + outl, &outl) != 1 ||
+            (enc && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_GET_TAG, 16, tag) != 1)) {
+                goto out;
+        }
+        rc = 0;
+ out:
+        EVP_CIPHER_CTX_free(ctx);
+        return rc;
+}
+
+#define SMB3_GCM(smb2) ((smb2)->cypher == SMB2_ENCRYPTION_AES_128_GCM || \
+                        (smb2)->cypher == SMB2_ENCRYPTION_AES_256_GCM)
+#else
+#define SMB3_GCM(smb2) 0
+#endif
+
+/* serverin_key protects what the client sends, serverout_key what the
+ * server sends. */
+#define SEAL_KEY(smb2) (smb2_is_server(smb2) ? \
+                        (smb2)->serverout_key : (smb2)->serverin_key)
+#define UNSEAL_KEY(smb2) (smb2_is_server(smb2) ? \
+                          (smb2)->serverin_key : (smb2)->serverout_key)
+
+int
+smb3_encrypt_pdu(struct smb2_context *smb2,
+                 struct smb2_pdu *pdu)
+{
+        struct smb2_pdu *tmp_pdu;
+        uint32_t spl, u32;
+        int i, rc;
+        uint16_t u16;
+
+        if (!smb2->seal) {
+                return 0;
+        }
+        if (!pdu->seal) {
+                return 0;
+        }
+        if (!smb2->enc_keys_ready) {
+                smb2_set_error(smb2, "PDU must be sealed but there are no "
+                               "encryption keys");
+                return -1;
+        }
+
+        spl = 52;  /* transform header */
+        for (tmp_pdu = pdu; tmp_pdu; tmp_pdu = tmp_pdu->next_compound) {
+                for (i = 0; i < tmp_pdu->out.niov; i++) {
+                        spl += (uint32_t)tmp_pdu->out.iov[i].len;
+                }
+        }
+        pdu->crypt = calloc(spl, sizeof(uint8_t));
+        if (pdu->crypt == NULL) {
+                smb2_set_error(smb2, "Failed to allocate the sealed PDU");
+                return -1;
+        }
+
+        memcpy(&pdu->crypt[0], xfer, 4);
+        /*
+         * The 11 byte AES-CCM or 12 byte AES-GCM nonce. Neither provides
+         * confidentiality or integrity once a nonce repeats under the same
+         * key, so this has to come from the strong source and not from
+         * random().
+         */
+        smb2_random_bytes(&pdu->crypt[20], SMB3_GCM(smb2) ? 12 : 11);
+        u32 = htole32(spl - 52);
+        memcpy(&pdu->crypt[36], &u32, 4);
+        u16 = htole16(SMB_ENCRYPTION_AES128_CCM);
+        memcpy(&pdu->crypt[42], &u16, 2);
+        {
+                /* crypt[44] is not 8-byte aligned: store the little-endian
+                 * SessionId bytewise (same wire bytes as before). */
+                uint64_t session_id_le = htole64(smb2->session_id);
+                memcpy(&pdu->crypt[44], &session_id_le, 8);
+        }
+
+        spl = 52;  /* transform header */
+        for (tmp_pdu = pdu; tmp_pdu; tmp_pdu = tmp_pdu->next_compound) {
+                for (i = 0; i < tmp_pdu->out.niov; i++) {
+                        memcpy(&pdu->crypt[spl], tmp_pdu->out.iov[i].buf,
+                               tmp_pdu->out.iov[i].len);
+                        spl += (uint32_t)tmp_pdu->out.iov[i].len;
+                }
+        }
+
+#ifdef HAVE_OPENSSL
+        if (SMB3_GCM(smb2)) {
+                rc = smb3_aesgcm(1, smb2->cypher, SEAL_KEY(smb2), &pdu->crypt[20],
+                                 &pdu->crypt[20], &pdu->crypt[52], spl - 52, &pdu->crypt[4]);
+        } else
+#endif
+        rc = aes128ccm_encrypt(SEAL_KEY(smb2),
+                               &pdu->crypt[20], 11,
+                               &pdu->crypt[20], 32,
+                               &pdu->crypt[52], spl - 52,
+                               &pdu->crypt[4], 16);
+        if (rc) {
+                smb2_set_error(smb2, "Failed to encrypt PDU");
+                free(pdu->crypt);
+                pdu->crypt = NULL;
+                return -1;
+        }
+        pdu->crypt_len = spl;
+
+        return 0;
+}
+
+static int
+smb3_do_decrypt_pdu(struct smb2_context *smb2)
+{
+        uint8_t *hdr = smb2->in.iov[smb2->in.niov - 2].buf;
+        struct smb2_iovec *data = &smb2->in.iov[smb2->in.niov - 1];
+        int rc;
+
+#ifdef HAVE_OPENSSL
+        if (SMB3_GCM(smb2)) {
+                rc = smb3_aesgcm(0, smb2->cypher, UNSEAL_KEY(smb2), &hdr[20], &hdr[20],
+                                 data->buf, data->len, &hdr[4]);
+        } else
+#endif
+        rc = aes128ccm_decrypt(UNSEAL_KEY(smb2), &hdr[20], 11, &hdr[20], 32,
+                               data->buf, data->len, &hdr[4], 16);
+        if (rc) {
+                smb2_set_error(smb2, "Failed to decrypt PDU");
+                return -1;
+        }
+
+        if (smb2->in.num_done == 0) {
+                smb2->enc = smb2->in.iov[smb2->in.niov - 1].buf;
+                smb2->enc_len = smb2->in.iov[smb2->in.niov - 1].len;
+                smb2->enc_pos = 0;
+                smb2->in.iov[smb2->in.niov - 1].free = NULL;
+                smb2_free_iovector(smb2, &smb2->in);
+
+                /*
+                 * The decrypted blob is fed back through the same receive
+                 * state machine with enc_len standing in for the SPL, so it
+                 * needs the same sanity check the on-the-wire SPL gets.
+                 */
+                if (smb2->enc_len < SMB2_HEADER_SIZE ||
+                    smb2->enc_len > smb2_recv_pdu_cap(smb2)) {
+                        smb2_set_error(smb2, "Invalid decrypted PDU length %zu",
+                                       smb2->enc_len);
+                        free(smb2->enc);
+                        smb2->enc = NULL;
+                        return -1;
+                }
+
+                smb2->spl = (uint32_t)smb2->enc_len;
+                smb2->recv_state = SMB2_RECV_HEADER;
+                if (smb2_add_iovector(smb2, &smb2->in, &smb2->header[0],
+                                       SMB2_HEADER_SIZE, NULL) == NULL) {
+                        smb2_set_error(smb2, "Failed to add iovector for decrypted header");
+                        free(smb2->enc);
+                        smb2->enc = NULL;
+                        return -1;
+                }
+        }
+
+        rc = smb2_read_from_buf(smb2);
+        free(smb2->enc);
+        smb2->enc = NULL;
+
+        return rc;
+}
+
+int
+smb3_decrypt_pdu(struct smb2_context *smb2)
+{
+        int rc;
+
+        /*
+         * The decrypted payload is fed back through the same receive state
+         * machine, whose SMB2_RECV_HEADER case tests for the transform
+         * magic and calls us again on a match. SMB3 never nests transform
+         * headers, so a payload that contains one is a peer trying to
+         * recurse us off the end of the stack - and each level also
+         * overwrites smb2->enc, leaking the outer buffer and corrupting the
+         * outer read state. Refuse to go more than one deep.
+         */
+        if (smb2->enc_depth > 0) {
+                smb2_set_error(smb2, "Nested SMB3 transform header");
+                return -1;
+        }
+
+        smb2->enc_depth++;
+        rc = smb3_do_decrypt_pdu(smb2);
+        smb2->enc_depth--;
+
+        return rc;
+}

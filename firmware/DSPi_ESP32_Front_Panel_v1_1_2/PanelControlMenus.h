@@ -45,7 +45,7 @@ struct Model {
       case Page::EqTarget:return eqOutput?2:1;case Page::Bands:return 10;case Page::Band:return 5;
       case Page::Crossover:return 4;case Page::XoBand:return 5;case Page::PresetTools:return 5;
       case Page::PresetDestination:return 10;case Page::PresetPreview:return 7;case Page::StartingPoint:return 2;
-      case Page::InputNames:return 8;case Page::InputName:return 5;case Page::Hardware:return 8;
+      case Page::InputNames:return 8;case Page::InputName:return 4;case Page::Hardware:return 8;
       case Page::HardwareOutputs:return map.stereoPairs?map.stereoPairs:1;case Page::HardwarePair:return 2;
       case Page::Pdm:return 1;case Page::SpdifInputs:return 4;case Page::SpdifInput:return 2;
       case Page::I2sInput:return 2;case Page::I2sData:return map.inputs>=2?map.inputs/2:1;
@@ -101,7 +101,7 @@ struct NameEditor {
     if(!PanelControls::validStoredName(text,n))return false;active=false;return true;}
   void cancel(){active=false;}
 };
-enum class WireStatus:uint8_t {Ok,Rejected,Unknown};
+enum class WireStatus:uint8_t {Ok,Rejected,Unknown,Busy};
 struct Frame { bool get=true;uint8_t request=0;uint16_t value=0,length=0;uint8_t bytes[32]{};bool action=false; };
 struct Reply {WireStatus status=WireStatus::Unknown;uint8_t size=0,bytes[64]{};};
 typedef Reply(*Wire)(void *,const Frame &);
@@ -157,8 +157,9 @@ class Controller {
       if(phase!=Write&&readBytes)f.length=readBytes;
       if(phase==Write){if(operation==Action){f.get=true;f.action=true;f.length=1;}else{f.get=false;if(kind==ValueKind::Float)PanelControls::putFloatLE(f.bytes,desiredValue);else{uint32_t integer=static_cast<uint32_t>(desiredValue);for(unsigned i=0;i<f.length;++i)f.bytes[i]=integer>>(8*i);}}}}
     const bool mutation=phase==Write;
-    if(mutation)didWrite=true; // attempted can mean applied even when ACK is lost
     Reply r=wire(context,f);
+    if(r.status==WireStatus::Busy)return; // Not admitted: no attempt or phase change.
+    if(mutation)didWrite=true; // attempted can mean applied even when ACK is lost
     if(r.status!=WireStatus::Ok){
       if(mutation&&r.status==WireStatus::Unknown){completion=PanelControls::Completion::Unknown;phase=Verify;field=0;return;}
       finish(r.status==WireStatus::Unknown?PanelControls::Completion::Unknown:PanelControls::Completion::Failed);return;}

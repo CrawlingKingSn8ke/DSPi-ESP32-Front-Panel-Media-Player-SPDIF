@@ -3,6 +3,7 @@
 #include "PanelControlMenus.h"
 #include "PanelNumberEditor.h"
 #include "PanelInputMenu.h"
+#include "SourceNames.h"
 // Sketch integration declarations; all definitions are late in the .inc, after
 // the existing transport, list renderer and guarded preset/media machinery.
 bool panelOwnsPage(MenuPage page);
@@ -37,5 +38,6 @@ bool panelEditUnderline(MenuPage page,uint8_t row);
 int16_t panelNumberCursorOffset();
 int16_t panelNumberCursorWidth();
 String panelSourceLabel(uint8_t source,const String &fallback,bool shortName);
+bool panelConsumeSourceNameChange();
 uint8_t panelNextInput(uint8_t source,int direction);
 #endif

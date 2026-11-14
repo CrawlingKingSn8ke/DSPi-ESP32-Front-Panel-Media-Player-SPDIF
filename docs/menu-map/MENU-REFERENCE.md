@@ -1,6 +1,15 @@
 # DSPi ESP32 Front Panel — Menu reference
 
-Release: **v1.4.0**.
+Release: **v1.5.0**. The sections below retain the original Outputs/EQ reference; the following additions describe the current entry points.
+
+- Music → SD Card / Network / Playback / Now Playing / Stop Network, as available.
+- Music → Network → saved SMB shares → folders → tracks. Share setup opens the local browser page.
+- System → WiFi → Network / DSPi Link / Transfer/Update / Signal (when connected).
+- System → WiFi → Network → Configure: Wi-Fi QR, then setup-page QR.
+- System → WiFi → DSPi Link → Link / Pair Console / Connection / Security.
+- System → Screen Settings → Theme / Volume display: User Volume or Master Volume.
+- System → Input Names: DSPi-backed names where supported, with panel-only visibility/order.
+- Preset → Preset Tools → Back.
 Available controls depend on the connected DSPi firmware and configuration.
 
 

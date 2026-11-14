@@ -7,6 +7,12 @@
 #include <ESPmDNS.h>
 #include <Update.h>
 #include <esp_app_format.h>
+#include <esp_app_desc.h>
+#include "DspiLinkOta.h"
+#include "PanelWifi.h"
+#include "AudioDiagnostics.h"
+#include "CrashDiagnostics.h"
+#include "CoexistenceDiagnostics.h"
 #include <esp_chip_info.h>
 #include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
@@ -981,6 +987,9 @@ bool WifiTransferModeController::startSoftApAndServer() {
     return false;
   }
 
+  if(!PanelWifi::acquire(PanelWifi::Owner::Transfer)){
+    setError("Close the active network mode first");return false;
+  }
   const uint64_t deviceId = ESP.getEfuseMac();
   char localSsid[sizeof(ssid_)] = {0};
   snprintf(localSsid, sizeof(localSsid), "DSPi-Transfer-%04" PRIX32,
@@ -1078,6 +1087,8 @@ void WifiTransferModeController::configureRoutes() {
              [this, wrapped]() { wrapped(&WifiTransferModeController::handleIndex); });
   server->on(WifiTransferWeb::kRouteStatus, HTTP_GET,
              [this, wrapped]() { wrapped(&WifiTransferModeController::handleStatus); });
+  server->on("/api/audio-diagnostics", HTTP_GET,
+             [this, wrapped]() { wrapped(&WifiTransferModeController::handleAudioDiagnostics); });
   server->on(WifiTransferWeb::kRouteNetwork, HTTP_GET,
              [this, wrapped]() {
                wrapped(&WifiTransferModeController::handleNetworkStatus);
@@ -1309,7 +1320,7 @@ bool WifiTransferModeController::stopHttpAndWifi() {
       // released but before any network-stop completion telemetry.  Avoid the
       // former disconnect(STA) + softAPdisconnect() + mode(NULL) teardown
       // chain, which asks the same core to dismantle the interfaces repeatedly.
-      if (!WiFi.mode(WIFI_MODE_NULL)) {
+      if (!PanelWifi::release(PanelWifi::Owner::Transfer)) {
         setMessage("Waiting for Wi-Fi shutdown");
         return false;
       }
@@ -1490,6 +1501,55 @@ const char *WifiTransferModeController::stateText(
     case WifiTransferServiceState::Error: return "ERROR";
     default: return "UNKNOWN";
   }
+}
+
+void WifiTransferModeController::handleAudioDiagnostics() {
+  char report[4096],crash[1024];
+  if(!AudioDiagnostics::formatJson(report,sizeof report,int(esp_reset_reason()))||!CrashDiagnostics::formatJson(crash,sizeof crash)){server_->send(503,"text/plain","Audio report unavailable");return;}
+  const size_t length=strlen(report);
+  if(!length||report[length-1]!='}'){server_->send(503,"text/plain","Audio report unavailable");return;}
+  report[length-1]=0;
+  server_->sendHeader("Cache-Control","no-store");
+  server_->sendHeader("Content-Disposition","attachment; filename=audio-diagnostics.json");
+  auto* trace=CoexistenceDiagnostics::capture();
+  beginChunkedJson();server_->sendContent(report);server_->sendContent(",\"crash\":");server_->sendContent(crash);
+  server_->sendContent(",\"legacySummariesHaveBootIds\":false,\"bootTimeline\":\"coexistence\"");
+  server_->sendContent(",\"coexistence\":");
+  if(trace&&CoexistenceDiagnostics::formatHeader(report,sizeof report,*trace)){
+    server_->sendContent(report);server_->sendContent(",\"lastUnderrun\":");
+    if(trace->hasUnderrun&&CoexistenceDiagnostics::formatRow(report,sizeof report,trace->underrun))server_->sendContent(report);
+    else server_->sendContent("null");
+    server_->sendContent(",\"restoredAfterRestart\":");server_->sendContent(trace->restoredAfterRestart?"true":"false");
+    server_->sendContent(",\"beforeUnderrun\":[");
+    for(size_t i=0;i<trace->beforeCount;++i){
+      if(i)server_->sendContent(",");
+      if(CoexistenceDiagnostics::formatRow(report,sizeof report,trace->beforeUnderrun[i]))server_->sendContent(report);else server_->sendContent("null");
+    }
+    server_->sendContent("],\"history\":[");
+    for(size_t i=0;i<trace->count;++i){
+      if(i)server_->sendContent(",");
+      if(CoexistenceDiagnostics::formatRow(report,sizeof report,trace->rows[i]))server_->sendContent(report);
+      else server_->sendContent("null");
+    }
+    server_->sendContent("],\"retainedHistory\":[");
+    for(size_t i=0;i<trace->retainedCount;++i){
+      if(i)server_->sendContent(",");
+      if(CoexistenceDiagnostics::formatRow(report,sizeof report,trace->retainedHistory[i]))server_->sendContent(report);else server_->sendContent("null");
+    }
+    server_->sendContent("],\"wifiEvents\":[");
+    for(size_t i=0;i<trace->wifiCount;++i){
+      if(i)server_->sendContent(",");
+      if(CoexistenceDiagnostics::formatWifiEvent(report,sizeof report,trace->wifiEvents[i]))server_->sendContent(report);else server_->sendContent("null");
+    }
+    server_->sendContent("],\"retainedWifiEvents\":[");
+    for(size_t i=0;i<trace->retainedWifiCount;++i){
+      if(i)server_->sendContent(",");
+      if(CoexistenceDiagnostics::formatWifiEvent(report,sizeof report,trace->retainedWifiEvents[i]))server_->sendContent(report);else server_->sendContent("null");
+    }
+    server_->sendContent("]}");
+  }else server_->sendContent("{\"available\":false,\"error\":\"diagnostic snapshot unavailable\"}");
+  CoexistenceDiagnostics::release(trace);
+  server_->sendContent("}");endChunkedJson();
 }
 
 void WifiTransferModeController::handleStatus() {
@@ -2024,6 +2084,7 @@ void WifiTransferModeController::resetFirmwareUpdateState() {
   firmwareStartedMs_ = 0;
   firmwareRebootAt_ = 0;
   memset(firmwareHeader_, 0, sizeof(firmwareHeader_));
+  firmwareIdentity_.reset();
   firmwareResponseReason_[0] = '\0';
   firmwareResponseMessage_[0] = '\0';
   firmwareVersion_[0] = '\0';
@@ -2067,6 +2128,8 @@ bool WifiTransferModeController::validateFirmwareHeader() {
       sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
   memcpy(&app, firmwareHeader_ + appOffset, sizeof(app));
   if (app.magic_word != ESP_APP_DESC_MAGIC_WORD) return false;
+  const esp_app_desc_t* running=esp_app_get_description();
+  if(!running||!DspiLink::panelProjectMatches(app.project_name,running->project_name))return false;
   copyText(firmwareVersion_, sizeof(firmwareVersion_), app.version);
   firmwareHeaderValidated_ = true;
   return true;
@@ -2142,6 +2205,7 @@ void WifiTransferModeController::handleFirmwareRaw() {
 
   if (raw.status == RAW_WRITE) {
     if (!firmwareUpdateActive_) return;
+    firmwareIdentity_.feed(raw.buf,raw.currentSize);
     if (firmwareReceivedBytes_ + raw.currentSize > firmwareDeclaredBytes_) {
       failFirmwareUpdate(400, "firmware_size_overrun",
                          "Firmware body exceeded its declared size.", true);
@@ -2189,6 +2253,7 @@ void WifiTransferModeController::handleFirmwareRaw() {
   if (raw.status == RAW_END) {
     if (!firmwareUpdateActive_) return;
     if (!firmwareHeaderValidated_ ||
+        !firmwareIdentity_.matches() ||
         firmwareReceivedBytes_ != firmwareDeclaredBytes_ ||
         !Update.end(false) || !Update.isFinished()) {
       failFirmwareUpdate(400, "firmware_verification_failed",

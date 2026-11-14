@@ -13,28 +13,44 @@ static MenuPage native(Page p){
 static bool wireActive=false;
 static bool pendingInvalidation=false,pendingRoleReload=false,externalChangeNotice=false;
 static void drainInvalidation();
+static PanelControlMenus::Model model;
 // EQ is applied asynchronously in DSPi main.c, after dispatch resets the
 // notification origin to UNKNOWN. Correlate only exact, recent band echoes;
 // never treat all notifications arriving during a transaction as our own.
-struct EqEcho {bool valid=false;uint16_t offset=0;uint32_t sent=0;uint8_t bytes[16]{};};
-static EqEcho eqEchoes[4];
+struct EqEcho {bool valid=false;uint8_t size=0;uint16_t offset=0;uint32_t sent=0;uint8_t bytes[16]{};};
+static EqEcho eqEchoes[8];
 static uint8_t eqEchoNext=0;
 static int rememberEqWrite(const Frame &f){
-  if(f.get||f.request!=0x42||(f.length!=16&&f.length!=18)||f.bytes[0]>=17)return -1;
-  const uint8_t band=f.bytes[1];if(band>=10&&(band<20||band>23))return -1;
-  const uint8_t slot=eqEchoNext++%4;EqEcho &e=eqEchoes[slot];e=EqEcho();e.valid=true;e.sent=millis();
+  if(f.get)return 0;
+  int mask=0;
+  auto remember=[&](uint16_t offset,uint8_t size,const uint8_t *bytes){
+    const uint8_t slot=eqEchoNext++%8;EqEcho &e=eqEchoes[slot];e=EqEcho();
+    e.valid=true;e.sent=millis();e.offset=offset;e.size=size;memcpy(e.bytes,bytes,size);mask|=1u<<slot;
+  };
+  if(f.request!=0x42){
+    const uint8_t size=f.request==0x76?1:4;
+    if((f.request!=0x74&&f.request!=0x76&&f.request!=0x78)||f.length!=size||f.value>=model.map.outputs)return 0;
+    // WireOutputChannel: enabled@0, mute@1, gain@4, delay@8; outputs@708.
+    remember(708+12*f.value+(f.request==0x74?4:f.request==0x76?1:8),size,f.bytes);
+    // DSPi announces output delay in both the output and channel shadows.
+    if(f.request==0x78)remember(64+4*(model.map.inputs+f.value),4,f.bytes);
+    return mask;
+  }
+  if((f.length!=16&&f.length!=18)||f.bytes[0]>=17)return 0;
+  const uint8_t band=f.bytes[1];if(band>=10&&(band<20||band>23))return 0;
   // Pinned unified WireBulkParams: eq @824, 12 bands/channel; XO @4780,
   // four slots/channel. Each WireBandParams is 16 bytes on both platforms.
-  e.offset=band<10?824+(f.bytes[0]*12+band)*16:4780+(f.bytes[0]*4+band-20)*16;
-  e.bytes[0]=f.bytes[2];e.bytes[1]=f.bytes[3]==1?1:0;
-  if(f.bytes[2]==11&&f.length==18){e.bytes[2]=f.bytes[16];e.bytes[3]=f.bytes[17];}
-  memcpy(e.bytes+4,f.bytes+4,12);return slot;
+  const uint16_t offset=band<10?824+(f.bytes[0]*12+band)*16:4780+(f.bytes[0]*4+band-20)*16;
+  uint8_t bytes[16]{};bytes[0]=f.bytes[2];bytes[1]=f.bytes[3]==1?1:0;
+  if(f.bytes[2]==11&&f.length==18){bytes[2]=f.bytes[16];bytes[3]=f.bytes[17];}
+  memcpy(bytes+4,f.bytes+4,12);remember(offset,16,bytes);return mask;
 }
 static bool consumeEqEcho(const uint8_t *p,uint16_t n){
-  if(!p||n!=28||p[0]!=2||p[1]!=2||p[2]||p[6]!=16||p[7]||p[8]!=0||p[9]||p[10]||p[11])return false;
+  if(!p||n<13||p[0]!=2||p[1]!=2||p[2]||p[7]||p[8]!=0||p[9]||p[10]||p[11])return false;
+  const uint8_t size=p[6];if((size!=1&&size!=4&&size!=16)||n!=12+size)return false;
   const uint16_t offset=p[4]|(uint16_t(p[5])<<8);
   for(auto &e:eqEchoes){if(e.valid&&uint32_t(millis()-e.sent)>2000)e.valid=false;
-    if(e.valid&&e.offset==offset&&memcmp(e.bytes,p+12,16)==0){e.valid=false;return true;}}
+    if(e.valid&&e.offset==offset&&e.size==size&&memcmp(e.bytes,p+12,size)==0){e.valid=false;return true;}}
   return false;
 }
 static void clearEqEchoes(){for(auto &e:eqEchoes)e.valid=false;}
@@ -45,14 +61,14 @@ static Reply exchange(void *,const Frame &f){
       f.get?nullptr:f.bytes,f.length,r.bytes,sizeof(r.bytes),size,false,
       f.get&&!f.action);
   wireActive=false;
-  if(status==DSPI_TXN_ERROR&&echo>=0)eqEchoes[echo].valid=false;
+  if(status==DSPI_TXN_ERROR||status==DSPI_TXN_BUSY)for(unsigned i=0;i<8;++i)if(echo&(1u<<i))eqEchoes[i].valid=false;
   r.size=size;
   r.status=status==DSPI_TXN_OK?WireStatus::Ok:
+      status==DSPI_TXN_BUSY?WireStatus::Busy:
       status==DSPI_TXN_ERROR?WireStatus::Rejected:WireStatus::Unknown;
   if(pendingInvalidation){drainInvalidation();r.status=WireStatus::Unknown;}
   return r;
 }
-static PanelControlMenus::Model model;
 static PanelControlMenus::Controller control(exchange,nullptr);
 static PanelControlMenus::NameEditor name;
 struct Cell {float value=0;bool known=false;bool attempted=false;};
@@ -61,6 +77,7 @@ static uint16_t cachePage=0xffff;
 static uint8_t cacheFirst=255,readField=0;
 static uint32_t generation=0,editGeneration=0;
 static bool capabilityAttempted=false,identityAttempted=false,serialKnown=false;
+static uint32_t identityRetryAt=0;
 static uint8_t capabilityStep=0,platformByte=0,reportedOutputs=0;
 static PanelControls::CapabilityEvidence evidence{};
 static char serial[17]{};
@@ -69,6 +86,17 @@ static bool namesKnown[17]{};
 static bool namesEditable[17]{};
 struct Aliases {uint8_t version=1;char serial[17]{};char full[8][32]{};char shortName[8][32]{};};
 static Aliases aliases;
+static SourceNames sourceNames;
+static bool sourceNameRedraw=false,sourceNameReturnAllowed=false;
+static char sourceNameEditorBase[32]{};
+static bool nativeSourceNames(){return sourceNames.support()==SourceNames::Support::Native;}
+static bool beginSourceName(const char* text,const char* expected=nullptr){
+  if(!sourceNames.begin(model.source,text,expected)){showToast(expected?"Name changed - reopen editor":"Wait for source name");return false;}
+  sourceNameReturnAllowed=true;
+  // Native source names are flash-backed, like preset and Volume Limit saves.
+  if(sourceNames.busy()&&mediaPlayerPoc.active())stopMediaPlayback("source name flash guard");
+  return true;
+}
 struct InputMenuRecord {uint8_t version=1;char serial[17]{};PanelInputMenu menu;};
 static PanelInputMenu inputMenu;
 static bool inputMenuDirty=false;
@@ -246,7 +274,7 @@ static bool readCell(MenuPage p,uint8_t row){
   uint16_t length=f.kind==ValueKind::Float?4:f.kind==ValueKind::Word?2:1;
   if(f.get==0x71)length=8;if(f.get==0xef)length=6;if(f.get==0xee)length=8;
   if(f.get==0x6e)length=20;if(f.get==0xce)length=8;
-  Reply r=query(f.get,f.get==0xef?0:f.selector,length);cells[row].attempted=true;
+  Reply r=query(f.get,f.get==0xef?0:f.selector,length);if(r.status==WireStatus::Busy)return true;cells[row].attempted=true;
   if(!validReply(r,length))return true;
   float v=f.kind==ValueKind::Float?PanelControlMenus::wireFloat(r.bytes):f.kind==ValueKind::Word?float(r.bytes[0]|(uint16_t(r.bytes[1])<<8)):float(r.bytes[0]);
   if(f.get==0x71)v=row==0?r.bytes[2]:row==1?PanelControlMenus::wireFloat(r.bytes+4):r.bytes[3];
@@ -276,11 +304,14 @@ static void loadLocal(){
   roleSlot=255;panelPresetChanged(dspi.activePreset);
 }
 static void capabilityService(){
-  if(capabilityStep==0){evidence=PanelControls::CapabilityEvidence();platformByte=255;reportedOutputs=0;model.map=PanelControls::ChannelMap();control.map=model.map;Reply r=query(0x7f,0,7);if(r.status==WireStatus::Ok&&r.size>=4){platformByte=r.bytes[0];reportedOutputs=r.bytes[3];}++capabilityStep;return;}
-  if(capabilityStep==1){Reply r=query(0x0a,0,16);if(validReply(r,16)&&r.bytes[0]==3){evidence.exposedInputs=r.bytes[1];evidence.exposedOutputs=r.bytes[2];evidence.countsConfirmed=evidence.exposedOutputs==reportedOutputs;}++capabilityStep;return;}
+  if(capabilityStep==0){evidence=PanelControls::CapabilityEvidence();platformByte=255;reportedOutputs=0;model.map=PanelControls::ChannelMap();control.map=model.map;Reply r=query(0x7f,0,7);if(r.status==WireStatus::Busy)return;if(r.status==WireStatus::Ok&&r.size>=4){platformByte=r.bytes[0];reportedOutputs=r.bytes[3];}++capabilityStep;return;}
+  if(capabilityStep==1){Reply r=query(0x0a,0,16);if(r.status==WireStatus::Busy)return;if(validReply(r,16)&&r.bytes[0]==3){evidence.exposedInputs=r.bytes[1];evidence.exposedOutputs=r.bytes[2];evidence.countsConfirmed=evidence.exposedOutputs==reportedOutputs;}++capabilityStep;return;}
   if(capabilityStep==2){Reply r=query(0x86,0xffff,52);
+    if(r.status==WireStatus::Busy)return;
     evidence.platform=platformByte==0?PanelControls::Platform::Rp2040:platformByte==1?PanelControls::Platform::Rp2350:PanelControls::Platform::Unknown;
-    evidence.fiveBitEqConfirmed=validReply(r,52)&&r.bytes[0]==20&&r.bytes[2]==11&&r.bytes[3]>=79;
+    // v21 adds Preset Save and v22 Latency; both retain the v20 channel/EQ
+    // layout and 52-byte header. Unknown future layouts remain read-only.
+    evidence.fiveBitEqConfirmed=validReply(r,52)&&r.bytes[0]>=20&&r.bytes[0]<=22&&r.bytes[1]==16&&r.bytes[2]==11&&r.bytes[3]>=79;
     model.map=PanelControls::channelMap(PanelControls::selectProfile(evidence));control.map=model.map;
     capabilityAttempted=true;++capabilityStep;clearCells();return;}
 }
@@ -289,7 +320,7 @@ static String inputLabel(uint8_t in){return in<17&&namesKnown[in]&&channelNames[
 static uint8_t aliasSourceAt(uint8_t row){for(uint8_t source=0;source<=SRC_MAX;++source)if(inputSourceAvailable(static_cast<InputSource>(source))){if(!row--)return source;}return 255;}
 static uint8_t aliasSourceCount(){uint8_t n=0;for(uint8_t source=0;source<=SRC_MAX;++source)n+=inputSourceAvailable(static_cast<InputSource>(source));return n?n:1;}
 static uint8_t availableSourceMask(){uint8_t mask=0;for(uint8_t s=0;s<=SRC_MAX;++s)if(inputSourceAvailable(static_cast<InputSource>(s)))mask|=1u<<s;return mask;}
-static bool readName(uint8_t id){if(id>=17||namesKnown[id])return false;Reply r=query(0x9c,id,32);namesKnown[id]=true;
+static bool readName(uint8_t id){if(id>=17||namesKnown[id])return false;Reply r=query(0x9c,id,32);if(r.status==WireStatus::Busy)return true;namesKnown[id]=true;
   if(validReply(r,32)){size_t n=0;while(n<32&&r.bytes[n])++n;PanelControls::displayName(r.bytes,r.size,channelNames[id],32,31);namesEditable[id]=n<=31&&PanelControls::validStoredName(reinterpret_cast<const char*>(r.bytes),n)&&strlen(channelNames[id])==n&&memcmp(channelNames[id],r.bytes,n)==0;}return true;}
 static const char *filterName(uint8_t type){static const char *v[]={"Off","Peaking","Low Shelf","High Shelf","Low Pass","High Pass","Notch","All Pass","All Pass 1","Low Shelf 1","High Shelf 1","Linkwitz","Low Pass 1","High Pass 1"};return type<14?v[type]:"Crossover";}
 static String xoValue(uint8_t row,float value){if(row==0)return value?"On":"Off";if(row==1)return value?"High Pass":"Low Pass";if(row==2)return uint8_t(value)==0?"Linkwitz":uint8_t(value)==1?"Butterworth":"Bessel";return String(row==3?value*6:value,0);}
@@ -310,12 +341,12 @@ static float bandValue(PanelControls::BandField f){switch(f){case PanelControls:
   case PanelControls::BandField::GainDb:case PanelControls::BandField::TargetFrequency:return cells[3].value;case PanelControls::BandField::Bypass:return cells[4].value;case PanelControls::BandField::TargetQ:return PanelControls::decodeTargetQ(cells[5].value);default:return 0;}}
 static bool bandService(){if(readField>=6)return false;uint16_t s=0;
   if(!PanelControls::eqSelector(model.map,eqId(),eqBand(),static_cast<PanelControls::ScalarField>(readField),s))return false;
-  Reply r=query(0x43,s,4);Cell &c=cells[readField];c.attempted=true;
+  Reply r=query(0x43,s,4);if(r.status==WireStatus::Busy)return true;Cell &c=cells[readField];c.attempted=true;
   if(validReply(r,4)){c.value=readField==0||readField==4?r.bytes[0]:readField==5?float(r.bytes[0]|(uint16_t(r.bytes[1])<<8)):PanelControlMenus::wireFloat(r.bytes);c.known=PanelControls::finite(c.value);}++readField;return true;}
 static void startConfirmation(ConfirmAction action){returnPage=menuPage;returnRow=menuIndex;confirmation=action;model.confirmParent=page(menuPage);enterPage(PAGE_PANEL_CONFIRM);menuIndex=2;drawMenu();}
 static bool guardedStop(){
-  if(mediaPlayerPoc.active()||mediaPlaybackSuspended||mediaCurrentPath[0]||mediaTrackTransitionActive())stopMediaPlayback("panel hardware/preset action");
-  return !mediaPlayerPoc.active()&&!mediaTrackTransitionActive()&&!mediaPlayerPoc.seeking()&&!mediaPlaybackBufferLow()&&!mediaRouteRestorePending;
+  if(mediaPlayerPoc.active()||mediaPlaybackSuspended||mediaCurrentPath[0]||mediaTrackTransitionActive()||!networkMediaGuardQuiet())stopMediaPlayback("panel hardware/preset action");
+  return !mediaPlayerPoc.active()&&!mediaTrackTransitionActive()&&!mediaPlayerPoc.seeking()&&!mediaPlaybackBufferLow()&&!mediaRouteRestorePending&&networkMediaGuardQuiet();
 }
 static uint16_t rolesMask(uint8_t row){return row==1||row==2?model.roles.subs:(model.roles.left|model.roles.right);}
 static void beginLocal(float value){localValue=originalValue=value;editGeneration=generation;editPage=menuPage;editRow=menuIndex;editActive=true;awaitingEdit=false;drawMenu();}
@@ -347,11 +378,11 @@ static void resultToast(){
 }
 } // namespace PanelRuntime
 
-bool panelOwnsPage(MenuPage p){return p>=PAGE_SPEAKERS&&p<PAGE_COUNT;}
+bool panelOwnsPage(MenuPage p){return p>=PAGE_SPEAKERS&&p<=PAGE_COPY_PREVIEW;}
 String panelPageTitle(MenuPage p){using namespace PanelRuntime;static const char *titles[]={"Speakers","Speaker Setup","Groups","Assign Outputs","Outputs","Output","Routing","Route","Sum Mode","Source Pair","Equaliser","Inputs","Outputs","Equaliser","Bands","Band","Crossover","Crossover","Preset Tools","Choose Slot","Preset Preview","Starting Point","Input Names","Input Name","Hardware","Stereo Outputs","Stereo Slot","PDM Out","S/PDIF Inputs","S/PDIF Input","I2S Input","I2S Data Pins","I2S Clocks","Master Clock","ADAT","Confirm","Edit Name"};
   if(p==PAGE_SPEAKERS)return "Quick Controls";
   if(p==PAGE_SPEAKER_SETUP)return "Output Setup";
-  if(p==PAGE_INPUT_NAMES)return "Inputs";
+  if(p==PAGE_INPUT_NAMES)return "Input Names";
   if(p==PAGE_INPUT_NAME)return panelSourceLabel(model.source,inputSourceDisplayText(static_cast<InputSource>(model.source)),false);
   if(p==PAGE_EQ_INPUTS)return "Input EQ";
   if(p==PAGE_COPY_DESTINATION)return "Copy To";
@@ -389,14 +420,14 @@ String panelMenuName(MenuPage p,uint8_t r){using namespace PanelRuntime;
     case PAGE_PRESET_PREVIEW:return r==0?"Destination":r==1?"Name":r==2?"Starting Point":r==3?"Output EQ / XO":r==4?"Wiring / Limiter":r==5?"Input PEQ / FX":"Continue";
     case PAGE_STARTING_POINT:return r?"Effects Off":"Current";
     case PAGE_INPUT_NAMES:{uint8_t source=aliasSourceAt(r);return source==255?String("Unavailable"):panelSourceLabel(source,inputSourceDisplayText(static_cast<InputSource>(source)),false);}
-    case PAGE_INPUT_NAME:return r==0?"Name":r==1?"Short Name":r==2?"Show in Menu":r==3?"Position":"Reset Name";
+    case PAGE_INPUT_NAME:return r==0?"Name":r==1?"Show in Menu":r==2?"Position":"Reset Name";
     case PAGE_HARDWARE:{static const char *s[]={"Outputs","PDM Out","S/PDIF Inputs","I2S Input","I2S Clocks","Master Clock","ADAT","Preset Mode"};return s[r<8?r:7];}
     case PAGE_HARDWARE_OUTPUTS:return String("Slot ")+String(r*2+1)+"/"+String(r*2+2);
     case PAGE_SPDIF_INPUTS:return String("S/PDIF ")+String(r+1);
     case PAGE_I2S_INPUT:if(r==1)return "Data Pins";break;
     case PAGE_I2S_DATA:return String("Pair ")+String(r+1);
     case PAGE_PANEL_CONFIRM:if(confirmation==ConfirmAction::Sum)return r==0?"Left":r==1?"Right":r==2?"Cancel":"Save";if(confirmation==ConfirmAction::LinkBand)return r==0?"From":r==1?"Replace":r==2?"Cancel":"Copy Band";return r==0?"Current":r==1?"Proposed":r==2?"No - Cancel":"Yes - Apply";
-    case PAGE_PANEL_NAME:return r==0?"Name":r==1?"Position":r==2?"Save Name":"Cancel";
+    case PAGE_PANEL_NAME:return r==0?"Name":r==1?"Cursor":r==2?"Save Name":"Cancel";
     case PAGE_PANEL_NUMBER:return r==0?"Value":r==1?"Digit":r==2?"Apply":"Cancel";
     case PAGE_COPY_DESTINATION:return outputLabel(r);
     case PAGE_COPY_PREVIEW:return r==0?"From":r==1?"Replace":r==2?"EQ / Crossover":r==3?"Gain / Delay":r==4?"Mute":"Continue";
@@ -426,7 +457,7 @@ String panelMenuValue(MenuPage p,uint8_t r){using namespace PanelRuntime;
   if(p==PAGE_PANEL_NUMBER){char text[16];number.format(text,sizeof(text));return r==0?String(text):r==1?String(float(number.step())/number.scale,number.place<number.decimals?number.decimals-number.place:0):r==2?"Confirm":"";}
   if(p==PAGE_COPY_DESTINATION)return r==copyJob.source?"Source":"Choose";
   if(p==PAGE_COPY_PREVIEW)return r<2?String("Out ")+String((r?copyJob.target:copyJob.source)+1):r==2||r==3?"Replace":r==4?"Copy":"Confirm";
-  if(editActive&&p==editPage&&r==editRow){if(p==PAGE_XO_BAND)return xoValue(r,localValue);if(p==PAGE_EQ_BAND){auto f=bandField(r);if(f==PanelControls::BandField::Bypass)return localValue?"On":"Off";if(f==PanelControls::BandField::Type)return filterName(uint8_t(localValue));if(f==PanelControls::BandField::GainDb)return gainText(localValue);return String(localValue,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}if(p==PAGE_INPUT_NAME)return r==2?(localValue?"On":"Off"):String(int(localValue));if(p==PAGE_SPEAKERS)return gainText(localValue);return fieldValueText(field(p,r),localValue);}
+  if(editActive&&p==editPage&&r==editRow){if(p==PAGE_XO_BAND)return xoValue(r,localValue);if(p==PAGE_EQ_BAND){auto f=bandField(r);if(f==PanelControls::BandField::Bypass)return localValue?"On":"Off";if(f==PanelControls::BandField::Type)return filterName(uint8_t(localValue));if(f==PanelControls::BandField::GainDb)return gainText(localValue);return String(localValue,(f==PanelControls::BandField::Q||f==PanelControls::BandField::TargetQ)?2:1);}if(p==PAGE_INPUT_NAME)return r==1?(localValue?"On":"Off"):String(int(localValue));if(p==PAGE_SPEAKERS)return gainText(localValue);return fieldValueText(field(p,r),localValue);}
   if(p==PAGE_SPEAKERS){if(r>=4)return "Open";
     if(!rolesMask(r))return "Unassigned";if(r==2){if(PanelControls::bitCount(model.roles.subs)==1){uint8_t out=__builtin_ctz(model.roles.subs);return (gainKnownMask&(1u<<out))?gainText(freshGains[out]):String("Pending");}return subBaseline.valid?gainText(subTrim):String("Set");}if(r==3)return balanceBaseline.valid?gainText(balance):String("Set");
     uint16_t mask=rolesMask(r);unsigned muted=0,known=0;for(unsigned i=0;i<model.map.outputs;++i)if(mask&(1u<<i)){if(cells[i].known){++known;muted+=cells[i].value!=0;}}
@@ -445,7 +476,9 @@ String panelMenuValue(MenuPage p,uint8_t r){using namespace PanelRuntime;
   if(p==PAGE_PRESET_DESTINATION)return directoryKnown?((occupiedMask&(1u<<r))?"Occupied":"Empty"):"Unknown";
   if(p==PAGE_PRESET_PREVIEW)return r==0?String(presetSlot+1):r==1?String(presetNameDraft):r==2?(effectsOff?"Effects Off":"Current"):r==3||r==4?"Preserved":r==5?(effectsOff?"Bypass / Off":"Preserved"):"Confirm";
   if(p==PAGE_STARTING_POINT)return r==uint8_t(effectsOff)?"Selected":"";
-  if(p==PAGE_INPUT_NAME){if(!serialKnown)return "Unknown identity";return r==0?String(aliases.full[model.source]):r==1?String(aliases.shortName[model.source]):r==2?((inputMenu.visible&(1u<<model.source))?"On":"Off"):r==3?(inputMenu.position(model.source,availableSourceMask())?String(inputMenu.position(model.source,availableSourceMask())):String("Hidden")):String("Confirm");}
+  if(p==PAGE_INPUT_NAME){if(!serialKnown)return "Unknown identity";
+    if(r==0)return nativeSourceNames()?sourceNames.known(model.source)?panelSourceLabel(model.source,inputSourceDisplayText(static_cast<InputSource>(model.source)),false):String("Reading..."):sourceNames.support()==SourceNames::Support::Unknown?String("Reading..."):String("Unavailable");
+    return r==1?((inputMenu.visible&(1u<<model.source))?"On":"Off"):r==2?(inputMenu.position(model.source,availableSourceMask())?String(inputMenu.position(model.source,availableSourceMask())):String("Hidden")):String("Confirm");}
   Field f=field(p,r);if(f.get){if(!model.map.writable)return "Read-only";if(!cells[r].attempted)return "Pending";if(!cells[r].known)return "Unknown";float v=cells[r].value;
     return fieldValueText(f,v);}
   if(!model.map.writable&&(p==PAGE_OUTPUTS||p==PAGE_EQ_INPUTS||p==PAGE_EQ_OUTPUTS||p==PAGE_HARDWARE_OUTPUTS))return "Read-only";
@@ -547,7 +580,7 @@ static bool directoryRead(){Reply r=query(0x95,0,7);directoryKnown=false;
   return directoryKnown;
 }
 }
-bool panelWorkPending(){using namespace PanelRuntime;return control.busy()||copyJob.stage||linkStage==1||hardwareGuard||groupJob||presetStage||nameStage||sumStage;}
+bool panelWorkPending(){using namespace PanelRuntime;return control.busy()||copyJob.stage||linkStage==1||hardwareGuard||groupJob||presetStage||nameStage||sumStage||sourceNames.busy();}
 bool panelSelect(){using namespace PanelRuntime;
   if(menuPage==PAGE_PRESET&&menuIndex==10){enterPage(PAGE_PRESET_TOOLS);return true;}
   if(!panelOwnsPage(menuPage))return false;
@@ -604,8 +637,15 @@ bool panelSelect(){using namespace PanelRuntime;
       if(r==6){startConfirmation(presetTool==3?ConfirmAction::Rename:presetTool==2?ConfirmAction::New:ConfirmAction::SaveNew);return true;}break;
     case PAGE_STARTING_POINT:effectsOff=r!=0;enterPage(PAGE_PRESET_PREVIEW);return true;
     case PAGE_INPUT_NAMES:{uint8_t source=aliasSourceAt(r);if(source==255){showToast("Source unavailable");break;}model.source=source;enterPage(PAGE_INPUT_NAME);return true;}
-    case PAGE_INPUT_NAME:if(!serialKnown){showToast("Unknown DSP identity");break;}if(r==2){beginLocal((inputMenu.visible&(1u<<model.source))?1:0);break;}if(r==3){uint8_t position=inputMenu.position(model.source,availableSourceMask());if(!position){showToast("Show input before ordering");break;}beginLocal(position);break;}if(r==4){aliases.full[model.source][0]=aliases.shortName[model.source][0]=0;aliasesDirty=true;markDeferredPreference(PREF_DIRTY_PANEL_CONTROLS);showToast("Default name - pending storage");break;}
-      openName(r,r?aliases.shortName[model.source]:aliases.full[model.source],Page::InputName);return true;
+    case PAGE_INPUT_NAME:if(!serialKnown){showToast("Unknown DSP identity");break;}if(r==1){beginLocal((inputMenu.visible&(1u<<model.source))?1:0);break;}if(r==2){uint8_t position=inputMenu.position(model.source,availableSourceMask());if(!position){showToast("Show input before ordering");break;}beginLocal(position);break;}
+      if(sourceNames.support()==SourceNames::Support::Unknown){showToast("Checking name support");break;}
+      if(nativeSourceNames()){
+        if(!sourceNames.known(model.source)){showToast("Wait for source name");break;}
+        if(r==3){beginSourceName("");break;}
+        strcpy(sourceNameEditorBase,sourceNames.name(model.source));
+        openName(0,sourceNameEditorBase,Page::InputName);return true;
+      }
+      showToast("Needs DSPi v1.1.6");break;
     case PAGE_HARDWARE:{static const MenuPage pages[]={PAGE_HARDWARE_OUTPUTS,PAGE_PDM,PAGE_SPDIF_INPUTS,PAGE_I2S_INPUT,PAGE_I2S_CLOCKS,PAGE_MASTER_CLOCK,PAGE_ADAT};if(r<7){enterPage(pages[r]);return true;}beginFieldEdit();break;}
     case PAGE_HARDWARE_OUTPUTS:model.pair=r;enterPage(PAGE_HARDWARE_PAIR);return true;
     case PAGE_SPDIF_INPUTS:model.source=r;enterPage(PAGE_SPDIF_INPUT);return true;
@@ -613,10 +653,8 @@ bool panelSelect(){using namespace PanelRuntime;
     case PAGE_PANEL_NAME:if(r==3){name.cancel();enterPage(native(model.nameParent));return true;}if(r<2){editActive=true;editPage=menuPage;editRow=r;drawMenu();return true;}
       if(editGeneration!=generation){showToast("Changed - reopen name editor");break;}
       if(!name.save()){showToast("Enter a supported name");break;}
-      if(namePurpose<2){uint16_t width=fontTextWidth(FontMedium,String(name.text));
-        const int16_t allowed=std::max<int16_t>(0,302-fontTextWidth(FontMedium,presetText())-18-28-uiFeatureIconScaledSpan(UI_FEATURE_ALL,125,7));
-        if(namePurpose==1&&width>allowed){name.active=true;showToast("Short name exceeds safe Home width");break;}
-        strncpy(namePurpose?aliases.shortName[model.source]:aliases.full[model.source],name.text,32);aliasesDirty=true;markDeferredPreference(PREF_DIRTY_PANEL_CONTROLS);enterPage(PAGE_INPUT_NAME);showToast("Name applied - pending storage");return true;}
+      if(namePurpose<2&&nativeSourceNames()){if(beginSourceName(name.text,sourceNameEditorBase)){enterPage(PAGE_INPUT_NAME);showToast("Updating DSPi name");}return true;}
+      if(namePurpose<2){showToast("Needs DSPi v1.1.6");return true;}
       if(namePurpose==3){strncpy(presetNameDraft,name.text,32);enterPage(PAGE_PRESET_PREVIEW);return true;}
       nameJobTarget=model.map.inputs+model.output;strncpy(nameJobValue,name.text,32);nameReturnAllowed=true;nameStage=1;showToast("Pending name read/write");break;
     case PAGE_PANEL_CONFIRM:
@@ -643,7 +681,7 @@ bool panelSelect(){using namespace PanelRuntime;
   drawMenu();return true;
 }
 void panelAdjust(int direction){using namespace PanelRuntime;
-  if(menuPage==PAGE_INPUT_NAME){float next=localValue;PanelControlMenus::safeAdjust(localValue,direction,1,menuIndex==2?0:1,menuIndex==2?1:inputMenu.count(availableSourceMask()),next);localValue=next;return;}
+  if(menuPage==PAGE_INPUT_NAME){float next=localValue;PanelControlMenus::safeAdjust(localValue,direction,1,menuIndex==1?0:1,menuIndex==1?1:inputMenu.count(availableSourceMask()),next);localValue=next;return;}
   if(menuPage==PAGE_PANEL_NUMBER){if(editRow==1)number.move(direction>0?1:-1);else number.adjust(direction);return;}
   if(menuPage==PAGE_PANEL_NAME){if(editRow==1)name.move(direction>0?1:-1);else name.adjust(direction);return;}
   if(menuPage==PAGE_SPEAKERS){float low=menuIndex==2&&PanelControls::bitCount(model.roles.subs)==1?-60:-24;float high=menuIndex==2&&PanelControls::bitCount(model.roles.subs)==1?0:24;if(!PanelControlMenus::safeAdjust(localValue,direction,0.5f,low,high,localValue))showToast("Outside panel range - Console");return;}
@@ -668,7 +706,7 @@ void panelApply(){using namespace PanelRuntime;
   if(editGeneration!=generation){editActive=false;showToast("Changed - read and edit again");return;}
   editActive=false;
   if(menuPage==PAGE_SUM){if(!sumReady()||menuIndex>=2){showToast("Routes changed - reopen Sum");return;}sumGains[menuIndex]=localValue;showToast("Draft - choose Mono L+R Save");return;}
-  if(menuPage==PAGE_INPUT_NAME){if(!serialKnown){showToast("Unknown identity");return;}bool ok=menuIndex==2?inputMenu.setVisible(model.source,localValue!=0,availableSourceMask()):inputMenu.moveTo(model.source,uint8_t(localValue),availableSourceMask());if(!ok){showToast("Keep one available input visible");return;}inputMenuDirty=true;markDeferredPreference(PREF_DIRTY_PANEL_CONTROLS);showToast("Applied - pending storage");return;}
+  if(menuPage==PAGE_INPUT_NAME){if(!serialKnown){showToast("Unknown identity");return;}bool ok=menuIndex==1?inputMenu.setVisible(model.source,localValue!=0,availableSourceMask()):inputMenu.moveTo(model.source,uint8_t(localValue),availableSourceMask());if(!ok){showToast("Keep one available input visible");return;}inputMenuDirty=true;markDeferredPreference(PREF_DIRTY_PANEL_CONTROLS);showToast("Applied - pending storage");return;}
   if(menuPage==PAGE_SPEAKERS){startRoleRead(menuIndex==2?4:5,rolesMask(menuIndex));return;}
   if(menuPage==PAGE_EQ_BAND||menuPage==PAGE_XO_BAND){if(!startBandWrite(localValue))showToast("Invalid native field");return;}
   Field f=field(menuPage,menuIndex);if(f.pin&&localValue==255){showToast("Choose a valid DSP pin");return;}if(f.hardware){startConfirmation(ConfirmAction::Hardware);return;}
@@ -676,16 +714,20 @@ void panelApply(){using namespace PanelRuntime;
 }
 bool panelNameMove(int direction){using namespace PanelRuntime;if(menuPage==PAGE_PANEL_NUMBER){number.move(-direction);drawMenu();return true;}if(menuPage!=PAGE_PANEL_NAME)return false;name.move(direction);drawMenu();return true;}
 bool panelEditUnderline(MenuPage p,uint8_t row){return editActive&&p==PanelRuntime::editPage&&row==PanelRuntime::editRow&&p!=PAGE_PANEL_NAME;}
-int16_t panelNumberCursorOffset(){char text[16];PanelRuntime::number.format(text,sizeof(text));text[PanelRuntime::number.cursor(text)]=0;return fontTextWidth(FontMedium,String(text));}
-int16_t panelNumberCursorWidth(){char text[16],digit[2]{};PanelRuntime::number.format(text,sizeof(text));digit[0]=text[PanelRuntime::number.cursor(text)];return fontTextWidth(FontMedium,String(digit));}
+int16_t panelNumberCursorOffset(){char text[16];PanelRuntime::number.format(text,sizeof(text));text[PanelRuntime::number.cursor(text)]=0;return fontTextWidth(settingsListFont(),String(text));}
+int16_t panelNumberCursorWidth(){char text[16],digit[2]{};PanelRuntime::number.format(text,sizeof(text));digit[0]=text[PanelRuntime::number.cursor(text)];return fontTextWidth(settingsListFont(),String(digit));}
 namespace PanelRuntime {
-static uint16_t nameMeasure(const char *s,void *){return fontTextWidth(FontMedium,String(s));}
+static uint16_t nameMeasure(const char *s,void *){return fontTextWidth(settingsListFont(),String(s));}
 static void namePreview(char *out,uint16_t &offset,uint16_t &width){if(!name.preview(out,32,132,nameMeasure,nullptr,offset,width)){out[0]=0;offset=0;width=1;}}
 }
 String panelNameWindow(){char text[32];uint16_t offset,width;PanelRuntime::namePreview(text,offset,width);return String(text);}
 int16_t panelNameCursorOffset(){char text[32];uint16_t offset,width;PanelRuntime::namePreview(text,offset,width);return offset;}
 int16_t panelNameCursorWidth(){char text[32];uint16_t offset,width;PanelRuntime::namePreview(text,offset,width);return width;}
-String panelSourceLabel(uint8_t source,const String &fallback,bool shortName){using namespace PanelRuntime;if(!serialKnown||source>=8)return fallback;const char *text=shortName?aliases.shortName[source]:aliases.full[source];return text[0]?String(text):fallback;}
+String panelSourceLabel(uint8_t source,const String &fallback,bool shortName){using namespace PanelRuntime;if(!serialKnown||source>=8)return fallback;
+  if(nativeSourceNames()){const char *text=sourceNames.name(source);return text[0]?String(text):fallback;}
+  // Retired ESP aliases never override DSPi names or flash briefly at boot.
+  return fallback;}
+bool panelConsumeSourceNameChange(){using namespace PanelRuntime;bool value=sourceNameRedraw;sourceNameRedraw=false;return value;}
 uint8_t panelNextInput(uint8_t source,int direction){using namespace PanelRuntime;PanelInputMenu defaults;return (serialKnown?inputMenu:defaults).next(source,direction,availableSourceMask());}
 void panelPresetChanged(uint8_t slot){using namespace PanelRuntime;
   if(slot>=10||roleSlot==slot)return;model.roles=PanelControlMenus::Roles();roleSlot=slot;gainBaseline.valid=subBaseline.valid=balanceBaseline.valid=false;savedKnown=false;savedEligible=false;balance=subTrim=0;
@@ -726,6 +768,11 @@ void panelInvalidate(){using namespace PanelRuntime;if(wireActive){pendingInvali
 }
 void panelSourceChanged(){using namespace PanelRuntime;model.activeInputs=0;panelInvalidate();}
 void panelNotification(const uint8_t *payload,uint16_t bytes){using namespace PanelRuntime;
+  if(sourceNames.notification(payload,bytes)){sourceNameRedraw=true;return;}
+  // Analyser ownership and device/source labels cannot change output recipes.
+  // Runtime/state watchers still receive these packets through the caller.
+  if(payload&&bytes>=3&&payload[0]==2&&!payload[2]&&
+      ((payload[1]==0x0d&&bytes==17)||((payload[1]==0x0f||payload[1]==0x10)&&bytes==40)))return;
   if(consumeEqEcho(payload,bytes))return;
   // Pinned v2 PARAM_CHANGED identifies exclusive UART-origin echoes with8.
   // Arrival during a transaction alone never identifies an own change.
@@ -735,6 +782,7 @@ void panelNotification(const uint8_t *payload,uint16_t bytes){using namespace Pa
 }
 namespace PanelRuntime {static void drainInvalidation(){pendingInvalidation=false;panelInvalidate();if(pendingRoleReload){roleSlot=255;pendingRoleReload=false;}}}
 void panelCancel(){using namespace PanelRuntime;awaitingEdit=false;name.cancel();
+  sourceNames.cancel();sourceNameReturnAllowed=false;
   if(copyJob.stage)operationCancelled=true;copyJob.stage=0;
   if(control.busy()||groupJob||sumStage)operationCancelled=true;
   control.cancel();linkedTarget=255;linkStage=0;linkedSecond=false;hardwareCancel=true;if(hardwareGuard<=2)hardwareGuard=0;groupJob=0;sumStage=0;
@@ -849,6 +897,7 @@ static bool sumDraftService(){
   if(!sumContext()||sumAttempted==3)return false;
   const uint8_t row=(sumAttempted&1)?1:0,input=sumPair*2+row;
   Reply r=query(0x71,(uint16_t(input)<<8)|sumOutput,8);
+  if(r.status==WireStatus::Busy)return true;
   if(!sumContext())return true;sumAttempted|=1u<<row;
   if(validReply(r,8)&&r.bytes[0]==input&&r.bytes[1]==sumOutput&&r.bytes[2]<=1&&r.bytes[3]<=1){
     float gain=PanelControlMenus::wireFloat(r.bytes+4);
@@ -993,7 +1042,7 @@ void servicePanelControls(){using namespace PanelRuntime;
   // The ordinary loop calls this after the unchanged media services, including
   // while playback is active; reserve/seek/transition and exclusive guards win.
   static bool wasConnected=false;
-  if(!dspi.connected){if(wasConnected){panelCancel();control=PanelControlMenus::Controller(exchange,nullptr);control.completion=Completion::Unknown;hardwareGuard=groupJob=sumStage=presetStage=nameStage=0;identityAttempted=serialKnown=capabilityAttempted=uartKnown=uartAttempted=false;capabilityStep=activeInputStep=0;evidence=PanelControls::CapabilityEvidence();platformByte=255;reportedOutputs=0;model.map=PanelControls::ChannelMap();model.roles=PanelControlMenus::Roles();aliasesDirty=false;roleSlot=255;panelInvalidate();}wasConnected=false;return;}wasConnected=true;
+  if(!dspi.connected){if(wasConnected){panelCancel();sourceNames.reset();sourceNameRedraw=true;control=PanelControlMenus::Controller(exchange,nullptr);control.completion=Completion::Unknown;hardwareGuard=groupJob=sumStage=presetStage=nameStage=0;identityAttempted=serialKnown=capabilityAttempted=uartKnown=uartAttempted=false;capabilityStep=activeInputStep=0;evidence=PanelControls::CapabilityEvidence();platformByte=255;reportedOutputs=0;model.map=PanelControls::ChannelMap();model.roles=PanelControlMenus::Roles();aliasesDirty=false;roleSlot=255;panelInvalidate();}wasConnected=false;return;}wasConnected=true;
   if(wifiTransferExclusive()||dspiRequestInFlight||
       mediaTrackTransitionActive()||mediaPlayerPoc.seeking()||mediaPlaybackBufferLow()||
       presetSaveCompletionPending||mediaPresetRefreshPending)return;
@@ -1002,18 +1051,30 @@ void servicePanelControls(){using namespace PanelRuntime;
 #endif
   const bool visible=panelOwnsPage(menuPage)&&(uiView==VIEW_MENU||uiView==VIEW_EDIT);
   if(externalChangeNotice){externalChangeNotice=false;if(visible){showToast("Changed externally - read again");drawMenu();}}
-  if(!identityAttempted){identityAttempted=true;Reply r=query(0x7e,0,16);serialKnown=validReply(r,16);
-    if(serialKnown){for(unsigned i=0;i<16;++i){if(r.bytes[i]<33||r.bytes[i]>126)serialKnown=false;serial[i]=r.bytes[i];}serial[16]=0;}
-    if(serialKnown)loadLocal();if(visible)drawMenu();return;}
-  if(!visible&&!control.busy()&&!hardwareGuard&&!nameStage&&!presetStage&&!groupJob&&!sumStage&&!linkStage&&!copyJob.stage)return;
+  if(!serialKnown&&(!identityAttempted||int32_t(millis()-identityRetryAt)>=0)){
+    Reply r=query(0x7e,0,16);if(r.status==WireStatus::Busy)return;
+    identityAttempted=true;identityRetryAt=millis()+1000;serialKnown=validReply(r,16);
+    if(serialKnown){for(unsigned i=0;i<16;++i){const uint8_t c=r.bytes[i];
+      if(!((c>='0'&&c<='9')||(c>='A'&&c<='F')||(c>='a'&&c<='f')))serialKnown=false;
+      serial[i]=c;}serial[16]=0;}
+    if(serialKnown){identityRetryAt=0;loadLocal();}if(visible)drawMenu();return;}
   control.sampleRate=dspi.sampleRate;
   if(control.busy()){control.service();if(!control.busy())controlFinished();if(visible)drawMenu();return;}
   if(copyService()||linkService()||hardwareService()||nameService()||groupService()||sumService()||presetService()){if(visible)drawMenu();return;}
+  if(serialKnown&&!editActive){
+    const bool serviced=sourceNames.service(millis(),!mediaPlayerPoc.active()&&!mediaRouteRestorePending,exchange,nullptr);
+    if(sourceNames.takeChanged())sourceNameRedraw=true;
+    const auto result=sourceNames.takeResult();
+    if(result!=SourceNames::Result::None&&sourceNameReturnAllowed){
+      sourceNameReturnAllowed=false;showToast(result==SourceNames::Result::Confirmed?"DSPi name confirmed":result==SourceNames::Result::Changed?"Name changed - read again":"Name unknown - verify");if(visible)drawMenu();}
+    if(serviced)return;
+  }
+  if(!visible&&!sourceNames.busy()&&!control.busy()&&!hardwareGuard&&!nameStage&&!presetStage&&!groupJob&&!sumStage&&!linkStage&&!copyJob.stage)return;
   if(!visible||editActive)return;
   if(!capabilityAttempted){capabilityService();drawMenu();return;}
   if(roleSlot!=dspi.activePreset)panelPresetChanged(dspi.activePreset);
-  if(!activeInputStep&&model.map.writable){Reply r=query(0x50,23,4);activeInputStep=1;if(validReply(r,4)){uint32_t n;memcpy(&n,r.bytes,4);if(n>0&&n<=model.map.inputs)model.activeInputs=n;}drawMenu();return;}
-  if(menuPage>=PAGE_HARDWARE&&!uartAttempted){uartAttempted=true;Reply r=query(0xf6,0,8);uartKnown=validReply(r,8)&&r.bytes[0]==1;if(uartKnown){uartTx=r.bytes[1];uartRx=r.bytes[2];}drawMenu();return;}
+  if(!activeInputStep&&model.map.writable){Reply r=query(0x50,23,4);if(r.status==WireStatus::Busy)return;activeInputStep=1;if(validReply(r,4)){uint32_t n;memcpy(&n,r.bytes,4);if(n>0&&n<=model.map.inputs)model.activeInputs=n;}drawMenu();return;}
+  if(menuPage>=PAGE_HARDWARE&&!uartAttempted){Reply r=query(0xf6,0,8);if(r.status==WireStatus::Busy)return;uartAttempted=true;uartKnown=validReply(r,8)&&r.bytes[0]==1;if(uartKnown){uartTx=r.bytes[1];uartRx=r.bytes[2];}drawMenu();return;}
   if(!model.map.writable)return;
   if(menuPage==PAGE_SUM){if(sumDraftService())drawMenu();return;}
   if(menuPage==PAGE_EQ_BAND||menuPage==PAGE_XO_BAND){if(bandService())drawMenu();return;}
@@ -1024,7 +1085,7 @@ void servicePanelControls(){using namespace PanelRuntime;
   if(menuPage==PAGE_OUTPUTS||menuPage==PAGE_SPEAKER_MEMBERS||menuPage==PAGE_EQ_OUTPUTS||menuPage==PAGE_COPY_DESTINATION){for(unsigned i=first;i<end&&i<model.map.outputs;++i)if(readName(model.map.inputs+i)){drawMenu();return;}}
   if(menuPage==PAGE_EQ_INPUTS||menuPage==PAGE_ROUTING){for(unsigned i=first;i<end&&i<model.visibleInputs();++i)if(readName(i)){drawMenu();return;}}
   if(menuPage==PAGE_SPEAKERS){uint16_t mask=model.roles.left|model.roles.right|model.roles.subs;
-    for(unsigned i=0;i<model.map.outputs;++i)if((mask&(1u<<i))&&!cells[i].attempted){Reply r=query(0x77,i,1);cells[i].attempted=true;cells[i].known=validReply(r,1);if(cells[i].known)cells[i].value=r.bytes[0];drawMenu();return;}
-    if(first==0&&PanelControls::bitCount(model.roles.subs)==1){uint8_t sub=__builtin_ctz(model.roles.subs);if(!(gainKnownMask&(1u<<sub))&&!(gainAttemptedMask&(1u<<sub))){gainAttemptedMask|=1u<<sub;Reply r=query(0x75,sub,4);if(validReply(r,4)){freshGains[sub]=PanelControlMenus::wireFloat(r.bytes);if(PanelControls::finite(freshGains[sub]))gainKnownMask|=1u<<sub;}drawMenu();return;}}return;}
+    for(unsigned i=0;i<model.map.outputs;++i)if((mask&(1u<<i))&&!cells[i].attempted){Reply r=query(0x77,i,1);if(r.status==WireStatus::Busy)return;cells[i].attempted=true;cells[i].known=validReply(r,1);if(cells[i].known)cells[i].value=r.bytes[0];drawMenu();return;}
+    if(first==0&&PanelControls::bitCount(model.roles.subs)==1){uint8_t sub=__builtin_ctz(model.roles.subs);if(!(gainKnownMask&(1u<<sub))&&!(gainAttemptedMask&(1u<<sub))){Reply r=query(0x75,sub,4);if(r.status==WireStatus::Busy)return;gainAttemptedMask|=1u<<sub;if(validReply(r,4)){freshGains[sub]=PanelControlMenus::wireFloat(r.bytes);if(PanelControls::finite(freshGains[sub]))gainKnownMask|=1u<<sub;}drawMenu();return;}}return;}
   for(uint8_t i=first;i<end&&i<12;++i)if(!cells[i].attempted&&field(menuPage,i).get){readCell(menuPage,i);drawMenu();return;}
 }

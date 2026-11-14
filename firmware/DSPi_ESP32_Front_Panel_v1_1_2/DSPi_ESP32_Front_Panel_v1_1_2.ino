@@ -1,5 +1,5 @@
 /*
-  DSPi ESP32 Control Panel v1.4.0
+  DSPi ESP32 Control Panel v1.5.0
   Target DSPi firmware: compatible v1.1.6 (runtime version readback)
 
   Board:
@@ -77,6 +77,10 @@
 */
 
 #include <Arduino.h>
+#include "DspiLinkHub.h"
+#include "DspiLinkControl.h"
+#include "DspiLinkSpectrum.h"
+#include <qrcode.h>
 
 #include <Arduino_GFX_Library.h>
 #include <pgmspace.h>
@@ -87,17 +91,34 @@
 #include <SPI.h>
 #include <Preferences.h>
 #include <NimBLEDevice.h>
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <esp_random.h>
+#include <atomic>
+#include "CoexistenceDiagnostics.h"
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <jpeg_decoder.h>
 #include "MediaPlayerPoC.h"
+#include "NetworkPanelOutput.h"
+#include "SmbPlayback.h"
+#include "SmbBrowser.h"
+#include "SmbNavigation.h"
+#include "SmbArtwork.h"
+#include "NetworkWifiGlyph.h"
+#include "NetworkArtworkJpeg.h"
+#include "NetworkResources.h"
+#include "PanelWifi.h"
+#include "MediaStartFailure.h"
 #include "Mp3ArtworkPolicy.h"
 #include "ArtworkCache.h"
 #include "SubSynth.h"
 #include "TubeLimiter.h"
 #include "UiReadability.h"
 #include "UiMenuLayout.h"
+#include "RetroPixel.h"
+#include "HomeVolumeDisplay.h"
 #include "SpectrumRta.h"
 #include "WifiTransferMode.h"
 
@@ -5324,9 +5345,18 @@ enum MenuPage {
   PAGE_HARDWARE_PAIR, PAGE_PDM, PAGE_SPDIF_INPUTS, PAGE_SPDIF_INPUT,
   PAGE_I2S_INPUT, PAGE_I2S_DATA, PAGE_I2S_CLOCKS, PAGE_MASTER_CLOCK, PAGE_ADAT,
   PAGE_PANEL_CONFIRM, PAGE_PANEL_NAME, PAGE_PANEL_NUMBER, PAGE_COPY_DESTINATION, PAGE_COPY_PREVIEW,
+  PAGE_LINK, PAGE_LINK_NETWORK, PAGE_LINK_CONNECTION, PAGE_LINK_SECURITY,
+  PAGE_LINK_ADDRESS, PAGE_LINK_PIN, PAGE_LINK_CLIENTS, PAGE_LINK_CLIENT, PAGE_LINK_CONFIRM,
+  PAGE_LINK_SETUP, PAGE_LINK_NETWORK_NAME,
+  PAGE_LINK_CLIENT_NAME, PAGE_WIFI, PAGE_LINK_PAIRING,
+  PAGE_VOLUME_DISPLAY,
+  PAGE_MUSIC_ROOT, PAGE_NETWORK_SERVERS, PAGE_NETWORK_BROWSER, PAGE_NETWORK_CONFIRM,
+  PAGE_WIFI_SIGNAL,
   PAGE_COUNT
 };
 #include "PanelControlRuntime.h"
+#include "DspiLinkPanel.h"
+#include "NetworkPlayerPanel.h"
 
 enum LegacyUiColourChoice : uint8_t {
   UI_COLOUR_WHITE = 0,
@@ -5898,6 +5928,8 @@ uint8_t screenTimeoutOption = 0;
 uint8_t screenDimPercent = 20;
 ScreenTimeoutAction screenTimeoutAction = SCREEN_TIMEOUT_DIM;
 uint8_t mainTextPaletteIndex = PALETTE_WHITE;
+RetroPixel::Settings retroTheme = RetroPixel::defaults();
+uint8_t homeVolumeDisplay = PanelHomeVolume::User;
 uint8_t accentPaletteIndex = PALETTE_CYAN;
 uint8_t volumeMeterPaletteIndex = PALETTE_CYAN;
 VuColourChoice analogVuColourChoice = VU_COLOUR_CYAN;
@@ -6020,6 +6052,8 @@ bool externalRuntimeRefreshRequested = false;
 bool externalRuntimeStateReady = false;
 uint8_t dspiFailureCount = 0;
 bool dspiRequestInFlight = false;
+bool dspiUartNeedsRecovery = false;
+unsigned long dspiRecoveryRetryAt = 0;
 const char *scheduledSourceReason = "verified GET";
 
 float meterLeftActive = 0.0f;
@@ -6040,6 +6074,8 @@ struct StereoSpectrumState {
   bool configured = false;
   bool configChangedExternally = false;
   bool channelUnavailable = false;
+  bool consoleShared = false;
+  bool consoleYielded = false;
   bool hasFrame[2] = {false, false};
   uint8_t fftOrder = 0;
   uint8_t levelZero = 243;
@@ -6236,6 +6272,9 @@ void showPresetChangeOverlay(uint8_t slot);
 void showSourceChangeOverlay(InputSource source);
 void queueSourceChangeAfterPreset(InputSource source);
 void showFeatureStateNotification(const char *featureName, bool enabled);
+void queueLinkVolume(float delta);
+void serviceLinkVolume();
+void presentUserVolumeChange();
 bool recordUserActivity();
 void applyBrightness();
 bool savePresetPanelSettings(uint8_t slot);
@@ -6323,6 +6362,12 @@ void processBleReport(const BleReportPacket &packet);
 QueueHandle_t bleReportQueue = nullptr;
 BleReportPacket bleLearningPacket = {};
 NimBLEClient *bleClient = nullptr;
+// Diagnostic counters only; never consulted by the connection/scan policy.
+std::atomic<uint16_t> bleDiagnosticHandle{0xffff};
+std::atomic<uint32_t> bleDiagnosticLinkVersion{0};
+std::atomic<uint32_t> bleDiagnosticEpoch{0},bleDiagnosticReports{0};
+std::atomic<uint32_t> bleDiagnosticStopRequests{0},bleDiagnosticStopFailures{0};
+std::atomic<int> bleDiagnosticDisconnectReason{0},bleDiagnosticScanEndReason{-1};
 volatile uint32_t bleReportOverflowCount = 0;
 volatile bool bleReportOverflowPending = false;
 volatile uint32_t bleConnectionGeneration = 1;
@@ -6620,7 +6665,7 @@ String vuColourChoiceText(VuColourChoice choice)
 
 uint16_t uiMainText()
 {
-  return themePaletteColour(mainTextPaletteIndex);
+  return themePaletteColour(retroTheme.enabled ? retroTheme.text : mainTextPaletteIndex);
 }
 
 uint16_t uiDimText()
@@ -6631,31 +6676,31 @@ uint16_t uiDimText()
 
 uint16_t uiAccent()
 {
-  return themePaletteColour(accentPaletteIndex);
+  return themePaletteColour(retroTheme.enabled ? retroTheme.accent : accentPaletteIndex);
 }
 
 uint16_t uiAccentSoft()
 {
   // Preserve the accepted cyan variants bit-for-bit at the default setting.
-  if (accentPaletteIndex == PALETTE_CYAN) return C_CYAN_SOFT;
+  if (!retroTheme.enabled && accentPaletteIndex == PALETTE_CYAN) return C_CYAN_SOFT;
   return blend565(C_BLACK, uiAccent(), 200);
 }
 
 uint16_t uiAccentDark()
 {
-  if (accentPaletteIndex == PALETTE_CYAN) return C_CYAN_DARK;
+  if (!retroTheme.enabled && accentPaletteIndex == PALETTE_CYAN) return C_CYAN_DARK;
   return blend565(C_BLACK, uiAccent(), 96);
 }
 
 uint16_t uiAccentInfo()
 {
-  if (accentPaletteIndex == PALETTE_CYAN) return C_BLUE;
+  if (!retroTheme.enabled && accentPaletteIndex == PALETTE_CYAN) return C_BLUE;
   return blend565(C_BLACK, uiAccent(), 150);
 }
 
 uint16_t uiVolumeMeterColour()
 {
-  return themePaletteColour(volumeMeterPaletteIndex);
+  return themePaletteColour(retroTheme.enabled ? retroTheme.meters : volumeMeterPaletteIndex);
 }
 
 uint16_t uiAnalogVuColourForChoice(VuColourChoice choice)
@@ -6682,6 +6727,12 @@ uint16_t uiFault() { return C_RED; }
 uint16_t uiClip() { return C_RED; }
 uint16_t uiSuccess() { return C_CYAN; }
 
+void loadHomeVolumeDisplayPreference()
+{
+  homeVolumeDisplay = PanelHomeVolume::validChoice(
+      preferences.getUChar("vol_display", PanelHomeVolume::User));
+}
+
 bool persistThemePreferencesNow()
 {
   const ThemeSettingsRecord record = {
@@ -6693,7 +6744,9 @@ bool persistThemePreferencesNow()
   };
   const size_t written = preferences.putBytes(
       "theme_cfg", &record, sizeof(record));
-  const bool ok = written == sizeof(record);
+  const size_t retroWritten = preferences.putBytes("retro_cfg", &retroTheme, sizeof(retroTheme));
+  const size_t displayWritten = preferences.putUChar("vol_display", homeVolumeDisplay);
+  const bool ok = written == sizeof(record) && retroWritten == sizeof(retroTheme) && displayWritten == 1;
   Serial.printf("THEME NVS: immediate=%s bytes=%u\n",
                 ok ? "OK" : "FAILED", (unsigned)written);
   return ok;
@@ -6950,6 +7003,45 @@ const GlyphDef *findGlyph(const FontDef &font, char ch)
   return nullptr;
 }
 
+// Settings rows use the compact OLED face; home/volume retain their own metrics.
+const FontDef &settingsListFont() { return retroTheme.enabled ? FontSmall : FontMedium; }
+
+int retroPitch(const FontDef &font)
+{
+  return &font == &FontMenu ? 5 : &font == &FontLarge ? 8 :
+      &font == &FontMedium ? 3 : 2;
+}
+
+int retroXPitch(const FontDef &font)
+{
+  return retroPitch(font);
+}
+
+int retroAdvance(const FontDef &font)
+{
+  return &font == &FontMedium ? 16 : 6*retroPitch(font);
+}
+
+int retroTop(const FontDef &font)
+{
+  return &font == &FontMenu ? 20 : &font == &FontLarge ? 12 :
+      &font == &FontDb ? 10 : &font == &FontMedium ? 3 : 2;
+}
+
+void drawRetroText(const FontDef &font, int16_t x, int16_t y,
+    const String &text, uint16_t colour, uint8_t scale = 100,
+    int16_t left = 0, int16_t top = 0, int16_t right = UI_W, int16_t bottom = UI_H)
+{
+  // Only large headings carry the faint inactive dot cells. Body text stays
+  // clear, and QR codes, artwork and warning colours retain their own drawing.
+  const uint16_t off = (&font == &FontMenu || &font == &FontLarge)
+      ? RetroPixel::dim(colour, RetroPixel::unlitAlpha(retroTheme.unlit)) : 0;
+  RetroPixel::text([](int px,int py,uint16_t c){canvas->drawPixel(px,py,c);},
+      x,y,text.c_str(),retroPitch(font),retroTop(font),colour,off,scale,
+      std::max<int16_t>(0,left),std::max<int16_t>(0,top),
+      std::min<int16_t>(UI_W,right),std::min<int16_t>(UI_H,bottom),retroXPitch(font),false,retroAdvance(font));
+}
+
 int16_t fontPlusAdvance(const FontDef &font)
 {
   if (&font == &FontSmall) return 9;
@@ -6961,6 +7053,7 @@ int16_t fontPlusAdvance(const FontDef &font)
 void drawFontPlus(const FontDef &font, int16_t x, int16_t y,
                   uint16_t colour, uint8_t scalePercent = 100)
 {
+  if (retroTheme.enabled) { drawRetroText(font,x,y,"+",colour,scalePercent); return; }
   int16_t baseWidth = fontPlusAdvance(font);
   if (baseWidth <= 0 || scalePercent == 0) return;
 
@@ -6985,6 +7078,7 @@ void drawFontPlus(const FontDef &font, int16_t x, int16_t y,
 
 int16_t fontTextWidth(const FontDef &font, const String &text)
 {
+  if (retroTheme.enabled) return RetroPixel::width(text.c_str(),retroXPitch(font),retroAdvance(font));
   int16_t w = 0;
   for (uint16_t i = 0; i < text.length(); i++) {
     char ch = text.charAt(i);
@@ -7005,6 +7099,10 @@ int16_t fontTextWidth(const FontDef &font, const String &text)
 void fontVisualBounds(const FontDef &font, const String &text,
                       int16_t &left, int16_t &right)
 {
+  if (retroTheme.enabled) {
+    left = 0; right = text.length() ? fontTextWidth(font,text)-retroAdvance(font)+5*retroPitch(font) : 0;
+    return;
+  }
   int16_t cursor = 0;
   bool haveGlyph = false;
   left = 0;
@@ -7099,6 +7197,7 @@ void drawGlyphRle(int16_t x, int16_t y, const GlyphDef *g, uint16_t colour)
 
 void drawFontText(const FontDef &font, int16_t x, int16_t y, const String &text, uint16_t colour)
 {
+  if (retroTheme.enabled) { drawRetroText(font,x,y,text,colour); return; }
   for (uint16_t i = 0; i < text.length(); i++) {
     char ch = text.charAt(i);
     if (ch == ' ') {
@@ -7162,6 +7261,9 @@ void drawFontTextClipped(const FontDef &font, int16_t x, int16_t y,
                          int16_t clipX, int16_t clipY,
                          int16_t clipW, int16_t clipH)
 {
+  if (retroTheme.enabled) {
+    drawRetroText(font,x,y,text,colour,100,clipX,clipY,clipX+clipW,clipY+clipH); return;
+  }
   for (uint16_t i = 0; i < text.length(); i++) {
     char ch = text.charAt(i);
     if (ch == ' ') {
@@ -7233,6 +7335,7 @@ int8_t volumeKernAdjust(char prev, char cur)
 
 int16_t fontTextWidthKerned(const FontDef &font, const String &text)
 {
+  if (retroTheme.enabled) return fontTextWidth(font,text);
   int16_t w = 0;
   char prev = 0;
   for (uint16_t i = 0; i < text.length(); i++) {
@@ -7259,6 +7362,7 @@ int16_t fontTextWidthKerned(const FontDef &font, const String &text)
 
 void drawFontTextKerned(const FontDef &font, int16_t x, int16_t y, const String &text, uint16_t colour)
 {
+  if (retroTheme.enabled) { drawRetroText(font,x,y,text,colour); return; }
   char prev = 0;
   for (uint16_t i = 0; i < text.length(); i++) {
     char ch = text.charAt(i);
@@ -7328,6 +7432,7 @@ void drawFontTextScaledKerned(const FontDef &font, int16_t x, int16_t y,
                               const String &text, uint16_t colour,
                               uint8_t scalePercent)
 {
+  if (retroTheme.enabled) { drawRetroText(font,x,y,text,colour,scalePercent); return; }
   char prev = 0;
   for (uint16_t i = 0; i < text.length(); i++) {
     char ch = text.charAt(i);
@@ -7486,6 +7591,8 @@ enum DspiTxnResult : uint8_t {
 // declarations before the transport-specific types above.
 void acceptDspiNotification(const UartFrame &frame);
 DspiFrameReadResult dspiReadFrame(UartFrame &frame, uint16_t timeoutMs);
+bool dspiIsRecoveryMarker(const UartFrame &frame);
+bool dspiSynchronizeLegacyUart();
 const char *dspiTxnResultText(DspiTxnResult result);
 DspiTxnResult dspiResultForStatus(uint8_t status);
 bool dspiResultCanRetry(DspiTxnResult result);
@@ -7563,7 +7670,38 @@ void acceptDspiNotification(const UartFrame &frame)
     notificationFullRefreshRequested = true;
   }
   externalRuntimeRefreshRequested = true;
-  notificationRefreshAt = millis() + DSPI_NOTIFICATION_REFRESH_MS;
+  // Ordinary slider notifications must not postpone the readback forever.
+  // Preset/bulk changes still wait for the last flash/apply notification.
+  if(notificationFullRefreshRequested || !notificationRefreshAt)
+    notificationRefreshAt = millis() + DSPI_NOTIFICATION_REFRESH_MS;
+}
+
+void acceptSharedDspiNotification(const uint8_t *payload, uint16_t length)
+{
+  const bool mayBeNetworkWrite=DspiLink::hubExternalWritePossible();
+  static DspiLink::NotificationSequence sequence;
+  if(sequence.gap(payload,length)){
+    panelInvalidate();notificationFullRefreshRequested=true;
+    externalRuntimeRefreshRequested=true;notificationRefreshAt=millis()+DSPI_NOTIFICATION_REFRESH_MS;
+  }
+  // Main-loop delivery only: no canvas, Preferences or panel state is touched
+  // from the UART/network workers. The hub receives the complete native packet.
+  DspiLink::hubNativeNotification(payload,length);
+  UartFrame frame = {};
+  if (length > sizeof(frame.payload)) {
+    notificationFullRefreshRequested = true;
+    externalRuntimeRefreshRequested = true;
+    notificationRefreshAt = millis() + DSPI_NOTIFICATION_REFRESH_MS;
+    return;
+  }
+  frame.type = UART_TYPE_NOTIFY;
+  frame.length = length;
+  memcpy(frame.payload,payload,length);
+  // UART identifies a transport, not the local panel. Preserve the native
+  // packet for Link clients, but mark ambiguous panel attribution UNKNOWN
+  // so the legacy local-UART echo rule cannot hide a network client's edit.
+  if(mayBeNetworkWrite&&length>=12&&frame.payload[0]==2&&frame.payload[1]==2&&frame.payload[8]==8)frame.payload[8]=0;
+  acceptDspiNotification(frame);
 }
 
 DspiFrameReadResult dspiReadFrame(UartFrame &frame, uint16_t timeoutMs)
@@ -7655,41 +7793,46 @@ bool dspiResultCanRetry(DspiTxnResult result)
          result == DSPI_TXN_REMOTE_CRC;
 }
 
-void dspiRecoverAfterTimeout(uint8_t request)
+bool dspiIsRecoveryMarker(const UartFrame &frame)
 {
-  // UART responses have no request ID. After a timeout, keep a bounded
-  // quarantine in which complete late frames are parsed and discarded while
-  // valid notifications are still accepted. A minimum quarantine plus a
-  // final quiet interval is the proof boundary before another request.
-  uint32_t startedAt = millis();
-  uint32_t lastActivityAt = startedAt;
+  // GET_SERIAL (0x7e) is reserved as the legacy recovery fence. Its 16 ASCII
+  // hex bytes cannot be an ordinary binary source/volume/status response.
+  if (frame.type != UART_RESP_GET || frame.status != CTRL_STATUS_OK || frame.length != 16) return false;
+  for (unsigned i = 0; i < 16; ++i) {
+    const uint8_t ch = frame.payload[i];
+    if (!((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'F') ||
+          (ch >= 'a' && ch <= 'f'))) return false;
+  }
+  return true;
+}
 
-  while ((uint32_t)(millis() - startedAt) < DSPI_RECOVERY_MAX_MS) {
-    uint32_t elapsed = (uint32_t)(millis() - startedAt);
-    if (DspiSerial.available() > 0) {
-      UartFrame lateFrame = {};
-      uint16_t remaining = (uint16_t)(DSPI_RECOVERY_MAX_MS - elapsed);
-      DspiFrameReadResult readResult = dspiReadFrame(lateFrame, std::min<uint16_t>(25, remaining));
-      lastActivityAt = millis();
-      if (readResult == DSPI_FRAME_OK && lateFrame.type != UART_TYPE_NOTIFY) {
-        Serial.printf("DSPi recovery discarded late frame: req=0x%02X type=0x%02X len=%u\n",
-                      request, lateFrame.type, lateFrame.length);
-      }
-    } else {
-      bool minimumPassed = elapsed >= DSPI_RECOVERY_MIN_MS;
-      bool lineQuiet = (uint32_t)(millis() - lastActivityAt) >= DSPI_RECOVERY_QUIET_MS;
-      if (minimumPassed && lineQuiet) return;
-      delay(1);
+bool dspiSynchronizeLegacyUart()
+{
+  if (dspiRecoveryRetryAt && (int32_t)(millis() - dspiRecoveryRetryAt) < 0) return false;
+  // DSPi serializes requests/replies. A distinctive read-only reply is a FIFO
+  // fence: discard older replies until it arrives, not just until RX is quiet.
+  // No normal commands may be sent while the fence remains unconfirmed.
+  dspiSendRequest(true, 0x7e, 0, 2, nullptr, 16);
+  const unsigned long deadline = millis() + PRESET_SAVE_RESPONSE_TIMEOUT_MS;
+  while ((long)(millis() - deadline) < 0) {
+    UartFrame frame = {};
+    const auto result = dspiReadFrame(frame, (uint16_t)max(1L, (long)(deadline - millis())));
+    if (result == DSPI_FRAME_OK && dspiIsRecoveryMarker(frame)) {
+      dspiUartNeedsRecovery = false;
+      dspiRecoveryRetryAt = 0;
+      Serial.println("DSPi UART: recovery fence confirmed");
+      return true;
     }
   }
+  dspiRecoveryRetryAt = millis() + 500;
+  return false;
+}
 
-  // If traffic persisted through the cap, a quiet interval was not proven.
-  // Reset the ESP32 UART receiver and hold it disabled for the same quiet
-  // interval. This is the bounded resynchronization fallback, not a raw drain.
-  Serial.printf("DSPi recovery UART reset: req=0x%02X\n", request);
-  DspiSerial.end();
-  delay(DSPI_RECOVERY_QUIET_MS);
-  DspiSerial.begin(DSPI_UART_BAUD, SERIAL_8N1, DSPI_UART_RX_PIN, DSPI_UART_TX_PIN);
+void dspiRecoverAfterTimeout(uint8_t request)
+{
+  dspiUartNeedsRecovery = true;
+  dspiRecoveryRetryAt = 0;
+  Serial.printf("DSPi UART: uncertain reply req=0x%02X; recovery required\r\n", request);
 }
 
 DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
@@ -7699,8 +7842,44 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
                                     bool affectLinkState, bool allowReplay)
 {
   rxLength = 0;
+  if (DspiLink::transportOwnsUart()) {
+    if (dspiRequestInFlight) return DSPI_TXN_REENTRANT;
+    const dspi_request_t native = {isGet,request,value,index,txLength,txPayload};
+    if (!DspiLink::hubAllowsLocal(native)) return DSPI_TXN_BUSY;
+    dspiRequestInFlight = true;
+    dspi_reply_t reply = {};
+    const auto admission = DspiLink::executeLocal(native,allowReplay,
+                                                 rxPayload,rxCapacity,reply);
+    dspiRequestInFlight = false;
+    if (admission == DspiLink::LinkAdmission::Busy) return DSPI_TXN_BUSY;
+    if (admission != DspiLink::LinkAdmission::Accepted) return DSPI_TXN_TIMEOUT;
+    if (reply.kind != DSPI_REPLY_ANSWERED) return DSPI_TXN_TIMEOUT;
+    const DspiTxnResult result = dspiResultForStatus(reply.status);
+    if (result == DSPI_TXN_OK) {
+      rxLength = reply.length;
+      dspiFailureCount = 0;
+      dspi.connected = true;
+    }
+    return result;
+  }
   if (dspiRequestInFlight) return DSPI_TXN_REENTRANT;
   dspiRequestInFlight = true;
+  const bool recoveryProbeDue = !dspiRecoveryRetryAt ||
+      (int32_t)(millis() - dspiRecoveryRetryAt) >= 0;
+  if (dspiUartNeedsRecovery && !dspiSynchronizeLegacyUart()) {
+    dspiRequestInFlight = false;
+    // A throttle-only skip is not a failed request, but an actual missing
+    // fence must still drive the existing offline/meter invalidation path.
+    if (affectLinkState && recoveryProbeDue) {
+      if (dspiFailureCount < 255) ++dspiFailureCount;
+      if (dspiFailureCount >= 4 && dspi.connected) {
+        dspi.connected = false;
+        mediaDspiSourcePrimed = false;
+        resetMetersForStateChange("DSPi link lost");
+      }
+    }
+    return DSPI_TXN_BUSY;
+  }
   DspiTxnResult finalResult = DSPI_TXN_TIMEOUT;
 
   const uint8_t attempts = allowReplay ? DSPI_TRANSACTION_ATTEMPTS : 1;
@@ -7733,12 +7912,17 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
         break;
       }
       if (frame.type == UART_TYPE_NOTIFY) continue;
+      // Timed-out fence probes can themselves reply late. Never allow their
+      // distinctive payload to satisfy an ordinary 16-byte status request.
+      if (dspiIsRecoveryMarker(frame) &&
+          !(isGet && request == 0x7e && value == 0 && index == 2 && txLength == 16)) continue;
 
       uint8_t expectedType = isGet ? UART_RESP_GET : UART_RESP_SET;
       if (frame.type != expectedType) {
         Serial.printf("DSPi discarded response type mismatch: req=0x%02X type=0x%02X\n",
                       request, frame.type);
-        continue;
+        finalResult = DSPI_TXN_UNEXPECTED;
+        break;
       }
 
       finalResult = dspiResultForStatus(frame.status);
@@ -7756,7 +7940,13 @@ DspiTxnResult dspiTransactionResult(bool isGet, uint8_t request, uint16_t value,
       return DSPI_TXN_OK;
     }
 
-    if (finalResult == DSPI_TXN_TIMEOUT) dspiRecoverAfterTimeout(request);
+    if (finalResult == DSPI_TXN_TIMEOUT || finalResult == DSPI_TXN_LOCAL_CRC ||
+        finalResult == DSPI_TXN_LOCAL_FRAME || finalResult == DSPI_TXN_UNEXPECTED) {
+      // Retrying here could leave two valid replies with no request IDs.
+      // Abort this operation; the next call must first establish the fence.
+      dspiRecoverAfterTimeout(request);
+      break;
+    }
     if (!dspiResultCanRetry(finalResult) || attempt + 1 >= attempts) break;
     Serial.printf("DSPi retry: req=0x%02X reason=%s attempt=%u/%u\n", request,
                   dspiTxnResultText(finalResult), attempt + 2, DSPI_TRANSACTION_ATTEMPTS);
@@ -7966,6 +8156,7 @@ bool getExact(uint8_t request, uint16_t value, uint16_t expectedLength,
   if (length != expectedLength) {
     Serial.printf("DSPi length reject: req=0x%02X expected=%u actual=%u\n",
                   request, expectedLength, length);
+    if (!DspiLink::transportOwnsUart()) dspiRecoverAfterTimeout(request);
     return false;
   }
   return true;
@@ -8476,6 +8667,27 @@ String inputSourceDisplayText(InputSource source)
   return "Unknown";
 }
 
+uint16_t runtimeFeatureFlags(const DspiState& state)
+{
+  const uint8_t values=(state.muted?1:0)|(state.loudnessEnabled?2:0)|
+      (state.crossfeedEnabled?4:0)|(state.levellerEnabled?8:0)|
+      (state.psybassEnabled?16:0)|(state.subSynth.value[SUB_ENABLE]!=0?32:0)|
+      (state.tube.enabled!=0?64:0);
+  const uint8_t known=15|(state.psybassSupported?16:0)|
+      (state.subSynth.known&&state.subSynth.supported?32:0)|
+      (state.tube.known&&state.tube.supported?64:0);
+  return uint16_t(values)|(uint16_t(known)<<8);
+}
+
+void announceRuntimeFeatureChange(uint16_t before,uint16_t after)
+{
+  const uint8_t changed=uint8_t(before^after)&uint8_t(before>>8)&uint8_t(after>>8);
+  static const char* names[]={"Mute","Loudness","Crossfeed","Leveller","Psy Bass","Sub Synth","Tube"};
+  for(unsigned i=0;i<7;++i)if(changed&(1u<<i)){
+    showFeatureStateNotification(names[i],(after&(1u<<i))!=0);return;
+  }
+}
+
 bool syncCurrentState(bool includePresetNames)
 {
   // Nothing visible changes until every required field has passed its exact
@@ -8618,6 +8830,7 @@ bool syncCurrentState(bool includePresetNames)
   }
 
   const bool oldConnected = dspi.connected;
+  const uint16_t oldFeatures = runtimeFeatureFlags(dspi);
   InputSource oldSource = dspi.source;
   uint8_t oldActivePreset = dspi.activePreset;
   uint8_t oldSpdifState = dspi.spdifState;
@@ -8671,6 +8884,11 @@ bool syncCurrentState(bool includePresetNames)
       showSourceChangeOverlay(dspi.source);
     }
   }
+  // Link mutations can request a full sweep before the lightweight watcher.
+  // Compare the verified publication here too, before its new values become
+  // the next watcher's baseline. Preset/source identity still takes priority.
+  if(oldConnected && !presetChanged && !sourceChanged)
+    announceRuntimeFeatureChange(oldFeatures,runtimeFeatureFlags(dspi));
   if (menuPage == PAGE_PRESET && !editActive &&
       oldActivePreset != dspi.activePreset) {
     menuIndex = dspi.activePreset;
@@ -8695,6 +8913,11 @@ bool pollExternalRuntimeState()
   if (!dspi.connected) return false;
 
   float observedVolume = dspi.volumeDb;
+  float observedMaster = dspi.masterVolumeDb;
+  uint8_t observedMute = dspi.muted ? 1 : 0;
+  const bool sharedControl=DspiLink::hubStatus().active;
+  static bool masterBaseline=false;
+  if(!externalRuntimeStateReady)masterBaseline=false;
   uint8_t observedPreset = dspi.activePreset;
   uint8_t observedSource = (uint8_t)dspi.source;
   uint8_t observedLoudness = dspi.loudnessEnabled ? 1 : 0;
@@ -8713,7 +8936,15 @@ bool pollExternalRuntimeState()
   // source, or the Home feature symbols.
   const bool volumeValid =
       getExactFloat(REQ_GET_USER_VOLUME, observedVolume, true);
-  if (!volumeValid) return false;
+  if (!volumeValid && !sharedControl) return false;
+  // USB Console and DSPi-side IR controls can change these with Link off.
+  // Read only: Home/encoder remain User Volume; never copy Master into it.
+  const bool masterValid=getExactFloat(REQ_GET_MASTER_VOLUME,observedMaster,false);
+  const bool muteValid=getExactByte(REQ_GET_USER_MUTE,observedMute,0,false)&&observedMute<=1;
+  const bool masterChanged=masterValid&&masterBaseline&&fabsf(observedMaster-dspi.masterVolumeDb)>.01f;
+  const bool muteChanged=muteValid&&(observedMute!=0)!=dspi.muted;
+  if(masterValid){dspi.masterVolumeDb=observedMaster;masterBaseline=true;}
+  if(muteValid)dspi.muted=observedMute!=0;
   const bool presetValid =
       getExactByte(REQ_PRESET_GET_ACTIVE, observedPreset, 0, false) &&
       observedPreset < 10;
@@ -8807,7 +9038,7 @@ bool pollExternalRuntimeState()
   const bool subSynthMenuChanged = pollVisibleSubSynthSettings();
   const bool tubeLimiterMenuChanged = pollVisibleTubeLimiterSettings();
   const bool anyChanged = tubeLimiterMenuChanged || subSynthMenuChanged ||
-      tubeChanged || limiterChanged || volumeChanged || presetChanged || sourceChanged ||
+      tubeChanged || limiterChanged || masterChanged || muteChanged || volumeChanged || presetChanged || sourceChanged ||
       loudnessChanged || crossfeedChanged || levellerChanged ||
       psybassChanged || subSynthChanged || spdifStatusChanged;
 
@@ -8870,6 +9101,8 @@ bool pollExternalRuntimeState()
         uiView == VIEW_CHANGE_OVERLAY) {
       showSourceChangeOverlay(dspi.source);
     }
+  } else if (muteChanged) {
+    showFeatureStateNotification("Mute",dspi.muted);
   } else if (loudnessChanged) {
     showFeatureStateNotification("Loudness", dspi.loudnessEnabled);
   } else if (crossfeedChanged) {
@@ -8882,9 +9115,6 @@ bool pollExternalRuntimeState()
     showFeatureStateNotification("Sub Synth", observedSubSynth != 0);
   } else if (tubeChanged) {
     showFeatureStateNotification("Tube", observedTube != 0);
-  } else if (volumeChanged && uiView == VIEW_VISUALIZER &&
-             visualizerPage == VISUALIZER_SPECTRUM) {
-    showSpectrumVolumeNotification();
   }
 
   if (presetChanged && menuPage == PAGE_PRESET && !editActive) {
@@ -9139,12 +9369,14 @@ bool setUserVolume(float value)
 
 bool setMasterVolumeVerified(float value)
 {
-  value = constrain(roundf(value * 2.0f) / 2.0f, -60.0f, 0.0f);
+  if (!isfinite(value)) return false;
+  value = constrain(roundf(value * 2.0f) / 2.0f, -128.0f, 0.0f);
   if (!dspiSetFloat(REQ_SET_MASTER_VOLUME, value)) return false;
 
   float readback = dspi.masterVolumeDb;
   if (!dspiGetFloat(REQ_GET_MASTER_VOLUME, readback)) return false;
-  if (fabsf(readback - value) > 0.26f) return false;
+  if (!isfinite(readback) || readback < -128.0f || readback > 0.0f ||
+      fabsf(readback - value) > 0.26f) return false;
 
   dspi.masterVolumeDb = readback;
   return true;
@@ -9152,6 +9384,8 @@ bool setMasterVolumeVerified(float value)
 
 bool ensureIndependentMasterVolumeModeVerified()
 {
+  if(!DspiLink::freshLocalValue(DspiLink::hubStatus().active,dspi.masterVolumeMode,
+      [](uint8_t &confirmed){return getExactByte(REQ_GET_MASTER_VOLUME_MODE,confirmed)&&confirmed<=1;}))return false;
   // The panel intentionally presents Volume Limit as one device-wide safety
   // ceiling. Existing Console mode is left alone until the user applies a
   // limit here; at that point switch DSPi to its native independent mode.
@@ -9173,6 +9407,8 @@ bool ensureIndependentMasterVolumeModeVerified()
 
 bool ensurePresetMasterVolumeModeVerified()
 {
+  if(!DspiLink::freshLocalValue(DspiLink::hubStatus().active,dspi.masterVolumeMode,
+      [](uint8_t &confirmed){return getExactByte(REQ_GET_MASTER_VOLUME_MODE,confirmed)&&confirmed<=1;}))return false;
   // A held-OK preset save is explicitly a complete per-preset snapshot. DSPi
   // only includes Master Volume in native preset data while Mode 1 is active.
   if (dspi.masterVolumeMode == 1) return true;
@@ -9216,6 +9452,16 @@ bool setUserMute(bool enabled)
   if (!dspiSetByte(REQ_SET_USER_MUTE, enabled ? 1 : 0)) return false;
   dspi.muted = enabled;
   return true;
+}
+
+bool refreshLinkToggle(uint8_t request,bool &cached)
+{
+  return DspiLink::freshLocalValue(DspiLink::hubStatus().active,cached,
+      [request](bool &confirmed){uint8_t value=0;if(!getExactByte(request,value)||value>1)return false;confirmed=value!=0;return true;});
+}
+bool toggleUserMuteCurrent()
+{
+  return refreshLinkToggle(REQ_GET_USER_MUTE,dspi.muted)&&setUserMute(!dspi.muted);
 }
 
 bool setUserMuteVerified(bool enabled, uint8_t attempts = 4)
@@ -9869,6 +10115,7 @@ bool mediaPlaybackBufferLow()
 
 void serviceMediaArtwork()
 {
+  if (networkOwnsAudio()) return;
   MediaArtworkResult result;
   while (mediaArtworkResultQueue &&
          xQueueReceive(mediaArtworkResultQueue, &result, 0) == pdTRUE) {
@@ -9958,6 +10205,8 @@ void serviceMediaDeferredRedraw()
 bool startMediaPlaybackPrepared(const char *path,
                                 bool preserveRouteOnFailure)
 {
+  if (networkIsArmed()) { showToast("Stop Network first"); return false; }
+  if (!linkAllowMusic()) return false;
   if (!path || !path[0] ||
       mediaPlayerPoc.playbackState() != MediaPlaybackState::Stopped) {
     return false;
@@ -9979,6 +10228,7 @@ bool startMediaPlaybackPrepared(const char *path,
 bool startMediaPlaybackAttempt(const char *path, bool preserveRouteOnFailure,
                                bool reloadArtwork)
 {
+  if (!linkAllowMusic()) return false;
   if (!path || !path[0]) return false;
   mediaTrackTransition = MediaTrackTransitionState{};
   // A direct start is not a cooperative transition. stop() is idempotent and
@@ -10008,6 +10258,15 @@ String mediaPlaybackFailureToast()
 {
   const char *reason = mediaPlayerPoc.playbackError();
   if (!reason || !reason[0]) return "Music error";
+  if (strcmp(reason,"DSPi S/PDIF route verification failed") == 0) return "DSPi audio route failed";
+  if (strcmp(reason,"ESP32 S/PDIF TX setup failed") == 0) return "Audio output unavailable";
+  if (strcmp(reason,"SD card is not mounted") == 0) return "SD card not mounted";
+  if (strcmp(reason,"SD read failed or card removed") == 0) return "SD card read failed";
+  if (strcmp(reason,"decoder task creation failed") == 0) return "Decoder memory unavailable";
+  if (strcmp(reason,"S/PDIF output task creation failed") == 0) return "Output memory unavailable";
+  if (strcmp(reason,"S/PDIF DMA staging allocation failed") == 0) return "Output buffer unavailable";
+  if (strcmp(reason,"PSRAM ring allocation failed") == 0) return "Audio buffer unavailable";
+  if (strstr(reason,"allocation failed") || strstr(reason,"task creation failed")) return "Audio memory unavailable";
   if (strcmp(reason, "header probe failed") == 0) {
     return "Audio header rejected";
   }
@@ -10073,7 +10332,9 @@ bool requestMediaTrackTransition(int candidateIndex, int direction, bool wrap,
                                  bool skipRejected, bool autoAdvance,
                                  bool preserveRouteOnFailure)
 {
+  if (!linkAllowMusic()) return false;
   if (candidateIndex < 0 || candidateIndex >= mediaQueueCount) return false;
+  if (!networkAllowSdTrack(candidateIndex,direction,wrap,skipRejected,autoAdvance,preserveRouteOnFailure)) return false;
 
   cancelMediaArtworkRequest(true);
   clearMediaRejection();
@@ -10159,6 +10420,7 @@ void serviceMediaTrackTransition()
                   candidate, mediaQueuePaths[candidate],
                   mediaPlayerPoc.playbackError());
     if (mediaTrackTransition.skipRejected &&
+        mediaMaySkipStartFailure(mediaPlayerPoc.playbackError()) &&
         mediaTrackTransition.attempts < mediaQueueCount &&
         moveMediaTransitionCandidate()) {
       mediaPlayerPoc.requestTrackTransitionStop();
@@ -10168,6 +10430,7 @@ void serviceMediaTrackTransition()
       }
       return;
     }
+    recordMediaRejection(mediaTrackTransition.displayPath,mediaPlaybackFailureToast());
     mediaPlayerPoc.requestStop();
     mediaTrackTransition.phase = MediaTrackTransitionPhase::FailureCleanup;
   };
@@ -10243,6 +10506,7 @@ void serviceMediaTrackTransition()
 
 void stopMediaPlayback(const char *reason)
 {
+  if(!networkStopForMediaGuard())Serial.println("NETWORK: stop still pending; flash guard remains closed");
   cancelMediaTrackTransition();
   cancelMediaArtworkRequest(true);
   if (mediaPlayerPoc.playbackState() != MediaPlaybackState::Stopped) {
@@ -10275,6 +10539,17 @@ void parkMediaPlayback(const char *reason)
                 mediaCurrentPath[0] ? mediaCurrentPath : "(none)");
 }
 
+void stopMediaForInputChange(const char *reason)
+{
+  networkBeforeInputChange();
+  // A deliberate new source owns the route. Never restore the source captured
+  // before music, either synchronously during stop or on a later retry.
+  mediaRoute = MediaDspiRouteSnapshot{};
+  mediaRouteRestorePending = false;
+  mediaRouteRestoreRetryAt = 0;
+  stopMediaPlayback(reason);
+}
+
 bool playMediaQueueIndex(int index)
 {
   return requestMediaTrackTransition(index, 0, false, false, false, false);
@@ -10282,6 +10557,7 @@ bool playMediaQueueIndex(int index)
 
 bool skipMediaTrack(int direction, bool wrap)
 {
+  if (networkUsesNowPlaying()) return networkSkip(direction);
   if (mediaQueueCount == 0 || direction == 0) return false;
   const int step = direction > 0 ? 1 : -1;
   int base = mediaTrackTransitionActive()
@@ -10298,14 +10574,15 @@ bool skipMediaTrack(int direction, bool wrap)
 
 bool toggleMediaPause()
 {
+  if (networkUsesNowPlaying()) return networkTogglePlayback();
+  if (!linkAllowMusic()) return false;
   if (mediaTrackTransitionActive()) return false;
   MediaPlaybackState state = mediaPlayerPoc.playbackState();
   if (state == MediaPlaybackState::Playing) {
     if (!mediaPlayerPoc.togglePause()) return false;
     mediaPlaybackSuspended = true;
-    // Restore the prior physical source while paused, but treat this as an
-    // internal route transition so the listener's volume is preserved.
-    restoreDspiMediaRoute();
+    // Stay on the music S/PDIF input. Decoder position and encoded-silence
+    // carrier remain available for an exact resume until the user changes input.
     Serial.printf("MEDIA PLAY: paused in place frame=%llu path=%s\n",
                   (unsigned long long)mediaPlayerPoc.playbackStats().outputFrames,
                   mediaCurrentPath[0] ? mediaCurrentPath : "(none)");
@@ -10357,6 +10634,7 @@ uint16_t mediaSeekStepSeconds()
 
 bool seekMediaRelative(int direction, uint16_t seconds)
 {
+  if (networkUsesNowPlaying()) return networkSeekRelative(direction,seconds);
   if (mediaTrackTransitionActive() || !mediaPlayerPoc.active() ||
       direction == 0 || seconds == 0) return false;
 
@@ -10427,6 +10705,7 @@ void serviceMediaSeek()
 
 void serviceMediaPlayback()
 {
+  if (networkOwnsAudio()) return;
   // Terminal cleanup is intentionally cooperative. The decoder task is woken
   // once, then each main-loop pass checks whether both media tasks have left.
   // This keeps BLE, encoder and screen service alive during album transitions.
@@ -10846,6 +11125,7 @@ void transitionToMediaNowPlaying()
   fadeUiOut();
   mediaVolumeOverlayVisible = false;
   uiView = VIEW_MEDIA_NOW_PLAYING;
+  if (networkUsesNowPlaying()) { drawMediaNowPlaying(); fadeUiIn(); return; }
   if (mediaPlayerPoc.active() && !mediaArtworkPixels &&
       !mediaArtworkRequestPending && mediaCurrentPath[0]) {
     scheduleMediaArtwork(mediaCurrentPath);
@@ -10923,6 +11203,8 @@ bool loadPreset(uint8_t slot, bool announce)
   const uint32_t mediaRate = mediaPlayerPoc.playbackFile().sampleRate;
   const bool originalMute = dspi.muted;
   const float originalMasterVolume = dspi.masterVolumeDb;
+  // Never raise a quiet/muted Master while establishing preset guards.
+  const float guardMasterVolume = originalMasterVolume < -60.0f ? originalMasterVolume : -60.0f;
   const uint8_t originalSlot = dspi.activePreset;
   const bool holdAcquired = mediaPlayerPoc.beginExternalHold(800);
   if (!holdAcquired) {
@@ -10952,7 +11234,7 @@ bool loadPreset(uint8_t slot, bool announce)
     // only after both independent guards have exact readback. Otherwise the
     // hold remains latched until a physical reset; this is deliberately safer
     // than claiming the output is muted when UART verification failed.
-    const bool masterGuard = setMasterVolumeVerified(-60.0f);
+    const bool masterGuard = setMasterVolumeVerified(guardMasterVolume);
     const bool muteGuard = setUserMuteVerified(true);
     if (masterGuard && muteGuard) {
       mediaPlayerPoc.endExternalHold();
@@ -10987,7 +11269,7 @@ bool loadPreset(uint8_t slot, bool announce)
   // Keep the output muted and the independent master ceiling clamped while
   // DSPi swaps the preset snapshot. User Volume is intentionally not written:
   // the value stored in the selected preset is the source of truth.
-  const bool preMasterGuard = setMasterVolumeVerified(-60.0f);
+  const bool preMasterGuard = setMasterVolumeVerified(guardMasterVolume);
   const bool preMuteGuard = setUserMuteVerified(true);
   if (!preMasterGuard || !preMuteGuard) {
     restoreOriginalAndRelease("pre-load guard verification");
@@ -11060,7 +11342,7 @@ bool loadPreset(uint8_t slot, bool announce)
     return false;
   }
 
-  const bool postMasterGuard = setMasterVolumeVerified(-60.0f);
+  const bool postMasterGuard = setMasterVolumeVerified(guardMasterVolume);
   const bool postMuteGuard = setUserMuteVerified(true);
   if (!postMasterGuard || !postMuteGuard) {
     failAfterPossibleAcceptance("post-load guard verification");
@@ -11140,7 +11422,7 @@ bool loadPreset(uint8_t slot, bool announce)
 bool saveCurrentPreset(uint8_t destinationSlot)
 {
   if (!dspi.connected || destinationSlot >= 10 ||
-      mediaPlayerPoc.active() || presetSaveCompletionPending) return false;
+      mediaPlayerPoc.active() || !networkMediaGuardQuiet() || presetSaveCompletionPending) return false;
 
   if (!ensurePresetMasterVolumeModeVerified()) {
     Serial.println("PRESET SAVE: unable to enable preset-scoped Master Volume");
@@ -11379,6 +11661,10 @@ String mediaSeekStepText(uint8_t index)
 
 String mediaBrowserItemName(uint8_t index)
 {
+  if(menuPage==PAGE_NETWORK_BROWSER){const char* name;bool directory;
+    if(networkBrowserEntry(index,name,directory))return directory?cleanDisplayText(String(name),90):mediaTrackTitle(name);
+    return networkMenuName(PAGE_NETWORK_BROWSER,index);
+  }
   if (mediaBrowserItemIsNowPlaying(index)) return "Now Playing";
   if (mediaBrowserItemIsSettings(index)) return "Playback Settings";
   if (!mediaPlayerPoc.mounted()) return "Check SD card";
@@ -11393,6 +11679,10 @@ String mediaBrowserItemName(uint8_t index)
 
 String mediaBrowserItemTag(uint8_t index)
 {
+  if(menuPage==PAGE_NETWORK_BROWSER){const char* name;bool directory;
+    if(!networkBrowserEntry(index,name,directory))return "";
+    String lower(name);lower.toLowerCase();return directory?"FOLDER":lower.endsWith(".flac")?"FLAC":lower.endsWith(".mp3")?"MP3":"WAV";
+  }
   if (mediaBrowserItemIsNowPlaying(index)) {
     MediaPlaybackState playback = mediaPlayerPoc.playbackState();
     if (playback == MediaPlaybackState::Seeking) return "SEEKING";
@@ -11411,6 +11701,7 @@ String mediaBrowserItemTag(uint8_t index)
 
 bool mediaBrowserItemIsPlaying(uint8_t itemIndex)
 {
+  if(menuPage==PAGE_NETWORK_BROWSER)return networkMenuPlaying(PAGE_NETWORK_BROWSER,itemIndex);
   if (!mediaCurrentPath[0]) return false;
   int16_t entryIndex = mediaBrowserEntryIndex(itemIndex);
   if (entryIndex < 0) return false;
@@ -11453,9 +11744,21 @@ String presetText()
   return "P" + String((int)dspi.activePreset + 1);
 }
 
+float displayedVolumeDb()
+{
+  return PanelHomeVolume::level(homeVolumeDisplay, uiView == VIEW_HOME,
+                                dspi.volumeDb, dspi.masterVolumeDb);
+}
+
+bool displayedVolumeMuted()
+{
+  return PanelHomeVolume::muted(homeVolumeDisplay, uiView == VIEW_HOME,
+                                dspi.muted, dspi.masterVolumeDb);
+}
+
 String volumeText()
 {
-  return String(dspi.volumeDb, 1);
+  return String(displayedVolumeDb(), 1);
 }
 
 String sampleRateText()
@@ -11532,6 +11835,8 @@ String levellerSpeedText(uint8_t value)
 
 String pageTitle(MenuPage page)
 {
+  if (networkOwnsPage(page)) return networkPageTitle(page);
+  if (linkOwnsPage(page)) return linkPageTitle(page);
   if (panelOwnsPage(page)) return panelPageTitle(page);
   switch (page) {
     case PAGE_MAIN: return "Menu";
@@ -11560,6 +11865,7 @@ String pageTitle(MenuPage page)
     case PAGE_SPECTRUM: return "Spectrum";
     case PAGE_SPECTRUM_COLOURS: return "Bar Colours";
     case PAGE_THEME: return "Theme";
+    case PAGE_VOLUME_DISPLAY: return "Volume display";
   }
   return "Menu";
 }
@@ -11655,13 +11961,15 @@ void clampBleMenuIndex()
 
 uint8_t menuItemCount(MenuPage page)
 {
+  if (networkOwnsPage(page)) return networkMenuCount(page);
+  if (linkOwnsPage(page)) return linkMenuCount(page);
   if (panelOwnsPage(page)) return panelMenuCount(page);
   switch (page) {
     case PAGE_MAIN: return 6;
     case PAGE_FEATURES: return 8;
     case PAGE_INPUT: return 1;
     case PAGE_MEDIA: return mediaBrowserItemCount();
-    case PAGE_PRESET: return 11;
+    case PAGE_PRESET: return 12;
     case PAGE_LOUDNESS: return 3;
     case PAGE_CROSSFEED: return 4;
     case PAGE_LEVELLER: return 6;
@@ -11679,19 +11987,22 @@ uint8_t menuItemCount(MenuPage page)
     case PAGE_BLUETOOTH: return bleMenuItemCount();
     case PAGE_SYSTEM: return 7;
     case PAGE_MEDIA_SETTINGS: return 1;
-    case PAGE_SCREEN_SETTINGS: return 5;
+    case PAGE_SCREEN_SETTINGS: return 6;
     case PAGE_IDLE_SCREEN:
       return screenTimeoutAction == SCREEN_TIMEOUT_DIM ? 5 : 4;
     case PAGE_SPECTRUM: return 4;
     case PAGE_SPECTRUM_COLOURS:
       return std::max<uint8_t>(1, spectrumColourRowCount());
-    case PAGE_THEME: return 4;
+    case PAGE_THEME: return uiThemeRowCount(retroTheme.enabled);
+    case PAGE_VOLUME_DISPLAY: return 2;
   }
   return 1;
 }
 
 String menuItemName(MenuPage page, uint8_t index)
 {
+  if (networkOwnsPage(page)) return networkMenuName(page,index);
+  if (linkOwnsPage(page)) return linkMenuName(page,index);
   if (panelOwnsPage(page)) return panelMenuName(page,index);
   if (page == PAGE_MAIN) {
     return PanelControlMenus::mainLabel(index);
@@ -11737,7 +12048,8 @@ String menuItemName(MenuPage page, uint8_t index)
   if (page == PAGE_MEDIA) {
     return mediaBrowserItemName(index);
   }
-  if (page == PAGE_PRESET) return index < 10 ? presetListLabel(index) : String("Preset Tools");
+  if (page == PAGE_PRESET) return index < 10 ? presetListLabel(index) : index == 10 ? String("Preset Tools") : String("Back");
+  if (page == PAGE_VOLUME_DISPLAY) return index == PanelHomeVolume::Master ? "Master Volume" : "User Volume";
   if (page == PAGE_LOUDNESS) {
     const char *items[] = {"Enable", "Reference SPL", "Strength"};
     return items[std::min<uint8_t>(index, 2)];
@@ -11760,7 +12072,7 @@ String menuItemName(MenuPage page, uint8_t index)
   if (page == PAGE_SYSTEM) {
     const char *items[] = {
       "Remote", "Volume Limit", "Screen Settings",
-      "Inputs", "Hardware", "WiFi Transfer/Update", "Status"
+      "Input Names", "Hardware", "WiFi", "Status"
     };
     return items[std::min<uint8_t>(index, 6)];
   }
@@ -11770,7 +12082,8 @@ String menuItemName(MenuPage page, uint8_t index)
     if (index == 1) return "Idle Settings";
     if (index == 2) return "Idle Screen";
     if (index == 3) return "Spectrum";
-    return "Theme";
+    if (index == 4) return "Theme";
+    return "Volume display";
   }
   if (page == PAGE_SPECTRUM) {
     const char *items[] = {"Source", "Upper Channel", "Lower Channel",
@@ -11789,10 +12102,13 @@ String menuItemName(MenuPage page, uint8_t index)
     return "Dim Level";
   }
   if (page == PAGE_THEME) {
-    if (index == 0) return "Main Text Colour";
+    if (index == 0) return retroTheme.enabled ? "Text Colour" : "Main Text Colour";
     if (index == 1) return "Accent Colour";
-    if (index == 2) return "Volume Meters Colour";
-    return "Analog VU Colour";
+    if (index == 2) return retroTheme.enabled ? "Meter Colour" : "Volume Meters Colour";
+    if (index == 3) return "Analog VU Colour";
+    if (index == 4) return "Style";
+    if (index == 5 && retroTheme.enabled) return "Retro Volume";
+    return "";
   }
   return "";
 }
@@ -11896,16 +12212,21 @@ String currentEditValue()
   }
   if (menuPage == PAGE_SPECTRUM_COLOURS) return "";
   if (menuPage == PAGE_THEME) {
-    if (menuIndex < 3) return "";
-    return vuColourChoiceText((VuColourChoice)editInt);
+    if (menuIndex < 3 || menuIndex == 5) return "";
+    if (menuIndex == 3) return vuColourChoiceText((VuColourChoice)editInt);
+    if (menuIndex == 4) return editInt ? "Retro" : "Classic";
+    return editInt == 0 ? "Off" : editInt == 1 ? "Low" : editInt == 2 ? "Medium" : "High";
   }
   return "";
 }
 
 String menuItemValue(MenuPage page, uint8_t index)
 {
+  if (networkOwnsPage(page)) return networkMenuValue(page,index);
+  if (linkOwnsPage(page)) return linkMenuValue(page,index);
   if (panelOwnsPage(page)) return panelMenuValue(page,index);
   if (editActive) return currentEditValue();
+  if (page == PAGE_VOLUME_DISPLAY) return index == homeVolumeDisplay ? "Selected" : "";
   if (isSubSynthPage(page)) {
     if (!dspi.subSynth.known || !dspi.subSynth.supported) return "Unavailable";
     if (page == PAGE_SUB_OUTPUTS) {
@@ -11941,7 +12262,6 @@ String menuItemValue(MenuPage page, uint8_t index)
     return limiterValueText(p, limiterValue(out, p));
   }
   if (page == PAGE_MAIN) {
-    if (index == 1 && !mediaPlayerPoc.mounted()) return "NO SD";
     return "";
   }
   if (page == PAGE_INPUT) return sourceMenuText(displayedPhysicalInputSource());
@@ -11984,6 +12304,7 @@ String menuItemValue(MenuPage page, uint8_t index)
     if (index == 1) return String(dspi.masterVolumeDb, 1) + " dB";
     if (index == 2) return "Open";
     if (index == 3 || index == 4) return "Open";
+    if (index == 5) return "Open";
     if (index == 6) return dspi.connected ? "Ready" : "Fault";
     return "";
   }
@@ -11994,6 +12315,7 @@ String menuItemValue(MenuPage page, uint8_t index)
     if (index == 0) return String(brightnessPercent) + "%";
     if (index == 1) return screenTimeoutText(screenTimeoutOption);
     if (index == 2) return screenTimeoutActionText(screenTimeoutAction);
+    if (index == 5) return homeVolumeDisplay == PanelHomeVolume::Master ? "Master" : "User";
     return "Open";
   }
   if (page == PAGE_IDLE_SCREEN) {
@@ -12009,8 +12331,10 @@ String menuItemValue(MenuPage page, uint8_t index)
   }
   if (page == PAGE_SPECTRUM_COLOURS) return "";
   if (page == PAGE_THEME) {
-    if (index < 3) return "";
-    return vuColourChoiceText(analogVuColourChoice);
+    if (index < 3 || index == 5) return "";
+    if (index == 3) return vuColourChoiceText(analogVuColourChoice);
+    if (index == 4) return retroTheme.enabled ? "Retro" : "Classic";
+    return "";
   }
   return "";
 }
@@ -12215,7 +12539,7 @@ void serviceScreenPower()
   // whole exclusive transfer lifecycle.  Transfer mode has its own ten-minute
   // idle exit policy, so the normal display timeout must not hide recovery
   // state or credentials while the SD card is writable.
-  if (wifiTransferExclusive()) {
+  if (wifiTransferExclusive() || DspiLink::linkSetupStatus().active) {
     lastUserActivityAt = millis();
     screenTimeoutViewActive = false;
     if (screenDimmed) {
@@ -12371,6 +12695,10 @@ void drawBase()
 
 void drawTaperLine(int16_t centerX, int16_t y, int16_t length, int16_t maxThickness, uint16_t colour)
 {
+  if (retroTheme.enabled) {
+    for (int16_t x=centerX-length/2;x<centerX+length/2;x+=3) canvas->drawPixel(x,y,colour);
+    return;
+  }
   (void)maxThickness;
   int16_t half = length / 2;
   for (int16_t dx = -half; dx <= half; dx++) {
@@ -12557,6 +12885,14 @@ void drawFeatureIconForIndex(uint8_t index, int16_t centerX, int16_t y)
   }
 }
 
+void drawWifiStatus(const UiRect& slot)
+{
+ const auto status=PanelWifi::snapshot();
+ if(status.state==PanelWifi::State::Off||status.state==PanelWifi::State::Stopping||status.state==PanelWifi::State::Error)return;
+ const uint16_t colour=status.stationConnected?uiMainText():blend565(C_BLACK,uiMainText(),90);
+ PanelWifiGlyph::draw([](int x,int y,uint16_t c){canvas->drawPixel(x,y,c);},slot.x,slot.y,colour);
+}
+
 void drawTopStatus()
 {
   String src = sourceText();
@@ -12578,50 +12914,35 @@ void drawTopStatus()
       dspi.limiter.engagedKnown && dspi.limiter.engaged) {
     iconMask |= UI_FEATURE_LIMITER;
   }
-  static constexpr uint8_t ICON_SCALE_PERCENT = 125;
-  static constexpr int16_t ICON_GAP = 7;
-  const int16_t iconSpan = uiFeatureIconScaledSpan(
-      iconMask, ICON_SCALE_PERCENT, ICON_GAP);
-  // Reserve space between source and preset, so the icons occupy the same
-  // header line instead of a second row over the volume readout.
-  const int16_t sourceBudget = std::max<int16_t>(0,
-      302 - presetWidth - 18 - 28 - iconSpan);
+  const auto header=uiHomeHeader(presetWidth,fontTextWidth(FontMedium,src),retroTheme.enabled,
+      iconMask,fontTextWidth(FontMedium,"MM"));
+  const uint8_t ICON_SCALE_PERCENT = header.iconScale;
+  const int16_t sourceBudget = header.sourceBudget;
   const String shownSource = ellipsizeFontText(FontMedium, src, sourceBudget);
-  const int16_t sourceRight = 18 + fontTextWidth(FontMedium, shownSource);
-  const int16_t presetLeft = 302 - presetWidth;
   drawFontText(FontMedium, 18, 18, shownSource, uiMainText());
   drawFontRight(FontMedium, 302, 18, preset, uiMainText());
-  const int16_t iconX = std::max<int16_t>(sourceRight + 8,
-      std::min<int16_t>((UI_W - iconSpan) / 2, presetLeft - iconSpan - 8));
-  const int16_t iconY = 20;
+  drawWifiStatus(header.wifi);
   const uint16_t iconColour = uiVolumeMeterColour();
   if (dspi.loudnessEnabled) {
-    drawEarIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_LOUDNESS,
-        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
+    drawEarIcon(header.icons[0].x,header.icons[0].y,iconColour,ICON_SCALE_PERCENT);
   }
   if (dspi.crossfeedEnabled) {
-    drawHeadphonesIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_CROSSFEED,
-        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
+    drawHeadphonesIcon(header.icons[1].x,header.icons[1].y,iconColour,ICON_SCALE_PERCENT);
   }
   if (dspi.levellerEnabled) {
-    drawLevellerIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_LEVELLER,
-        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
+    drawLevellerIcon(header.icons[2].x,header.icons[2].y,iconColour,ICON_SCALE_PERCENT);
   }
   if (dspi.psybassSupported && dspi.psybassEnabled) {
-    drawPsybassIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_PSY_BASS,
-        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
+    drawPsybassIcon(header.icons[3].x,header.icons[3].y,iconColour,ICON_SCALE_PERCENT);
   }
   if (dspi.subSynth.known && dspi.subSynth.supported && dspi.subSynth.value[SUB_ENABLE]) {
-    drawSubSynthIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_SUB_SYNTH,
-        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
+    drawSubSynthIcon(header.icons[4].x,header.icons[4].y,iconColour,ICON_SCALE_PERCENT);
   }
   if (iconMask & UI_FEATURE_TUBE) {
-    drawTubeIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_TUBE,
-        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
+    drawTubeIcon(header.icons[5].x,header.icons[5].y,iconColour,ICON_SCALE_PERCENT);
   }
   if (iconMask & UI_FEATURE_LIMITER) {
-    drawLimiterIcon(iconX + uiFeatureIconScaledOffset(iconMask, UI_FEATURE_LIMITER,
-        ICON_SCALE_PERCENT, ICON_GAP), iconY, iconColour, ICON_SCALE_PERCENT);
+    drawLimiterIcon(header.icons[6].x,header.icons[6].y,iconColour,ICON_SCALE_PERCENT);
   }
 }
 
@@ -12679,7 +13000,19 @@ int16_t volumeTextWidthCustom(const String &text)
 
 void drawVolumeNumber(int16_t y)
 {
-  if (dspi.muted) {
+  const bool muted = displayedVolumeMuted();
+  if (retroTheme.enabled && !muted) {
+    const String value = volumeText();
+    const uint16_t colour = themePaletteColour(retroTheme.volume);
+    const int width = RetroPixel::volumeWidth(60);
+    const int x = (UI_W-width-32)/2;
+    RetroPixel::volume([](int px,int py,uint16_t c){canvas->drawPixel(px,py,c);},
+        x,y+8,value.c_str(),60,76,colour,
+        RetroPixel::dim(colour,RetroPixel::unlitAlpha(retroTheme.unlit)));
+    drawFontText(FontDb,x+width+5,y+60,"dB",colour);
+    return;
+  }
+  if (muted) {
     drawFontCentred(FontLarge, y, "Mute", uiMainText());
     return;
   }
@@ -12689,7 +13022,7 @@ void drawVolumeNumber(int16_t y)
   int16_t dbW = fontTextWidth(FontDb, "dB");
   int16_t dbX = UI_W - dbW - 8;
   int16_t volX = dbX - 10 - volW - 18;
-  if (fabs(dspi.volumeDb) < 10.0f) volX -= 12;
+  if (fabs(displayedVolumeDb()) < 10.0f) volX -= 12;
   if (volX < 8) volX = 8;
 
   uint16_t glow = blend565(C_BLACK, uiMainText(), 108);
@@ -12724,11 +13057,11 @@ uint16_t mix565(uint16_t a, uint16_t b, uint8_t amount)
 uint16_t meterGradientColour(uint16_t x, uint16_t maxWidth)
 {
   if (maxWidth == 0) {
-    return volumeMeterPaletteIndex == PALETTE_CYAN
+    return !retroTheme.enabled && volumeMeterPaletteIndex == PALETTE_CYAN
         ? C_CYAN_SOFT : blend565(C_BLACK, uiVolumeMeterColour(), 200);
   }
   uint16_t pos = (x * 1000UL) / maxWidth;
-  if (volumeMeterPaletteIndex == PALETTE_CYAN) {
+  if (!retroTheme.enabled && volumeMeterPaletteIndex == PALETTE_CYAN) {
     if (pos < 500) return C_CYAN;
     if (pos < 820) return mix565(C_CYAN, C_ORANGE,
         (uint8_t)(((pos - 500) * 255UL) / 320UL));
@@ -13152,6 +13485,7 @@ void drawLevelBars()
 
 void drawFontCentredGlow(const FontDef &font, int16_t y, const String &text)
 {
+  if (retroTheme.enabled) { drawFontCentred(font,y,text,uiMainText()); return; }
   int16_t x = std::max<int16_t>(0, (UI_W - fontTextWidth(font, text)) / 2);
   uint16_t glow = blend565(C_BLACK, uiMainText(), 58);
   drawFontText(font, x + 1, y, text, glow);
@@ -13162,6 +13496,7 @@ void drawFontCentredGlow(const FontDef &font, int16_t y, const String &text)
 void drawMenuOptionCentredGlow(int16_t y, const String &text)
 {
   const FontDef &font = fontTextWidth(FontMedium, text) <= UI_W - 16 ? FontMedium : FontSmall;
+  if (retroTheme.enabled) { drawFontCentred(font,y,text,uiMainText()); return; }
   int16_t x = std::max<int16_t>(0, (UI_W - fontTextWidth(font, text)) / 2);
   uint16_t glow = blend565(C_BLACK, uiMainText(), 72);
   drawFontText(font, x + 1, y, text, glow);
@@ -13171,6 +13506,7 @@ void drawMenuOptionCentredGlow(int16_t y, const String &text)
 
 void drawFontCentredGlowColour(const FontDef &font, int16_t y, const String &text, uint16_t colour)
 {
+  if (retroTheme.enabled) { drawFontCentred(font,y,text,colour); return; }
   int16_t x = std::max<int16_t>(0, (UI_W - fontTextWidth(font, text)) / 2);
   uint16_t glow = blend565(C_BLACK, colour, 74);
   drawFontText(font, x + 1, y, text, glow);
@@ -13232,6 +13568,14 @@ void drawFixedVolumeLimitValue(int16_t y, const String &value, uint16_t colour)
 {
   String number = value;
   number.replace(" dB", "");
+  if (retroTheme.enabled) {
+    const int width = RetroPixel::volumeWidth(60);
+    const int x = (UI_W-width-32)/2;
+    RetroPixel::volume([](int px,int py,uint16_t c){canvas->drawPixel(px,py,c);},
+        x,y+8,number.c_str(),60,76,colour,
+        RetroPixel::dim(colour,RetroPixel::unlitAlpha(retroTheme.unlit)));
+    drawFontText(FontDb,x+width+5,y+60,"dB",colour);return;
+  }
 
   int16_t numberWidth = fontTextWidth(FontLarge, number);
   int16_t dbWidth = fontTextWidth(FontDb, "dB");
@@ -13256,8 +13600,10 @@ void drawMenuNumericWithCompactUnit(int16_t y, const String &number,
   const int16_t numberX = std::max<int16_t>(4,
       (UI_W - numberWidth - 6 - unitWidth) / 2);
   const uint16_t glow = blend565(C_BLACK, colour, 74);
-  drawFontText(FontLarge, numberX + 1, y, number, glow);
-  drawFontText(FontLarge, numberX, y + 1, number, glow);
+  if (!retroTheme.enabled) {
+    drawFontText(FontLarge, numberX + 1, y, number, glow);
+    drawFontText(FontLarge, numberX, y + 1, number, glow);
+  }
   drawFontText(FontLarge, numberX, y, number, colour);
   canvas->setTextSize(2);
   canvas->setTextColor(colour);
@@ -13330,7 +13676,7 @@ void drawMenuValue(int16_t y, const String &value)
     return;
   }
 
-  if ((menuPage == PAGE_THEME && menuIndex < 3) ||
+  if ((menuPage == PAGE_THEME && (menuIndex < 3 || menuIndex == 5)) ||
       menuPage == PAGE_SPECTRUM_COLOURS) {
     drawPaletteSwatchEditor(y);
     return;
@@ -13510,6 +13856,9 @@ bool drawSpectrumInterpolatedFrame()
     drawSpectrumChannel(1, 215, spectrumBarColour(spectrumSelection.tap,
         spectrumSelection.lower));
   }
+  // The dynamic strip includes the lower part of the Wi-Fi glyph. Restore it
+  // after clearing the strip; its right-side slot is outside both plots.
+  drawWifiStatus(UiRect{280,46,20,20});
   return flushCanvasFullWidthRegionTryLocked(regionY, regionH,
                                              SCREEN_TIMEOUT_VU_SPI_TRY_MS);
 }
@@ -13519,6 +13868,12 @@ bool drawSpectrumVisualizer()
   uiView = VIEW_VISUALIZER;
   drawBase();
   drawTopStatus();
+
+  if (stereoSpectrum.consoleYielded) {
+    drawFontCentredGlowColour(FontMedium,96,"Spectrum in use",uiMainText());
+    drawFontCentredGlowColour(FontMedium,132,"by Console",uiMainText());
+    return flushVisualizerFrame();
+  }
 
   if (stereoSpectrum.probed && !stereoSpectrum.supported) {
     drawFontCentredGlowColour(FontMedium, 111, "Unavailable", uiWarning());
@@ -13594,9 +13949,11 @@ void showFeatureConfirmation(const char *featureName, bool enabled)
 
 void showFeatureStateNotification(const char *featureName, bool enabled)
 {
-  if (uiView != VIEW_HOME &&
-      !(uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM)) return;
+  const UiView previous=uiView==VIEW_FEATURE_CONFIRM ? featureConfirmReturnView : uiView;
+  if (previous != VIEW_HOME &&
+      !(previous == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM)) return;
   showFeatureConfirmation(featureName, enabled);
+  featureConfirmReturnView=previous;
 }
 
 void showSpectrumVolumeNotification()
@@ -13632,7 +13989,7 @@ void drawChangeOverlay()
     int16_t slotWidth = fontTextWidthScaledKerned(FontLarge, slot, slotScale);
     int16_t slotX = std::max<int16_t>(0, (UI_W - slotWidth) / 2);
     uint16_t slotGlow = blend565(C_BLACK, uiMainText(), 82);
-    drawFontTextScaledKerned(FontLarge, slotX + 1, 0, slot, slotGlow, slotScale);
+    if (!retroTheme.enabled) drawFontTextScaledKerned(FontLarge, slotX + 1, 0, slot, slotGlow, slotScale);
     drawFontTextScaledKerned(FontLarge, slotX, 0, slot, uiMainText(), slotScale);
     drawTaperLine(UI_W / 2, 58, 196, 1, uiAccentDark());
 
@@ -13648,8 +14005,10 @@ void drawChangeOverlay()
       int16_t scaledWidth = fontTextWidthScaledKerned(FontLarge, name, scalePercent);
       int16_t x = std::max<int16_t>(0, (UI_W - scaledWidth) / 2);
       uint16_t glow = blend565(C_BLACK, uiMainText(), 74);
-      drawFontTextScaledKerned(FontLarge, x + 1, 82, name, glow, scalePercent);
-      drawFontTextScaledKerned(FontLarge, x, 83, name, glow, scalePercent);
+      if (!retroTheme.enabled) {
+        drawFontTextScaledKerned(FontLarge, x + 1, 82, name, glow, scalePercent);
+        drawFontTextScaledKerned(FontLarge, x, 83, name, glow, scalePercent);
+      }
       drawFontTextScaledKerned(FontLarge, x, 82, name, uiMainText(), scalePercent);
     } else if (fontTextWidth(FontMedium, name) <= maximumWidth) {
       drawFontCentredGlowColour(FontMedium, 105, name, uiMainText());
@@ -13663,22 +14022,21 @@ void drawChangeOverlay()
     // crossed a width threshold and abruptly fell back to the much smaller
     // FontMedium. Scale the same large glyphs only as much as required.
     const int16_t maximumWidth = UI_W - 20;
-    source = ellipsizeFontText(FontLarge,source,(maximumWidth*100L)/68);
+    source = ellipsizeFontText(FontLarge,source,(maximumWidth*100L)/UI_SOURCE_MIN_SCALE);
     const int16_t sourceWidth = fontTextWidthKerned(FontLarge, source);
-    const uint8_t sourceScale = sourceWidth > maximumWidth
-        ? (uint8_t)std::max<int16_t>(68,
-            (maximumWidth * 100L) / sourceWidth)
-        : 100;
+    const uint8_t sourceScale = uiSourceAnnouncementScale(sourceWidth,maximumWidth);
     const int16_t scaledWidth =
         fontTextWidthScaledKerned(FontLarge, source, sourceScale);
     const int16_t sourceX = std::max<int16_t>(0,
         (UI_W - scaledWidth) / 2);
     const int16_t sourceY = sourceScale == 100 ? 91 : 99;
     const uint16_t sourceGlow = blend565(C_BLACK, uiMainText(), 82);
+    if (!retroTheme.enabled) {
     drawFontTextScaledKerned(FontLarge, sourceX + 1, sourceY, source,
                              sourceGlow, sourceScale);
     drawFontTextScaledKerned(FontLarge, sourceX, sourceY + 1, source,
                              sourceGlow, sourceScale);
+    }
     drawFontTextScaledKerned(FontLarge, sourceX, sourceY, source,
                              uiMainText(), sourceScale);
   }
@@ -13780,14 +14138,14 @@ void beginPresetSaveConfirmation(uint8_t destinationSlot)
 
 void beginHighlightedPresetSave()
 {
-  if (menuIndex >= 10) return; // Preset Tools is not a native slot.
+  if (menuIndex >= 10) return; // Preset Tools and Back are not native slots.
   const bool mediaSessionPresent = mediaPlayerPoc.active() ||
       mediaPlaybackSuspended || mediaCurrentPath[0] ||
-      mediaTrackTransitionActive();
+      mediaTrackTransitionActive() || !networkMediaGuardQuiet();
   if (mediaSessionPresent) {
     stopMediaPlayback("preset save hold");
     if (mediaPlayerPoc.active() || mediaTrackTransitionActive() ||
-        mediaRouteRestorePending) {
+        mediaRouteRestorePending || !networkMediaGuardQuiet()) {
       showToast("Music stop failed");
       drawMenu();
       return;
@@ -13978,6 +14336,7 @@ void drawHome()
 
 void transitionToHome()
 {
+  networkCancelPending();
   panelCancel();
   // Album art is nonessential on Home. If its worker has already been
   // admitted, invalidate the job so its next ring-aware I/O boundary stops
@@ -14001,13 +14360,21 @@ void transitionToHome()
 void drawMediaBrowserIcon(uint8_t itemIndex, int16_t x, int16_t y,
                           uint16_t colour)
 {
-  if (mediaBrowserItemIsNowPlaying(itemIndex)) {
+  const bool network=menuPage==PAGE_NETWORK_BROWSER;
+  const char* networkName="";bool folder=false;
+  if(network&&!networkBrowserEntry(itemIndex,networkName,folder)){
+    if(mediaBrowserItemName(itemIndex)=="Back"){
+      canvas->drawLine(x+14,y+3,x+5,y+9,colour);canvas->drawLine(x+5,y+9,x+14,y+15,colour);
+    }
+    return;
+  }
+  if (!network&&mediaBrowserItemIsNowPlaying(itemIndex)) {
     canvas->drawCircle(x + 8, y + 8, 7, colour);
     canvas->fillTriangle(x + 6, y + 4, x + 6, y + 12,
                          x + 12, y + 8, colour);
     return;
   }
-  if (mediaBrowserItemIsSettings(itemIndex)) {
+  if (!network&&mediaBrowserItemIsSettings(itemIndex)) {
     canvas->drawFastHLine(x + 1, y + 4, 16, colour);
     canvas->drawFastHLine(x + 1, y + 9, 16, colour);
     canvas->drawFastHLine(x + 1, y + 14, 16, colour);
@@ -14017,7 +14384,7 @@ void drawMediaBrowserIcon(uint8_t itemIndex, int16_t x, int16_t y,
     return;
   }
   int16_t entryIndex = mediaBrowserEntryIndex(itemIndex);
-  if (entryIndex >= 0 && mediaBrowserEntries[entryIndex].directory) {
+  if (network?folder:(entryIndex >= 0 && mediaBrowserEntries[entryIndex].directory)) {
     canvas->drawRect(x + 1, y + 5, 17, 11, colour);
     canvas->fillRect(x + 3, y + 2, 7, 4, colour);
     return;
@@ -14069,27 +14436,32 @@ void drawMediaBrowserRow(uint8_t itemIndex, uint8_t visibleRow,
 
 void renderMediaBrowser(bool fullFrame)
 {
+  const bool network=menuPage==PAGE_NETWORK_BROWSER;
+  const char* browserPath=mediaBrowserPath;
+  uint32_t firstEntry=mediaBrowserFirstEntryIndex,totalEntries=mediaBrowserTotalEntries;
+  uint8_t count=network?networkMenuCount(PAGE_NETWORK_BROWSER):mediaBrowserItemCount();
+  const uint8_t entryCount=network?(count?count-1:0):mediaBrowserEntryCount;
+  if(network)networkBrowserContext(browserPath,firstEntry,totalEntries);
   uiView = VIEW_MENU;
   drawBase();
   drawFontCentredGlow(FontMedium, 2, "Music Library");
 
   String rangeText;
-  if (mediaBrowserTotalEntries > 0 && mediaBrowserEntryCount > 0) {
-    rangeText = String(mediaBrowserFirstEntryIndex + 1) + "-" +
-                String(mediaBrowserFirstEntryIndex + mediaBrowserEntryCount) +
-                "/" + String(mediaBrowserTotalEntries);
+  if (totalEntries > 0 && entryCount > 0) {
+    rangeText = String(firstEntry + 1) + "-" +
+                String(firstEntry + entryCount) +
+                "/" + String(totalEntries);
   } else {
     rangeText = "0/0";
   }
   int16_t rangeWidth = fontTextWidth(FontSmall, rangeText);
-  String breadcrumb = mediaFolderTitle(mediaBrowserPath);
+  String breadcrumb = mediaFolderTitle(browserPath);
   int16_t breadcrumbWidth = std::max<int16_t>(80, UI_W - rangeWidth - 28);
   breadcrumb = ellipsizeFontText(FontSmall, breadcrumb, breadcrumbWidth);
   drawFontText(FontSmall, 8, 36, breadcrumb, uiMainText());
   drawFontRight(FontSmall, UI_W - 5, 36, rangeText, uiMainText());
   drawTaperLine(UI_W / 2, 55, 286, 1, uiAccentDark());
 
-  uint8_t count = mediaBrowserItemCount();
   menuIndex = std::min<uint8_t>(menuIndex, count - 1);
   if (menuIndex < mediaBrowserTopRow) mediaBrowserTopRow = menuIndex;
   if (menuIndex >= mediaBrowserTopRow + MEDIA_UI_VISIBLE_ROWS) {
@@ -14099,8 +14471,8 @@ void renderMediaBrowser(bool fullFrame)
                          ? count - MEDIA_UI_VISIBLE_ROWS : 0;
   mediaBrowserTopRow = std::min<uint8_t>(mediaBrowserTopRow, maximumTop);
 
-  String identity = String(mediaBrowserPath) + "#" +
-                    String(mediaBrowserFirstEntryIndex) + "#" +
+  String identity = String(network?"NET:":"SD:") + String(browserPath) + "#" +
+                    String(firstEntry) + "#" +
                     String(menuIndex) + "#" + mediaBrowserItemName(menuIndex);
   if (identity != mediaMarqueeIdentity) {
     resetMediaMarquee();
@@ -14117,19 +14489,19 @@ void renderMediaBrowser(bool fullFrame)
     drawMediaBrowserRow(item, row, item == menuIndex);
   }
 
-  if (mediaBrowserTotalEntries > MEDIA_UI_VISIBLE_ROWS) {
+  if (totalEntries > MEDIA_UI_VISIBLE_ROWS) {
     const int16_t trackY = 62;
     const int16_t trackH = 151;
     canvas->drawFastVLine(317, trackY, trackH, C_LINE);
     int16_t thumbH = std::max<int16_t>(18,
         (int32_t)trackH * MEDIA_UI_VISIBLE_ROWS /
-        mediaBrowserTotalEntries);
+        totalEntries);
     int16_t travel = trackH - thumbH;
-    int16_t entryIndex = mediaBrowserEntryIndex(menuIndex);
-    uint32_t globalIndex = mediaBrowserFirstEntryIndex +
+    int16_t entryIndex = network?int(menuIndex)-1:mediaBrowserEntryIndex(menuIndex);
+    uint32_t globalIndex = firstEntry +
         (entryIndex >= 0 ? (uint32_t)entryIndex : 0U);
-    uint32_t maximumGlobal = mediaBrowserTotalEntries > 1
-        ? mediaBrowserTotalEntries - 1 : 1;
+    uint32_t maximumGlobal = totalEntries > 1
+        ? totalEntries - 1 : 1;
     int16_t thumbY = trackY + (int16_t)(
         (uint64_t)travel * globalIndex / maximumGlobal);
     canvas->fillRect(315, thumbY, 4, thumbH, uiAccentDark());
@@ -14178,11 +14550,11 @@ bool mediaBrowserRedrawSafeForPlayback()
 void serviceMediaBrowserRedraw()
 {
   if (!mediaBrowserRedrawPending || uiView != VIEW_MENU ||
-      menuPage != PAGE_MEDIA || editActive) return;
+      (menuPage != PAGE_MEDIA && menuPage != PAGE_NETWORK_BROWSER) || editActive) return;
 
   const bool playbackActive = mediaPlayerPoc.active();
   if (playbackActive &&
-      (!mediaBrowserRedrawSafeForPlayback() ||
+      ((menuPage == PAGE_MEDIA && !mediaBrowserRedrawSafeForPlayback()) ||
        (uint32_t)(millis() - mediaBrowserLastRedrawAt) <
            MEDIA_BROWSER_REDRAW_MS)) return;
 
@@ -14285,19 +14657,24 @@ void drawWrappedMediaTitle(const String &source, int16_t x, int16_t y,
 
 void drawMediaNowPlaying()
 {
+  NetworkMediaPresentation network;
+  const bool networkView = networkMediaPresentation(network);
   uiView = VIEW_MEDIA_NOW_PLAYING;
   drawBase();
   drawFontCentredGlow(FontMedium, 2, "Now Playing");
   drawTaperLine(UI_W / 2, 39, 286, 1, uiAccentDark());
 
-  drawMediaArtwork(10, 48, MEDIA_ARTWORK_EDGE);
+  if (networkView) {
+    if (network.artwork) canvas->draw16bitRGBBitmap(10,48,network.artwork,MEDIA_ARTWORK_EDGE,MEDIA_ARTWORK_EDGE);
+    else drawFallbackArtwork(10,48,MEDIA_ARTWORK_EDGE);
+  } else drawMediaArtwork(10, 48, MEDIA_ARTWORK_EDGE);
 
-  const bool transitioning = mediaTrackTransitionActive();
-  const bool rejectedVisible = !transitioning && !mediaPlayerPoc.active() &&
+  const bool transitioning = networkView ? network.loading&&!network.seeking : mediaTrackTransitionActive();
+  const bool rejectedVisible = !networkView && !transitioning && !mediaPlayerPoc.active() &&
       mediaLastRejectedActive && mediaLastRejectedPath[0];
   MediaFileInfo info = transitioning ? MediaFileInfo{}
                                      : mediaPlayerPoc.playbackFile();
-  const char *displayPath = rejectedVisible
+  const char *displayPath = networkView ? network.path : rejectedVisible
       ? mediaLastRejectedPath
       : (transitioning && mediaTrackTransition.displayPath[0]
           ? mediaTrackTransition.displayPath
@@ -14306,11 +14683,11 @@ void drawMediaNowPlaying()
   String title = mediaTrackTitle(displayPath);
   drawWrappedMediaTitle(title, 137, 48, 173, 2);
 
-  String album = mediaFolderTitle(mediaQueueDirectory);
+  String album = networkView ? mediaFolderTitle(network.album) : mediaFolderTitle(mediaQueueDirectory);
   album = ellipsizeFontText(FontSmall, album, 173);
   drawFontText(FontSmall, 137, 111, album, uiMainText());
 
-  String formatRate = rejectedVisible
+  String formatRate = networkView&&network.error[0] ? String(network.error) : rejectedVisible
       ? (mediaLastRejectedReason[0] ? String(mediaLastRejectedReason)
             : String("Music file rejected"))
       : (transitioning
@@ -14319,7 +14696,7 @@ void drawMediaNowPlaying()
             "  " + sampleRateTextFor(info.sampleRate));
   formatRate = ellipsizeFontText(FontSmall, formatRate, 173);
   drawFontText(FontSmall, 137, 137, formatRate,
-               rejectedVisible ? uiFault() : uiAccent());
+               rejectedVisible || (networkView&&network.error[0]) ? uiFault() : uiAccent());
   MediaPlaybackState state = mediaPlayerPoc.playbackState();
   if (rejectedVisible) {
     String rejectedText = "File was not played";
@@ -14331,7 +14708,7 @@ void drawMediaNowPlaying()
     int16_t transitionX = 137 + std::max<int16_t>(
         0, (173 - fontTextWidth(FontSmall, transitionText)) / 2);
     drawFontText(FontSmall, transitionX, 158, transitionText, uiMainText());
-  } else if (state == MediaPlaybackState::Seeking || mediaSeekUiPending) {
+  } else if ((networkView&&network.seeking) || state == MediaPlaybackState::Seeking || mediaSeekUiPending) {
     String seekText = "Seeking...";
     int16_t seekX = 137 + std::max<int16_t>(
         0, (173 - fontTextWidth(FontSmall, seekText)) / 2);
@@ -14347,7 +14724,7 @@ void drawMediaNowPlaying()
   MediaPlaybackStats stats = mediaPlayerPoc.playbackStats();
   canvas->drawFastHLine(10, 180, UI_W - 20, C_LINE);
   if (info.totalFrames > 0) {
-    uint64_t played = std::min<uint64_t>(stats.outputFrames, info.totalFrames);
+    uint64_t played = std::min<uint64_t>(networkView?network.positionFrames:stats.outputFrames, info.totalFrames);
     int16_t progress = (int16_t)((played * (UI_W - 20)) / info.totalFrames);
     canvas->drawFastHLine(10, 180, progress, uiAccent());
   }
@@ -14431,29 +14808,32 @@ void dismissMediaVolumeOverlay(bool redraw)
 void serviceMediaUiAnimations()
 {
   unsigned long now = millis();
+  // Expiry is control housekeeping, not an optional animation. A starving
+  // producer must not leave its volume card latched indefinitely.
+  if (mediaVolumeOverlayVisible) {
+    if ((long)(now - mediaVolumeOverlayUntil) >= 0)
+      dismissMediaVolumeOverlay(true);
+    return;
+  }
   // The static Seeking... overlay is drawn before the decoder starts its exact
   // seek. Avoid all periodic LCD SPI transfers until the decoder has refilled
   // the PCM ring and released the shared SD/LCD bus again. Low-ring playback
   // also gets exclusive SD/decoder time until its safety reserve recovers.
   if (mediaPlayerPoc.seeking() || mediaTrackTransitionActive() ||
       mediaPlaybackBufferLow()) return;
-  if (mediaVolumeOverlayVisible) {
-    if ((long)(now - mediaVolumeOverlayUntil) >= 0) {
-      dismissMediaVolumeOverlay(true);
-    }
-    return;
-  }
 
   if (uiView == VIEW_MEDIA_NOW_PLAYING) {
     if (mediaPlayerPoc.active() &&
         (uint32_t)(now - mediaNowPlayingLastProgressAt) >= 750) {
       MediaFileInfo info = mediaPlayerPoc.playbackFile();
       MediaPlaybackStats stats = mediaPlayerPoc.playbackStats();
+      NetworkMediaPresentation network;
+      const bool networkView = networkMediaPresentation(network);
       canvas->fillRect(10, 179, UI_W - 20, 3, C_BLACK);
       canvas->drawFastHLine(10, 180, UI_W - 20, C_LINE);
       if (info.totalFrames > 0) {
         uint64_t played =
-            std::min<uint64_t>(stats.outputFrames, info.totalFrames);
+            std::min<uint64_t>(networkView?network.positionFrames:stats.outputFrames, info.totalFrames);
         int16_t progress = (int16_t)(
             (played * (UI_W - 20)) / info.totalFrames);
         canvas->drawFastHLine(10, 180, progress, uiAccent());
@@ -14464,7 +14844,7 @@ void serviceMediaUiAnimations()
     return;
   }
 
-  if (uiView != VIEW_MENU || menuPage != PAGE_MEDIA ||
+  if (uiView != VIEW_MENU || (menuPage != PAGE_MEDIA && menuPage != PAGE_NETWORK_BROWSER) ||
       mediaMarqueeComplete) return;
   if ((uint32_t)(now - mediaMarqueeLastFrameAt) < MEDIA_MARQUEE_FRAME_MS) return;
   mediaMarqueeLastFrameAt = now;
@@ -14537,8 +14917,9 @@ void drawPresetList()
   drawFontCentredGlow(FontMedium, 2, "Presets");
   drawTaperLine(UI_W / 2, 42, 286, 1, uiAccentDark());
 
-  menuIndex = std::min<uint8_t>(menuIndex, 10);
-  const UiPagedWindow window = uiPagedWindow(11, menuIndex, VISIBLE_ROWS,
+  const uint8_t count = menuItemCount(PAGE_PRESET);
+  menuIndex = std::min<uint8_t>(menuIndex, count - 1);
+  const UiPagedWindow window = uiPagedWindow(count, menuIndex, VISIBLE_ROWS,
                                               presetListTopRow);
   presetListTopRow = window.first;
 
@@ -14549,9 +14930,9 @@ void drawPresetList()
     canvas->fillRect(4, y, UI_W - 8, ROW_HEIGHT - 1, C_BLACK);
     if (selected) canvas->fillRect(4, y, 3, ROW_HEIGHT - 1, uiMainText());
 
-    if (slot >= 11) break;
-    String label = ellipsizeFontText(FontMedium, slot < 10 ? presetListLabel(slot) : String("Preset Tools"), UI_W - 35);
-    const uint16_t colour = slot == 10 || isPresetOccupied(slot) ? uiMainText() : uiDimText();
+    if (slot >= count) break;
+    String label = ellipsizeFontText(FontMedium, menuItemName(PAGE_PRESET, slot), UI_W - 35);
+    const uint16_t colour = slot >= 10 || isPresetOccupied(slot) ? uiMainText() : uiDimText();
     drawFontText(FontMedium, 13, y + 3, label, colour);
     if (slot < 10 && slot == dspi.activePreset) {
       canvas->fillCircle(UI_W - 10, y + 16, 3, uiAccent());
@@ -14562,7 +14943,7 @@ void drawPresetList()
       (long)(toastUntil - millis()) > 0;
   if (toastVisible) {
     drawFontCentredGlowColour(FontSmall, 197, toastText, uiAccent());
-  } else {
+  } else if (menuIndex < 10) {
     drawFontCentredGlowColour(FontMedium, 186,
                               "Hold Select to save", uiAccent());
     drawFontCentredGlowColour(FontMedium, 211,
@@ -14575,18 +14956,21 @@ void drawPresetList()
 
 bool isSystemSettingsListPage(MenuPage page)
 {
-  return panelOwnsPage(page) || page == PAGE_FEATURES || page == PAGE_SYSTEM ||
+  return networkOwnsPage(page) || linkOwnsPage(page) || panelOwnsPage(page) || page == PAGE_FEATURES || page == PAGE_SYSTEM ||
          page == PAGE_LOUDNESS || page == PAGE_CROSSFEED ||
          page == PAGE_LEVELLER || page == PAGE_PSYBASS ||
          page == PAGE_BLUETOOTH || page == PAGE_SCREEN_SETTINGS ||
          page == PAGE_IDLE_SCREEN || page == PAGE_SPECTRUM ||
          page == PAGE_SPECTRUM_COLOURS ||
          page == PAGE_THEME ||
+         page == PAGE_VOLUME_DISPLAY ||
          isSubSynthPage(page) || isTubeLimiterPage(page);
 }
 
 uint8_t themePaletteIndexForRow(uint8_t row)
 {
+  if (row == 5) return retroTheme.volume;
+  if (retroTheme.enabled) return row == 0 ? retroTheme.text : row == 1 ? retroTheme.accent : retroTheme.meters;
   if (row == 0) return mainTextPaletteIndex;
   if (row == 1) return accentPaletteIndex;
   return volumeMeterPaletteIndex;
@@ -14602,6 +14986,8 @@ void drawSystemSettingsList()
   drawFontCentredGlow(FontMedium, 2,
       ellipsizeFontText(FontMedium,pageTitle(menuPage),UI_W-16));
   drawTaperLine(UI_W / 2, 44, 286, 1, uiAccentDark());
+  const FontDef &listFont = settingsListFont();
+  const int16_t textY = retroTheme.enabled ? 9 : 4;
 
   const uint8_t count = menuItemCount(menuPage);
   menuIndex = count ? std::min<uint8_t>(menuIndex, count - 1) : 0;
@@ -14619,23 +15005,23 @@ void drawSystemSettingsList()
         menuPage == PAGE_TUBE && row == 3 ? "%" : "";
     const bool tubeUnit = unit[0] && value != "Unavailable" && value != "Pending" && value != "Unknown";
     const int16_t unitWidth = tubeUnit ? (int16_t)strlen(unit) * 12 + 4 : 0;
-    const bool paletteSwatch = (menuPage == PAGE_THEME && row < 4) ||
+    const bool paletteSwatch = (menuPage == PAGE_THEME && (row < 4 || row == 5)) ||
         (menuPage == PAGE_SPECTRUM_COLOURS && spectrumColourRowCount() > 0);
     if (paletteSwatch) value = "";
     const int16_t requestedValueWidth = menuPage == PAGE_FEATURES ? 42 :
         paletteSwatch ? 28 :
-        (value.length() ? fontTextWidth(FontMedium, value) + unitWidth : 0);
+        (value.length() ? fontTextWidth(listFont, value) + unitWidth : 0);
     const UiListColumns columns = uiListColumns(UI_W, requestedValueWidth);
-    String label = ellipsizeFontText(FontMedium,
+    String label = ellipsizeFontText(listFont,
         menuItemName(menuPage, row), columns.labelWidth);
-    drawFontText(FontMedium, columns.labelX, y + 4, label, uiMainText());
+    drawFontText(listFont, columns.labelX, y + textY, label, networkMenuPlaying(menuPage,row) ? uiAccent() : uiMainText());
     if (value.length()) {
-      value = ellipsizeFontText(FontMedium, value,
+      value = ellipsizeFontText(listFont, value,
           columns.valueWidth - unitWidth);
       if (tubeUnit) {
         const int16_t numberX = columns.valueRight - unitWidth -
-            fontTextWidth(FontMedium, value);
-        drawFontText(FontMedium, numberX, y + 4, value, uiAccent());
+            fontTextWidth(listFont, value);
+        drawFontText(listFont, numberX, y + textY, value, uiAccent());
         canvas->setTextSize(2);
         canvas->setTextColor(uiAccent());
         canvas->setCursor(columns.valueRight - unitWidth + 4, y + 12);
@@ -14644,7 +15030,7 @@ void drawSystemSettingsList()
         const uint16_t valueColour = menuPage == PAGE_BLUETOOTH &&
             bleMenuActionForIndex(row) == BLE_MENU_DEVICE && !bleProfileValid
             ? uiDimText() : uiAccent();
-        drawFontRight(FontMedium, columns.valueRight, y + 4, value, valueColour);
+        drawFontRight(listFont, columns.valueRight, y + textY, value, valueColour);
       }
     }
     if (paletteSwatch) {
@@ -14656,7 +15042,7 @@ void drawSystemSettingsList()
                            : spectrumBarColour(tap, channel);
         }
       } else {
-        swatch = row < 3
+        swatch = row < 3 || row == 5
             ? themePaletteColour(themePaletteIndexForRow(row))
             : uiAnalogVuColourForChoice(analogVuColourChoice);
       }
@@ -14666,17 +15052,18 @@ void drawSystemSettingsList()
     if (menuPage == PAGE_PANEL_NAME && row == 0) {
       const String preview = panelNameWindow();
       const int16_t cursorX = columns.valueRight -
-          fontTextWidth(FontMedium,preview) + panelNameCursorOffset();
+          fontTextWidth(listFont,preview) + panelNameCursorOffset();
       canvas->drawLine(cursorX,y+33,
           cursorX+panelNameCursorWidth()-1,y+33,uiAccent());
     }
+    if (menuPage == PAGE_LINK_PIN) drawLinkPinCursor(row,y,columns.valueRight,value);
     if (menuPage == PAGE_PANEL_NUMBER && row == 0 && editActive) {
       const int16_t cursorX = columns.valueRight - unitWidth -
-          fontTextWidth(FontMedium,value) + panelNumberCursorOffset();
+          fontTextWidth(listFont,value) + panelNumberCursorOffset();
       canvas->drawLine(cursorX,y+33,cursorX+panelNumberCursorWidth()-1,y+33,uiAccent());
       canvas->drawLine(cursorX,y+34,cursorX+panelNumberCursorWidth()-1,y+34,uiAccent());
     } else if (panelEditUnderline(menuPage,row) && value.length()) {
-      const int16_t x = columns.valueRight - unitWidth - fontTextWidth(FontMedium,value);
+      const int16_t x = columns.valueRight - unitWidth - fontTextWidth(listFont,value);
       canvas->drawLine(x,y+33,columns.valueRight-unitWidth,y+33,uiAccent());
       canvas->drawLine(x,y+34,columns.valueRight-unitWidth,y+34,uiAccent());
     }
@@ -14696,8 +15083,8 @@ void drawSystemSettingsList()
       (long)(toastUntil - millis()) > 0;
   if (toastVisible) {
     canvas->fillRect(8, 210, UI_W - 16, 29, C_BLACK);
-    const String toast = ellipsizeFontText(FontMedium, toastText, UI_W - 24);
-    drawFontCentredGlowColour(FontMedium, 211, toast, uiAccent());
+    const String toast = ellipsizeFontText(listFont, toastText, UI_W - 24);
+    drawFontCentredGlowColour(listFont, retroTheme.enabled ? 216 : 211, toast, uiAccent());
   }
   drawListDownArrow(window.below, toastVisible);
   drawListUpArrow(window.below, window.first, toastVisible);
@@ -14706,7 +15093,9 @@ void drawSystemSettingsList()
 
 void drawMenu()
 {
-  if (menuPage == PAGE_MEDIA && !editActive) {
+  if (networkDrawSignal()) return;
+  if (drawLinkDetails()) return;
+  if ((menuPage == PAGE_MEDIA || menuPage == PAGE_NETWORK_BROWSER) && !editActive) {
     drawMediaBrowser();
     return;
   }
@@ -14714,7 +15103,7 @@ void drawMenu()
     drawPresetList();
     return;
   }
-  if (isSystemSettingsListPage(menuPage) && (!editActive || panelOwnsPage(menuPage))) {
+  if (isSystemSettingsListPage(menuPage) && (!editActive || panelOwnsPage(menuPage) || linkOwnsPage(menuPage))) {
     drawSystemSettingsList();
     return;
   }
@@ -14808,7 +15197,7 @@ void drawStatusScreen()
   drawFontCentredGlowColour(FontMedium, rowY, remote,
                             bleConnected ? uiAccent() : uiDimText());
   rowY += 31;
-  drawFontCentredGlow(FontMedium, rowY, "Panel v1.4.0");
+  drawFontCentredGlow(FontMedium, rowY, "v1.5.0");
   if (mediaPlayerPoc.mounted()) {
     rowY += 31;
     drawFontCentredGlowColour(FontMedium, rowY, "SD card mounted", uiAccent());
@@ -14869,6 +15258,7 @@ void dismissFeatureConfirmation()
 
 int8_t mainIndexForPage(MenuPage page)
 {
+  if (networkOwnsPage(page)) return 1;
   if (panelOwnsPage(page)) return panelMainIndex(page);
   switch (page) {
     case PAGE_INPUT: return 0;
@@ -14888,7 +15278,7 @@ int8_t mainIndexForPage(MenuPage page)
     case PAGE_LIMITER_OUTPUT: return 4;
     case PAGE_BLUETOOTH: return 5;
     case PAGE_SYSTEM: return 5;
-    case PAGE_SCREEN_SETTINGS: case PAGE_IDLE_SCREEN: case PAGE_THEME:
+    case PAGE_SCREEN_SETTINGS: case PAGE_IDLE_SCREEN: case PAGE_THEME: case PAGE_VOLUME_DISPLAY:
     case PAGE_SPECTRUM: case PAGE_SPECTRUM_COLOURS: return 5;
     default: return -1;
   }
@@ -14897,7 +15287,7 @@ int8_t mainIndexForPage(MenuPage page)
 MenuPage pageForMainIndex(uint8_t index)
 {
   const MenuPage pages[] = {
-    PAGE_INPUT, PAGE_MEDIA, PAGE_PRESET, PAGE_OUTPUTS, PAGE_FEATURES, PAGE_SYSTEM
+    PAGE_INPUT, PAGE_MUSIC_ROOT, PAGE_PRESET, PAGE_OUTPUTS, PAGE_FEATURES, PAGE_SYSTEM
   };
   return pages[std::min<uint8_t>(index, 5)];
 }
@@ -14956,7 +15346,7 @@ void enterPage(MenuPage page)
   menuPage = page;
   editActive = false;
   panelEnterPage(page);
-  if (page == PAGE_MEDIA && mediaPlayerPoc.active()) {
+  if (page == PAGE_MEDIA && mediaPlayerPoc.active() && !networkOwnsAudio()) {
     uiView = VIEW_MEDIA_NOW_PLAYING;
     drawMediaNowPlaying();
     fadeUiIn();
@@ -14975,19 +15365,21 @@ void enterPage(MenuPage page)
   if (page == PAGE_PRESET) {
     menuIndex = std::min<uint8_t>(dspi.activePreset, 9);
     presetListTopRow = menuIndex > 1 ? menuIndex - 1 : 0;
-    presetListTopRow = std::min<uint8_t>(presetListTopRow, 6);
+    presetListTopRow = std::min<uint8_t>(presetListTopRow, menuItemCount(PAGE_PRESET) - 4);
     rememberedMenuIndex[PAGE_PRESET] = menuIndex;
   }
   if (page == PAGE_IDLE_SCREEN && previousPage != PAGE_IDLE_SCREEN) {
     menuIndex = (uint8_t)screenTimeoutAction;
     rememberedMenuIndex[PAGE_IDLE_SCREEN] = menuIndex;
   }
+  if (page == PAGE_VOLUME_DISPLAY) menuIndex = homeVolumeDisplay;
   drawMenu();
   fadeUiIn();
 }
 
 void cancelActiveEdit()
 {
+  if (linkOwnsPage(menuPage)) linkCancelEdit();
   if (panelOwnsPage(menuPage)) panelCancel();
   if (!editActive) return;
   if (menuPage == PAGE_SCREEN_SETTINGS && menuIndex == 0) {
@@ -15001,6 +15393,8 @@ void cancelActiveEdit()
 
 void goBack()
 {
+  if (networkBack()) return;
+  if (linkBack()) return;
   if (panelBack()) return;
   if (uiView == VIEW_MEDIA_NOW_PLAYING) {
     restoreMediaBrowserToQueueTrack();
@@ -15035,13 +15429,7 @@ void goBack()
     return;
   }
   if (menuPage == PAGE_MEDIA_SETTINGS) {
-    rememberedMenuIndex[PAGE_MEDIA_SETTINGS] = menuIndex;
-    menuPage = PAGE_MEDIA;
-    menuIndex = std::min<uint8_t>(
-        rememberedMenuIndex[PAGE_MEDIA], mediaBrowserItemCount() - 1);
-    uiView = VIEW_MENU;
-    drawMenu();
-    return;
+    enterPage(PAGE_MUSIC_ROOT); return;
   }
   if (menuPage == PAGE_SPECTRUM_COLOURS) {
     enterPage(PAGE_SPECTRUM);
@@ -15052,6 +15440,7 @@ void goBack()
     enterPage(PAGE_SCREEN_SETTINGS);
     return;
   }
+  if (menuPage == PAGE_VOLUME_DISPLAY) { enterPage(PAGE_SCREEN_SETTINGS); return; }
   if (menuPage == PAGE_SUB_SELECT || menuPage == PAGE_SUB_OUTPUTS) {
     enterPage(PAGE_SUB_SYNTH);
     return;
@@ -15162,10 +15551,9 @@ void beginEdit()
     editInt = menuIndex & 1 ? spectrumPeakPalette(tap, channel)
                             : spectrumBarPalette(tap, channel);
   } else if (menuPage == PAGE_THEME) {
-    if (menuIndex == 0) editInt = mainTextPaletteIndex;
-    else if (menuIndex == 1) editInt = accentPaletteIndex;
-    else if (menuIndex == 2) editInt = volumeMeterPaletteIndex;
-    else editInt = analogVuColourChoice;
+    if (menuIndex < 3 || menuIndex == 5) editInt = themePaletteIndexForRow(menuIndex);
+    else if (menuIndex == 3) editInt = analogVuColourChoice;
+    else if (menuIndex == 4) editInt = retroTheme.enabled;
   }
   encoderMenuDetentRemainder = 0;
   editOriginalFloat = editFloat;
@@ -15202,6 +15590,7 @@ int wrapEditInt(int current, int direction, int step, int minimum, int maximum)
 
 void adjustEdit(int direction)
 {
+  if (linkOwnsPage(menuPage)) { linkAdjust(direction); return; }
   if (!editActive) return;
   if (panelOwnsPage(menuPage)) { panelAdjust(direction); drawMenu(); return; }
   if (isSubSynthPage(menuPage)) {
@@ -15292,12 +15681,14 @@ void adjustEdit(int direction)
       editInt = wrapEditInt(editInt, direction, 1,
                             ACCENT_PALETTE_FIRST,
                             THEME_PALETTE_COUNT - 1);
-    } else if (menuIndex < 3) {
+    } else if (menuIndex < 3 || menuIndex == 5) {
       editInt = wrapEditInt(editInt, direction, 1, 0,
                             THEME_PALETTE_COUNT - 1);
-    } else {
+    } else if (menuIndex == 3) {
       editInt = wrapEditInt(editInt, direction, 1, 0,
                             VU_COLOUR_CHOICE_COUNT - 1);
+    } else {
+      editInt = wrapEditInt(editInt,direction,1,0,1);
     }
   }
   drawMenu();
@@ -15305,6 +15696,7 @@ void adjustEdit(int direction)
 
 void applyEdit()
 {
+  if (linkOwnsPage(menuPage)) { linkApply(); return; }
   if (!editActive) return;
   if (panelOwnsPage(menuPage)) { panelApply(); drawMenu(); return; }
 
@@ -15341,7 +15733,7 @@ void applyEdit()
         mediaPlaybackSuspended || mediaCurrentPath[0] ||
         mediaTrackTransitionActive();
     if (mediaSessionPresent && selectedSource != dspi.source) {
-      stopMediaPlayback("input menu");
+      stopMediaForInputChange("input menu");
     }
     if (mediaRouteRestorePending && mediaRoute.captured &&
         selectedSource == mediaRoute.source) {
@@ -15484,7 +15876,14 @@ void applyEdit()
       successText = "Colour applied";
     }
   } else if (menuPage == PAGE_THEME) {
-    if (menuIndex == 0) {
+    if (menuIndex == 4) retroTheme.enabled = constrain(editInt,0,1);
+    else if (menuIndex == 5) retroTheme.volume = constrain(editInt,0,THEME_PALETTE_COUNT-1);
+    else if (retroTheme.enabled && menuIndex < 3) {
+      const uint8_t selected = constrain(editInt,menuIndex == 1 ? ACCENT_PALETTE_FIRST : 0,THEME_PALETTE_COUNT-1);
+      if (menuIndex == 0) retroTheme.text = selected;
+      else if (menuIndex == 1) retroTheme.accent = selected;
+      else retroTheme.meters = selected;
+    } else if (menuIndex == 0) {
       mainTextPaletteIndex = (uint8_t)constrain(
           editInt, 0, THEME_PALETTE_COUNT - 1);
     } else if (menuIndex == 1) {
@@ -15513,9 +15912,10 @@ void applyEdit()
 void moveMenu(int direction)
 {
   if (direction == 0) return;
+  if (!editActive && networkMoveMenu(direction)) return;
 
   if (menuPage == PAGE_PRESET && !editActive) {
-    menuIndex = (uint8_t)constrain((int)menuIndex + direction, 0, 10);
+    menuIndex = (uint8_t)constrain((int)menuIndex + direction, 0, menuItemCount(PAGE_PRESET) - 1);
     rememberedMenuIndex[PAGE_PRESET] = menuIndex;
     drawMenu();
     return;
@@ -15577,13 +15977,43 @@ void moveMenu(int direction)
   drawMenu();
 }
 
+bool handleHomeVolumeDisplaySelection()
+{
+  if (menuPage == PAGE_SCREEN_SETTINGS && menuIndex == 5) {
+    enterPage(PAGE_VOLUME_DISPLAY); return true;
+  }
+  if (menuPage != PAGE_VOLUME_DISPLAY) return false;
+  if (menuIndex <= PanelHomeVolume::Master) {
+    clearPendingVolumeControl();
+    homeVolumeDisplay = (uint8_t)menuIndex;
+    // Selecting the readout/control target never changes either gain. Keep flash
+    // out of playback via the existing stopped/idle preference service.
+    markDeferredPreference(PREF_DIRTY_PANEL_SETTINGS);
+    recordUserActivity();
+    enterPage(PAGE_SCREEN_SETTINGS);
+    showToast("Display applied"); drawMenu();
+  }
+  return true;
+}
+
+bool handlePresetAuxSelection()
+{
+  if (menuPage != PAGE_PRESET || menuIndex < 10) return false;
+  if (menuIndex == 10) enterPage(PAGE_PRESET_TOOLS);
+  else goBack();
+  return true;
+}
+
 void selectMenuItem()
 {
+  if (networkSelect()) return;
+  if (linkOwnsPage(menuPage)) { linkSelect(); return; }
   if (panelSelect()) return;
   if (editActive) {
     applyEdit();
     return;
   }
+  if (handleHomeVolumeDisplaySelection()) return;
 
   if (menuPage == PAGE_MAIN) {
     enterPage(pageForMainIndex(menuIndex));
@@ -15615,10 +16045,9 @@ void selectMenuItem()
     enterPage(PAGE_HARDWARE); return;
   }
   if (menuPage == PAGE_SYSTEM && menuIndex == 5) {
-    beginWifiTransferConfirmation();
+    enterPage(PAGE_WIFI);
     return;
   }
-
   if (menuPage == PAGE_SYSTEM && menuIndex == 6) {
     transitionToStatusScreen();
     return;
@@ -15701,7 +16130,7 @@ void selectMenuItem()
   }
 
   if (menuPage == PAGE_PRESET) {
-    if (menuIndex == 10) { enterPage(PAGE_PRESET_TOOLS); return; }
+    if (handlePresetAuxSelection()) return;
     if (!isPresetOccupied(menuIndex)) {
       showToast("Empty preset");
       drawMenu();
@@ -15791,6 +16220,104 @@ void selectMenuItem()
   beginEdit();
 }
 
+static DspiLink::RelativeVolumeQueue linkVolumeQueue;
+static uint32_t linkVolumeAttemptAt=0;
+
+uint8_t selectedVolumeGetRequest()
+{
+  return homeVolumeDisplay == PanelHomeVolume::Master ? REQ_GET_MASTER_VOLUME : REQ_GET_USER_VOLUME;
+}
+
+uint8_t selectedVolumeSetRequest()
+{
+  return homeVolumeDisplay == PanelHomeVolume::Master ? REQ_SET_MASTER_VOLUME : REQ_SET_USER_VOLUME;
+}
+
+uint32_t linkVolumeContext()
+{
+  return (DspiLink::transportStatus().generation << 9) |
+      ((uint32_t)dspi.activePreset << 5) | ((uint32_t)dspi.source << 1) |
+      PanelHomeVolume::validChoice(homeVolumeDisplay);
+}
+
+void clearPendingVolumeControl()
+{
+  linkVolumeQueue.clear();
+}
+
+void queueLinkVolume(float delta)
+{
+  linkVolumeQueue.add(delta,linkVolumeContext(),millis());
+}
+
+DspiLink::ControlAttempt readSelectedLinkVolume(float& current)
+{
+  uint8_t bytes[4]; uint16_t length=0;
+  const auto status=dspiTransactionResult(true,selectedVolumeGetRequest(),0,2,
+      nullptr,4,bytes,4,length,false,false);
+  if(status==DSPI_TXN_BUSY)return DspiLink::ControlAttempt::Busy;
+  if(status!=DSPI_TXN_OK || length!=4)return DspiLink::ControlAttempt::Failed;
+  memcpy(&current,bytes,4);
+  return isfinite(current) && current>=PanelHomeVolume::minimum(homeVolumeDisplay) && current<=0 ?
+      DspiLink::ControlAttempt::Ok : DspiLink::ControlAttempt::Failed;
+}
+
+bool completeVolumeAdjustment(float target)
+{
+  // Establish the adjusted level before releasing a separate User Mute.
+  // This also protects against an acknowledged but unapplied volume write.
+  float readback=0;
+  if(readSelectedLinkVolume(readback)!=DspiLink::ControlAttempt::Ok ||
+      fabsf(readback-target)>0.26f)return false;
+  if(homeVolumeDisplay==PanelHomeVolume::Master)dspi.masterVolumeDb=readback;
+  else dspi.volumeDb=readback;
+
+  uint8_t muted=0xff;uint16_t length=0;
+  auto status=dspiTransactionResult(true,REQ_GET_USER_MUTE,0,2,
+      nullptr,1,&muted,1,length,false,false);
+  if(status!=DSPI_TXN_OK || length!=1 || muted>1)return false;
+  dspi.muted=muted!=0;
+  if(!muted)return true;
+
+  uint8_t off=0;uint16_t ignored=0;
+  status=dspiTransactionResult(false,REQ_SET_USER_MUTE,0,2,
+      &off,1,nullptr,0,ignored,false,false);
+  if(status!=DSPI_TXN_OK)return false;
+  length=0;muted=0xff;
+  status=dspiTransactionResult(true,REQ_GET_USER_MUTE,0,2,
+      nullptr,1,&muted,1,length,false,false);
+  if(status!=DSPI_TXN_OK || length!=1 || muted!=0)return false;
+  dspi.muted=false;
+  return true;
+}
+
+DspiLink::ControlAttempt writeSelectedLinkVolume(float target)
+{
+  uint16_t ignored=0;
+  const auto status=dspiTransactionResult(false,selectedVolumeSetRequest(),0,2,
+      (const uint8_t*)&target,4,nullptr,0,ignored,false,false);
+  if(status==DSPI_TXN_BUSY)return DspiLink::ControlAttempt::Busy;
+  if(status!=DSPI_TXN_OK)return DspiLink::ControlAttempt::Failed;
+  // Post-write Busy/failure is final: never replay a possibly accepted step.
+  return completeVolumeAdjustment(target) ? DspiLink::ControlAttempt::Ok : DspiLink::ControlAttempt::Failed;
+}
+
+void serviceLinkVolume()
+{
+  if(!DspiLink::hubStatus().active || !dspi.connected){linkVolumeQueue.clear();return;}
+  const uint32_t now=millis();
+  if((int32_t)(now-linkVolumeAttemptAt)<0)return;
+  linkVolumeAttemptAt=now+25;
+  const auto result=linkVolumeQueue.service(linkVolumeContext(),[](){return millis();},
+      readSelectedLinkVolume,writeSelectedLinkVolume,-60.0f,PanelHomeVolume::minimum(homeVolumeDisplay));
+  if(result==DspiLink::ControlAttempt::Ok)presentUserVolumeChange();
+  else if(result==DspiLink::ControlAttempt::Expired || result==DspiLink::ControlAttempt::Failed){
+    externalRuntimeRefreshRequested=true;
+    showToast(result==DspiLink::ControlAttempt::Expired ? "DSPi busy" : "DSPi ERROR");
+    redrawCurrentView();
+  }
+}
+
 void changeVolume(float delta)
 {
   if (!dspi.connected) {
@@ -15798,8 +16325,28 @@ void changeVolume(float delta)
     redrawCurrentView();
     return;
   }
-  float target = roundf((dspi.volumeDb + delta) * 2.0f) / 2.0f;
-  if (!setUserVolume(target)) showToast("DSPi ERROR");
+  if(DspiLink::hubStatus().active){queueLinkVolume(delta);return;}
+  float current = 0;
+  if (!isfinite(delta) || !getExactFloat(selectedVolumeGetRequest(), current) ||
+      !isfinite(current) || current < PanelHomeVolume::minimum(homeVolumeDisplay) || current > 0.0f) {
+    showToast("DSPi busy");
+    redrawCurrentView();
+    return;
+  }
+  float target = DspiLink::relativeVolumeTarget(current,delta,-60.0f,PanelHomeVolume::minimum(homeVolumeDisplay));
+  const bool changed = homeVolumeDisplay == PanelHomeVolume::Master ?
+      setMasterVolumeVerified(target) : setUserVolume(target);
+  if (!changed || !completeVolumeAdjustment(target)) {
+    externalRuntimeRefreshRequested=true;
+    showToast("DSPi ERROR");
+    redrawCurrentView();
+    return;
+  }
+  presentUserVolumeChange();
+}
+
+void presentUserVolumeChange()
+{
   // The large blackout volume card belongs only to Now Playing.  Home keeps
   // its normal layout and live meters even while local media is audible.
   if (uiView == VIEW_MEDIA_NOW_PLAYING) showMediaVolumeOverlay();
@@ -15815,6 +16362,8 @@ void changeVolume(float delta)
 
 void changePreset(int direction)
 {
+  if(!DspiLink::freshLocalValue(DspiLink::hubStatus().active,dspi.activePreset,
+      [](uint8_t &confirmed){return getExactByte(REQ_PRESET_GET_ACTIVE,confirmed)&&confirmed<10;})){showToast("DSPi busy");return;}
   uint8_t slot = nextAvailablePreset(dspi.activePreset, direction);
   // With only one occupied slot the wrapped search returns the active preset.
   // Reloading that slot would unexpectedly restore its saved volume and DSP
@@ -15831,6 +16380,8 @@ void changePreset(int direction)
 
 void changeInput(int direction)
 {
+  if(!DspiLink::freshLocalValue(DspiLink::hubStatus().active,dspi.source,
+      [](InputSource &confirmed){uint8_t source=0;if(!getExactByte(REQ_GET_INPUT_SOURCE,source)||source>SRC_MAX)return false;confirmed=(InputSource)source;return true;})){showToast("DSPi busy");return;}
   InputSource baseSource = dspi.source;
   if (!dspi.connected) {
     showToast("NO DSPi");
@@ -15842,7 +16393,7 @@ void changeInput(int direction)
       mediaPlaybackSuspended || mediaCurrentPath[0] ||
       mediaTrackTransitionActive();
   if (mediaSessionPresent && target != baseSource) {
-    stopMediaPlayback("input change");
+    stopMediaForInputChange("input change");
   }
   if (target == baseSource || !setInputSource(target, true)) {
     showToast(target == baseSource ? "Only one input" : "DSPi error");
@@ -15988,11 +16539,11 @@ void dispatchUiAction(UiAction action)
       drawWifiTransferConfirmation();
     } else if (action == ACT_SELECT) {
       if (wifiTransferConfirmStart) requestWifiTransferEntry();
-      else enterPage(PAGE_SYSTEM);
+      else enterPage(PAGE_WIFI);
     } else if (action == ACT_HOME) {
       transitionToHome();
     } else if (action == ACT_BACK || action == ACT_MENU_TOGGLE) {
-      enterPage(PAGE_SYSTEM);
+      enterPage(PAGE_WIFI);
     }
     return;
   }
@@ -16005,7 +16556,7 @@ void dispatchUiAction(UiAction action)
     if (action == ACT_HOME) transitionToHome();
     else if (action == ACT_SELECT || action == ACT_BACK ||
              action == ACT_MENU_TOGGLE) {
-      enterPage(PAGE_SYSTEM);
+      enterPage(PAGE_WIFI);
     }
     return;
   }
@@ -16091,7 +16642,7 @@ void dispatchUiAction(UiAction action)
     } else if (action == ACT_MENU_TOGGLE) {
       enterPage(PAGE_MAIN);
     } else if (action == ACT_MUTE) {
-      if (dspi.connected) setUserMute(!dspi.muted);
+      if (dspi.connected) toggleUserMuteCurrent();
       drawMediaNowPlaying();
     } else if (action == ACT_VISUALIZER_TOGGLE) {
       toggleVisualizer();
@@ -16099,6 +16650,7 @@ void dispatchUiAction(UiAction action)
     return;
   }
 
+  if ((action == ACT_LEFT || action == ACT_RIGHT) && linkPinMove(action == ACT_LEFT ? -1 : 1)) return;
   if ((action == ACT_LEFT || action == ACT_RIGHT) &&
       panelNameMove(action == ACT_LEFT ? -1 : 1)) return;
   if (uiView == VIEW_EDIT) {
@@ -16136,7 +16688,7 @@ void dispatchUiAction(UiAction action)
       const bool spectrumActive = uiView == VIEW_VISUALIZER &&
           visualizerPage == VISUALIZER_SPECTRUM;
       const bool visualizerActive = uiView == VIEW_VISUALIZER;
-      const bool ok = dspi.connected && setUserMute(!dspi.muted);
+      const bool ok = dspi.connected && toggleUserMuteCurrent();
       if (ok && spectrumActive) showFeatureStateNotification("Mute", dspi.muted);
       else if (visualizerActive) drawVisualizer();
       else if (mediaPlayerPoc.active()) redrawCurrentView();
@@ -16172,6 +16724,7 @@ void dispatchUiAction(UiAction action)
     case ACT_LOUDNESS_TOGGLE: {
       bool fullScreen = uiView == VIEW_HOME ||
           (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
+      if(!refreshLinkToggle(REQ_GET_LOUDNESS,dspi.loudnessEnabled)){showToast("DSPi busy");break;}
       bool target = !dspi.loudnessEnabled;
       bool ok = dspi.connected && setLoudness(target);
       if (ok && fullScreen) showFeatureStateNotification("Loudness", target);
@@ -16185,6 +16738,7 @@ void dispatchUiAction(UiAction action)
     case ACT_CROSSFEED_TOGGLE: {
       bool fullScreen = uiView == VIEW_HOME ||
           (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
+      if(!refreshLinkToggle(REQ_GET_CROSSFEED,dspi.crossfeedEnabled)){showToast("DSPi busy");break;}
       bool target = !dspi.crossfeedEnabled;
       bool ok = dspi.connected && setCrossfeed(target);
       if (ok && fullScreen) showFeatureStateNotification("Crossfeed", target);
@@ -16198,6 +16752,7 @@ void dispatchUiAction(UiAction action)
     case ACT_LEVELLER_TOGGLE: {
       bool fullScreen = uiView == VIEW_HOME ||
           (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
+      if(!refreshLinkToggle(REQ_GET_LEVELLER_ENABLE,dspi.levellerEnabled)){showToast("DSPi busy");break;}
       bool target = !dspi.levellerEnabled;
       bool ok = dspi.connected && setLeveller(target);
       if (ok && fullScreen) showFeatureStateNotification("Leveller", target);
@@ -16243,6 +16798,7 @@ void dispatchUiAction(UiAction action)
     case ACT_PSYBASS_TOGGLE: {
       bool fullScreen = uiView == VIEW_HOME ||
           (uiView == VIEW_VISUALIZER && visualizerPage == VISUALIZER_SPECTRUM);
+      if(!refreshLinkToggle(REQ_GET_PSYBASS,dspi.psybassEnabled)){showToast("DSPi busy");break;}
       bool target = !dspi.psybassEnabled;
       bool ok = dspi.connected && psybassWritable() && setPsybassEnabled(target);
       if (ok && fullScreen) showFeatureStateNotification("Psy Bass", target);
@@ -16452,7 +17008,7 @@ void pollEncoderLongPress()
   }
 
   if (uiView == VIEW_MENU && menuPage == PAGE_PRESET && !editActive &&
-      !buttonLongSent && heldMs >= PRESET_SAVE_HOLD_MS) {
+      menuIndex < 10 && !buttonLongSent && heldMs >= PRESET_SAVE_HOLD_MS) {
     buttonLongSent = true;
     beginHighlightedPresetSave();
     return;
@@ -16460,7 +17016,7 @@ void pollEncoderLongPress()
 
   // Preset Select owns its five-second hold gesture. Do not let the generic
   // 750 ms Back shortcut exit the list while the user is still holding it.
-  if (uiView == VIEW_MENU && menuPage == PAGE_PRESET && !editActive) return;
+  if (uiView == VIEW_MENU && menuPage == PAGE_PRESET && !editActive && menuIndex < 10) return;
 
   if (uiView != VIEW_VISUALIZER && !buttonLongSent && heldMs >= ENCODER_LONG_PRESS_MS) {
     buttonLongSent = true;
@@ -16720,21 +17276,23 @@ void drawBleListRow(uint8_t visibleRow, bool selected, const String &label,
                     const String &value, bool mapped, bool alignValueLeft = false)
 {
   const int16_t y = 52 + visibleRow * 36;
+  const FontDef &listFont = settingsListFont();
+  const int16_t textY = retroTheme.enabled ? 9 : 4;
   canvas->fillRect(4, y, UI_W - 8, 35, C_BLACK);
   if (selected) canvas->fillRect(4, y, 3, 35, uiMainText());
   if (alignValueLeft) {
-    drawFontText(FontMedium, 13, y + 4,
-        ellipsizeFontText(FontMedium, label, 85), uiMainText());
-    drawFontText(FontMedium, 106, y + 4,
-        ellipsizeFontText(FontMedium, value, UI_W - 119),
+    drawFontText(listFont, 13, y + textY,
+        ellipsizeFontText(listFont, label, 85), uiMainText());
+    drawFontText(listFont, 106, y + textY,
+        ellipsizeFontText(listFont, value, UI_W - 119),
         mapped ? uiAccent() : uiDimText());
   } else {
     const UiListColumns columns = uiListColumns(UI_W,
-        fontTextWidth(FontMedium, value));
-    drawFontText(FontMedium, columns.labelX, y + 4,
-        ellipsizeFontText(FontMedium, label, columns.labelWidth), uiMainText());
-    drawFontRight(FontMedium, columns.valueRight, y + 4,
-        ellipsizeFontText(FontMedium, value, columns.valueWidth),
+        fontTextWidth(listFont, value));
+    drawFontText(listFont, columns.labelX, y + textY,
+        ellipsizeFontText(listFont, label, columns.labelWidth), uiMainText());
+    drawFontRight(listFont, columns.valueRight, y + textY,
+        ellipsizeFontText(listFont, value, columns.valueWidth),
         mapped ? uiAccent() : uiDimText());
   }
 }
@@ -17178,6 +17736,7 @@ void bleReportCallback(NimBLERemoteCharacteristic *characteristic,
 {
   (void)isNotify;
   if (!bleReportQueue || !characteristic || length == 0) return;
+  bleDiagnosticReports.fetch_add(1,std::memory_order_relaxed);
 
   BleReportPacket packet = {};
   BleInputSource source = {};
@@ -17203,6 +17762,10 @@ void bleReportCallback(NimBLERemoteCharacteristic *characteristic,
 class DspiBleClientCallbacks : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient *client) override {
     (void)client;
+    bleDiagnosticLinkVersion.fetch_add(1,std::memory_order_acq_rel);
+    bleDiagnosticHandle.store(client->getConnHandle(),std::memory_order_release);
+    bleDiagnosticEpoch.fetch_add(1,std::memory_order_relaxed);
+    bleDiagnosticLinkVersion.fetch_add(1,std::memory_order_release);
     bleConnected = true;
     bleSecurityConfirmed = false;
     bleConnectionChanged = true;
@@ -17220,6 +17783,10 @@ class DspiBleClientCallbacks : public NimBLEClientCallbacks {
 
   void onDisconnect(NimBLEClient *client, int reason) override {
     (void)client;
+    bleDiagnosticLinkVersion.fetch_add(1,std::memory_order_acq_rel);
+    bleDiagnosticHandle.store(0xffff,std::memory_order_release);
+    bleDiagnosticDisconnectReason.store(reason,std::memory_order_relaxed);
+    bleDiagnosticLinkVersion.fetch_add(1,std::memory_order_release);
     bleConnected = false;
     bleSecurityConfirmed = false;
     __atomic_add_fetch(&bleConnectionGeneration, 1U, __ATOMIC_ACQ_REL);
@@ -17265,7 +17832,9 @@ class DspiBleScanCallbacks : public NimBLEScanCallbacks {
       }
       blePendingSave = false;
       bleConnectRequested = true;
-      NimBLEDevice::getScan()->stop();
+      const bool diagnosticStopOkay=NimBLEDevice::getScan()->stop();
+      bleDiagnosticStopRequests.fetch_add(1,std::memory_order_relaxed);
+      if(!diagnosticStopOkay)bleDiagnosticStopFailures.fetch_add(1,std::memory_order_relaxed);
       return;
     }
 
@@ -17301,6 +17870,7 @@ class DspiBleScanCallbacks : public NimBLEScanCallbacks {
   void onScanEnd(const NimBLEScanResults &results, int reason) override {
     (void)results;
     (void)reason;
+    bleDiagnosticScanEndReason.store(reason,std::memory_order_relaxed);
     if (bleIgnoreNextScanEnd) {
       bleIgnoreNextScanEnd = false;
       return;
@@ -17570,6 +18140,9 @@ void serviceBleRemoteRemoval()
 
 bool startBleScan(BleScanPurpose purpose, uint32_t duration)
 {
+  // Setup's SoftAP needs the shared radio for association/authentication.
+  // Keep saved bonds intact; only defer automatic remote reconnection.
+  if (purpose == BLE_SCAN_RECONNECT && DspiLink::linkSetupStatus().active) return false;
   if (!bleStackReady || bleTransferShutdownRequested ||
       bleRemovalInProgress || bleStackRestartPending ||
       bleScanActive || bleConnected ||
@@ -17615,7 +18188,9 @@ void resetBleScanState(bool stopActive)
 {
   if (stopActive && bleScanActive) {
     bleIgnoreNextScanEnd = true;
-    NimBLEDevice::getScan()->stop();
+    const bool diagnosticStopOkay=NimBLEDevice::getScan()->stop();
+    bleDiagnosticStopRequests.fetch_add(1,std::memory_order_relaxed);
+    if(!diagnosticStopOkay)bleDiagnosticStopFailures.fetch_add(1,std::memory_order_relaxed);
   }
   bleScanActive = false;
   bleScanFinished = false;
@@ -18464,9 +19039,89 @@ void sortBleResults()
   portEXIT_CRITICAL(&bleDataMux);
 }
 
+void diagnosticWifiEvent(arduino_event_t *event)
+{
+  if(!event)return;
+  CoexistenceDiagnostics::WifiEvent entry;entry.atMs=millis();
+  switch(event->event_id){
+    case ARDUINO_EVENT_WIFI_STA_START:entry.kind=CoexistenceDiagnostics::WifiKind::Started;break;
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      entry.kind=CoexistenceDiagnostics::WifiKind::Connected;
+      memcpy(entry.bssid,event->event_info.wifi_sta_connected.bssid,6);
+      entry.channel=event->event_info.wifi_sta_connected.channel;break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      entry.kind=CoexistenceDiagnostics::WifiKind::GotIp;
+      entry.ip=event->event_info.got_ip.ip_info.ip.addr;break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      entry.kind=CoexistenceDiagnostics::WifiKind::Disconnected;
+      memcpy(entry.bssid,event->event_info.wifi_sta_disconnected.bssid,6);
+      entry.reason=event->event_info.wifi_sta_disconnected.reason;
+      entry.rssi=event->event_info.wifi_sta_disconnected.rssi;break;
+    case ARDUINO_EVENT_WIFI_STA_STOP:entry.kind=CoexistenceDiagnostics::WifiKind::Stopped;break;
+    default:return;
+  }
+  CoexistenceDiagnostics::observeWifiEvent(entry);
+}
+
+void initialiseCoexistenceDiagnostics()
+{
+  static bool initialized=false;if(initialized)return;initialized=true;
+  CoexistenceDiagnostics::beginBoot(esp_random(),int(esp_reset_reason()));
+  const auto observer=WiFi.onEvent(diagnosticWifiEvent);
+  CoexistenceDiagnostics::wifiObserverRegistration(observer!=0);
+}
+
+void sampleBleCoexistenceDiagnostics()
+{
+  static uint32_t previousAt=0;
+  const uint32_t now=millis();
+  if(uint32_t(now-previousAt)<1000)return;
+  previousAt=now;const uint32_t started=micros();
+  const uint32_t linkVersion=bleDiagnosticLinkVersion.load(std::memory_order_acquire);
+  CoexistenceDiagnostics::Radio r;r.atMs=now;
+  r.stackReady=bleStackReady;r.connected=bleConnected;r.softwareScan=bleScanActive;
+  r.scanPurpose=uint8_t(bleScanPurpose);r.connecting=bleConnectTaskRunning;
+  r.connectionEpoch=bleDiagnosticEpoch.load(std::memory_order_relaxed);
+  r.handle=bleDiagnosticHandle.load(std::memory_order_acquire);
+  r.reports=bleDiagnosticReports.load(std::memory_order_relaxed);
+  r.overflows=__atomic_load_n(&bleReportOverflowCount,__ATOMIC_RELAXED);
+  r.queuedReports=bleReportQueue?uxQueueMessagesWaiting(bleReportQueue):0;
+  r.stopRequests=bleDiagnosticStopRequests.load(std::memory_order_relaxed);
+  r.stopFailures=bleDiagnosticStopFailures.load(std::memory_order_relaxed);
+  r.disconnectReason=bleDiagnosticDisconnectReason.load(std::memory_order_relaxed);
+  r.scanEndReason=bleDiagnosticScanEndReason.load(std::memory_order_relaxed);
+  if(r.stackReady){
+    r.actualScan=NimBLEDevice::getScan()->isScanning();
+    if(r.handle!=0xffff){
+      ble_gap_conn_desc descriptor{};
+      r.queryResult=ble_gap_conn_find(r.handle,&descriptor); // cached host state; no HCI transaction
+      // A reconnect during this observation must not label new timing as old.
+      if((linkVersion&1U)||linkVersion!=bleDiagnosticLinkVersion.load(std::memory_order_acquire))r.queryResult=-2;
+      if(r.queryResult==0){
+        r.intervalUnits=descriptor.conn_itvl;r.latency=descriptor.conn_latency;
+        r.timeoutUnits=descriptor.supervision_timeout;
+        r.encrypted=descriptor.sec_state.encrypted;r.bonded=descriptor.sec_state.bonded;
+      }
+    }
+  }
+  wifi_ps_type_t sleepMode{};r.wifiSleepResult=esp_wifi_get_ps(&sleepMode);
+  if(r.wifiSleepResult==ESP_OK)r.wifiSleepActual=int(sleepMode);
+  r.wifiSequence=CoexistenceDiagnostics::wifiEventSequence();
+  wifi_ap_record_t accessPoint{};r.apQueryResult=esp_wifi_sta_get_ap_info(&accessPoint);
+  if(r.wifiSequence!=CoexistenceDiagnostics::wifiEventSequence())r.apQueryResult=-2;
+  if(r.apQueryResult==ESP_OK){
+    memcpy(r.apBssid,accessPoint.bssid,6);r.apChannel=accessPoint.primary;r.apRssi=accessPoint.rssi;
+  }
+  r.queryUs=micros()-started;
+  CoexistenceDiagnostics::observeRadio(r);
+}
+
 void pollBleRemote()
 {
+  sampleBleCoexistenceDiagnostics();
   MediaPlaybackState playback = mediaPlayerPoc.playbackState();
+  // active remains true while setup is closing, until its radio is released.
+  const bool setupScanSuspended = DspiLink::linkSetupStatus().active;
   const bool audioCritical = playback == MediaPlaybackState::Starting ||
                              playback == MediaPlaybackState::Playing ||
                              playback == MediaPlaybackState::Seeking ||
@@ -18476,11 +19131,12 @@ void pollBleRemote()
   // work on CPU0. Abort only a background reconnect scan when playback becomes
   // timing-critical. A connected remote continues working, and reconnection
   // resumes on pause or stop; explicit user scans are not silently cancelled.
-  if (audioCritical && bleScanActive &&
+  if ((audioCritical || setupScanSuspended) && bleScanActive &&
       bleScanPurpose == BLE_SCAN_RECONNECT) {
     resetBleScanState(true);
     lastBleScanAt = millis();
-    Serial.println("BLE RECONNECT: deferred during audio playback");
+    Serial.println(setupScanSuspended ? "BLE RECONNECT: deferred during WiFi setup"
+                                     : "BLE RECONNECT: deferred during audio playback");
   }
 
   if (bleTransferShutdownRequested) return;
@@ -18506,7 +19162,8 @@ void pollBleRemote()
     bleStackRestartRetryAt = millis() + 1000;
   }
 
-  if (bleConnectRequested && !bleConnectTaskRunning) {
+  if (bleConnectRequested && !bleConnectTaskRunning &&
+      !(setupScanSuspended && !blePendingSave)) {
     bleConnectRequested = false;
     bleConnectDevice = blePendingDevice;
     clearBleResolvedIdentity();
@@ -19162,7 +19819,7 @@ void finishWifiTransferLifecycle()
   }
 
   showToast("Transfer complete", 1800);
-  enterPage(PAGE_SYSTEM);
+  enterPage(PAGE_WIFI);
 }
 
 void serviceWifiTransferUiRedraw()
@@ -19850,7 +20507,7 @@ void serviceWifiTransfer()
 void printHelp()
 {
   Serial.println();
-  Serial.println("DSPi ESP32 Control Panel v1.4.0");
+  Serial.println("DSPi ESP32 Control Panel v1.5.0");
   Serial.println("Media build: native 44.1/48 kHz + Wi-Fi Music Transfer + verified 30 MHz shared SD path");
   Serial.println("u/d = navigate (volume on home), </> = left/right");
   Serial.println("+/- = User Volume");
@@ -20025,6 +20682,7 @@ void setup()
 
   Serial.begin(115200);
   delay(350);
+  initialiseCoexistenceDiagnostics();
 
   // Keep boot diagnostics read-only. The stable main firmware does not write
   // NVS on every startup, so this media build also avoids repeated boot-stage
@@ -20066,6 +20724,7 @@ void setup()
   beginEncoder();
 
   preferences.begin("dspi-panel", false);
+  loadHomeVolumeDisplayPreference();
 
   setDefaultSpectrumBarColours();
   if (preferences.getBytesLength("spbar_cfg") == sizeof(spectrumBarColours)) {
@@ -20152,6 +20811,11 @@ void setup()
       volumeMeterPaletteIndex = legacyVuToPalette(analogVuColourChoice);
     }
     themeMigrated = true;
+  }
+  if (preferences.getBytesLength("retro_cfg") == sizeof(retroTheme)) {
+    RetroPixel::Settings candidate = {};
+    preferences.getBytes("retro_cfg",&candidate,sizeof(candidate));
+    if (RetroPixel::valid(candidate,THEME_PALETTE_COUNT)) retroTheme = candidate;
   }
   if (themeMigrated) persistThemePreferencesNow();
   // Build a saved custom face during the hidden boot phase. The first
@@ -20252,10 +20916,12 @@ void setup()
   // BLE remote is asleep. The normal one-second reconnect service performs the
   // complete verified state sweep after the logo has gone.
   markBootStage(7, "UI ready; DSPi sync deferred");
+  linkInit();
   bootLogoFadeOut();
   bootUiFadeIn();
   beginBleRemote();
   lastConnectAttemptAt = millis() - 1000;
+  networkRestoreBrowser();
 }
 
 bool stereoSpectrumVisible()
@@ -20267,13 +20933,18 @@ bool stereoSpectrumVisible()
 void serviceStereoSpectrum()
 {
   if (!stereoSpectrumVisible() || !dspi.connected) return;
+  const bool remoteDemand=DspiLink::remoteAnalyserActive(millis());
+  if(stereoSpectrum.consoleYielded){
+    if(remoteDemand)return;
+    stereoSpectrum=StereoSpectrumState{}; // Re-probe native state, never assume ownership.
+  }
   if (!stereoSpectrum.probed) {
     uint8_t caps[SpectrumRta::kCapsBytes] = {};
     uint16_t length = 0;
+    const auto probe=dspiTransactionResult(true,REQ_RTA_GET_CAPS,0,2,nullptr,sizeof(caps),caps,sizeof(caps),length,false,true);
+    if(probe!=DSPI_TXN_OK)return; // Not a capability verdict; retry while visible.
     stereoSpectrum.probed = true;
-    stereoSpectrum.supported = dspiGet(REQ_RTA_GET_CAPS, 0, sizeof(caps),
-        caps, sizeof(caps), length, false) &&
-        SpectrumRta::parseCaps(caps, length, stereoSpectrum.fftOrder,
+    stereoSpectrum.supported = SpectrumRta::parseCaps(caps, length, stereoSpectrum.fftOrder,
                                stereoSpectrum.levelZero);
     if (!stereoSpectrum.supported) {
       Serial.println("SPECTRUM: DSPi RTA V3 unavailable");
@@ -20293,12 +20964,25 @@ void serviceStereoSpectrum()
     }
     SpectrumRta::makeConfig(stereoSpectrum.configWire,
                             stereoSpectrum.fftOrder, spectrumSelection);
-    stereoSpectrum.configured = dspiSet(REQ_RTA_SET_CONFIG, 0,
+    uint8_t current[SpectrumRta::kConfigBytes]={},status[24]={};uint16_t n=0;
+    if(!dspiGet(REQ_RTA_GET_CONFIG,0,sizeof(current),current,sizeof(current),n,false)||n!=sizeof(current)){
+      stereoSpectrum.probed=false;return;
+    }
+    bool activeElsewhere=remoteDemand;
+    if(!activeElsewhere&&dspiGet(0x0d,0,sizeof(status),status,sizeof(status),n,false)&&n==sizeof(status)){
+      const uint16_t age=status[14]|(uint16_t(status[15])<<8);
+      activeElsewhere=status[1]!=0&&((current[9]&1)||age<5000);
+    }
+    if(activeElsewhere){
+      if(!DspiLink::SpectrumDemand::compatible(current,sizeof(current),spectrumSelection.tap,SpectrumRta::channelMask(spectrumSelection))){
+        stereoSpectrum.consoleYielded=remoteDemand;stereoSpectrum.configChangedExternally=true;
+        stereoSpectrum.supported=false;drawVisualizer();return;
+      }
+      memcpy(stereoSpectrum.configWire,current,sizeof(current));stereoSpectrum.consoleShared=true;stereoSpectrum.configured=true;
+    }else stereoSpectrum.configured = dspiSet(REQ_RTA_SET_CONFIG, 0,
         stereoSpectrum.configWire, sizeof(stereoSpectrum.configWire), false);
     if (!stereoSpectrum.configured) {
-      stereoSpectrum.supported = false;
-      Serial.println("SPECTRUM: selected channels rejected");
-      drawVisualizer();
+      stereoSpectrum.probed=false; // Busy/timeout must not poison capability cache.
       return;
     }
     Serial.printf("SPECTRUM: tap=%u channels=%u/%u read-on-demand enabled\n",
@@ -20313,7 +20997,7 @@ void serviceStereoSpectrum()
   uint8_t desiredConfig[SpectrumRta::kConfigBytes] = {};
   SpectrumRta::makeConfig(desiredConfig, stereoSpectrum.fftOrder,
                           spectrumSelection);
-  if (memcmp(desiredConfig, stereoSpectrum.configWire,
+  if (!stereoSpectrum.consoleShared && !remoteDemand && memcmp(desiredConfig, stereoSpectrum.configWire,
              sizeof(desiredConfig)) != 0) {
     uint8_t current[SpectrumRta::kConfigBytes] = {};
     uint16_t currentLength = 0;
@@ -20370,6 +21054,15 @@ void serviceStereoSpectrum()
       uint16_t configLength = 0;
       if (!dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
                    sizeof(current), configLength, false)) return;
+      if(remoteDemand||stereoSpectrum.consoleShared){
+        if(configLength==sizeof(current)&&DspiLink::SpectrumDemand::compatible(current,sizeof(current),spectrumSelection.tap,SpectrumRta::channelMask(spectrumSelection))){
+          memcpy(stereoSpectrum.configWire,current,sizeof(current));stereoSpectrum.consoleShared=true;
+        }else{
+          stereoSpectrum.consoleYielded=remoteDemand;stereoSpectrum.configChangedExternally=true;
+          stereoSpectrum.configured=false;stereoSpectrum.supported=false;
+          stereoSpectrum.hasFrame[0]=stereoSpectrum.hasFrame[1]=false;drawVisualizer();return;
+        }
+      }
       if (configLength != sizeof(current) ||
           memcmp(current, stereoSpectrum.configWire, sizeof(current)) != 0) {
         // The Console or another surface took ownership. Never relabel its
@@ -20428,7 +21121,7 @@ void serviceStereoSpectrumExit()
         changeOverlayReturnView == VIEW_VISUALIZER));
   if (stereoSpectrumVisible() || spectrumNotification ||
       !stereoSpectrum.probed) return;
-  if (stereoSpectrum.configured && dspi.connected) {
+  if (stereoSpectrum.configured && dspi.connected && !stereoSpectrum.consoleShared && !DspiLink::remoteAnalyserActive(millis())) {
     uint8_t current[SpectrumRta::kConfigBytes] = {};
     uint16_t length = 0;
     if (dspiGet(REQ_RTA_GET_CONFIG, 0, sizeof(current), current,
@@ -20503,6 +21196,7 @@ void serviceVisibleMeters(bool mediaActive)
 
 void loop()
 {
+  DspiLink::serviceTransport(acceptSharedDspiNotification,DspiLink::hubNativeReply);
   serviceWifiTransfer();
   if (wifiTransferExclusive()) {
     // The transfer lifecycle owns SD, Wi-Fi, BLE and normal UI activity.  Do
@@ -20517,6 +21211,7 @@ void loop()
   handleSerial();
   serviceDeferredPreferences();
   mediaPlayerPoc.serviceStopCleanup();
+  serviceNetworkPanel();
   serviceMediaTrackTransition();
   serviceMediaSeek();
   serviceMediaPlayback();
@@ -20526,6 +21221,9 @@ void loop()
   serviceMediaDeferredRedraw();
   serviceMediaBrowserRedraw();
   servicePanelControls();
+  if(panelConsumeSourceNameChange()&&(uiView==VIEW_HOME||uiView==VIEW_MENU||uiView==VIEW_VISUALIZER||uiView==VIEW_CHANGE_OVERLAY))redrawCurrentView();
+  serviceLinkPanel();
+  serviceLinkVolume();
 
   if (mediaPlayerPoc.active()) {
     // The decoder owns the time-critical prefill/seek windows, but once its
@@ -20557,14 +21255,12 @@ void loop()
 
       // A Console source selection away from the media S/PDIF input takes
       // ownership immediately.
-      // Point the pending restore at that already-selected source so stopping
-      // music never overrides the Console's choice when playback stops.
+      // Discard the captured old route so stopping cannot override the
+      // Console's already-selected input or queue a later restore.
       if (externalSourceChanged &&
           dspi.source != MEDIA_DSPI_SPDIF_SOURCE &&
           mediaPlayerPoc.active()) {
-        const InputSource externalSource = dspi.source;
-        if (mediaRoute.captured) mediaRoute.source = externalSource;
-        stopMediaPlayback("external input change");
+        stopMediaForInputChange("external input change");
       } else if (runtimeChanged && uiView != VIEW_EDIT &&
                  uiView != VIEW_VISUALIZER &&
                  uiView != VIEW_FEATURE_CONFIRM &&
@@ -20691,3 +21387,5 @@ void loop()
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 #include "PanelControlRuntime.inc"
+#include "DspiLinkPanel.inc"
+#include "NetworkPlayerPanel.inc"

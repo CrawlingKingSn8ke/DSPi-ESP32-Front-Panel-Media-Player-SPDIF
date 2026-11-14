@@ -3,6 +3,8 @@
 #include "Mp3ArtworkPolicy.h"
 #include "SpdifBlockEncoder.h"
 #include "DirectoryPageCache.h"
+#include "NetworkPlaybackPolicy.h"
+#include "AudioDiagnostics.h"
 
 #define DR_WAV_NO_STDIO
 #define DR_WAV_IMPLEMENTATION
@@ -3296,6 +3298,11 @@ void MediaPlayerPoC::stopSpdif()
 
 void MediaPlayerPoC::setError(const char *message)
 {
+  AudioDiagnostics::allocationFailure(message,
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT),
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
   // Retention is published as Ready only after the output task has aligned and
   // replaced a complete ring. Faulted cannot be resurrected by a later track
   // request while this TX/task lifetime is still unwinding.
@@ -3318,6 +3325,7 @@ bool MediaPlayerPoC::beginPlay(const char *path, int8_t dataOutPin,
       spdifTxChannel && !decoderTaskRunning() && !outputTaskRunning() &&
       state == MediaPlaybackState::Stopped;
   if (!retainedCarrierIdle) stop();
+  if (networkPcmMode || !networkProducerGate.quiescent()) return false;
   if (decoderTaskRunning() || outputTaskRunning()) {
     out.printf("MEDIA PLAY: rejected path=%s reason=previous media task still stopping\n",
                path ? path : "(none)");
@@ -3401,6 +3409,61 @@ bool MediaPlayerPoC::beginPlay(const char *path, int8_t dataOutPin,
   return true;
 }
 
+bool MediaPlayerPoC::beginNetworkPlay(MediaByteSource &source,
+                                      const MediaFileInfo &info,
+                                      int8_t dataOutPin,
+                                      MediaRouteCallback routeCallback,
+                                      void *routeContext,Stream &out)
+{
+  // Caller cooperatively stops the old owner before starting this source.
+  if (state != MediaPlaybackState::Stopped || decoderTaskRunning() ||
+      outputTaskRunning() || !networkProducerGate.quiescent() ||
+      !seekCommandQueue || !seekEventQueue || !mediaControlEvents ||
+      !info.valid || !routeCallback ||
+      (info.sampleRate != 44100 && info.sampleRate != 48000) ||
+      (info.channels != 1 && info.channels != 2) ||
+      !sourceDepthSupported(info.format,info.bitsPerSample)) return false;
+  if (!allocateRing()) {out.println("NETWORK: PCM allocation failed");return false;}
+  uint32_t token=networkProducerGate.open();if(!token)return false;
+  xQueueReset(seekCommandQueue);xQueueReset(seekEventQueue);
+  xEventGroupClearBits(mediaControlEvents,kSeekActiveBit|kOutputQuiescentBit);
+  resetRing();setStopRequested(false);decoderComplete=false;
+  storageIoFault=false;terminalEventPending=false;seekResumePaused=false;
+  stats=MediaPlaybackStats{};currentFile=info;errorText[0]=0;
+  strlcpy(currentPath,"Network",sizeof(currentPath));
+  networkSource=&source;networkPcmMode=true;
+  __atomic_store_n(&networkDecodeFault,false,__ATOMIC_RELEASE);
+  __atomic_store_n(&networkToken,token,__ATOMIC_RELEASE);
+  startDataOutPin=dataOutPin;startRouteCallback=routeCallback;
+  startRouteContext=routeContext;
+  startPrefillTarget=NetworkPlayback::prefill(info.sampleRate,ringFrameCapacity);
+  startStage=StartStage::Prefill;state=MediaPlaybackState::Starting;
+  return true;
+}
+
+uint32_t MediaPlayerPoC::networkProducerToken() const
+{
+  return __atomic_load_n(&networkToken,__ATOMIC_ACQUIRE);
+}
+size_t MediaPlayerPoC::writeNetworkPcm(uint32_t token,const int32_t *stereo,
+                                       size_t frames)
+{
+  if(!networkProducerGate.enter(token))return 0;
+  size_t count=writeRing(stereo,std::min(frames,ringWritable()));
+  __atomic_add_fetch(&stats.decodedFrames,count,__ATOMIC_RELAXED);
+  networkProducerGate.leave();return count;
+}
+void MediaPlayerPoC::completeNetworkPcm(uint32_t token,bool failed)
+{
+  if(!networkProducerGate.enter(token))return;
+  __atomic_store_n(&networkDecodeFault,failed,__ATOMIC_RELEASE);
+  decoderComplete=true;networkProducerGate.leave();
+}
+bool MediaPlayerPoC::networkPcmFailed() const
+{
+  return __atomic_load_n(&networkDecodeFault,__ATOMIC_ACQUIRE);
+}
+
 MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
                                                   size_t decodeChunkBudget)
 {
@@ -3415,8 +3478,12 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
   }
 
   if (startStage == StartStage::Prefill) {
+    if(networkPcmMode && networkPcmFailed()){
+      startStage=StartStage::Idle;setError("Network decode failed");
+      return MediaStartStatus::Failed;
+    }
     size_t budget = std::max<size_t>(1, decodeChunkBudget);
-    while (!stopIsRequested() && budget-- &&
+    while (!networkPcmMode && !stopIsRequested() && budget-- &&
            ringAvailable() < startPrefillTarget && ringWritable() > 0) {
       size_t request = std::min(kDecodeChunkFrames, ringWritable());
       size_t frames = decodeFrames(decoder->stereo, request);
@@ -3495,7 +3562,8 @@ MediaStartStatus MediaPlayerPoC::servicePlayStart(Stream &out,
   state = MediaPlaybackState::Playing;
   startStage = StartStage::Idle;
   stats.ringLowWaterFrames = (uint32_t)ringAvailable();
-  BaseType_t created = xTaskCreatePinnedToCore(
+  BaseType_t created = pdPASS;
+  if(!networkPcmMode) created = xTaskCreatePinnedToCore(
       decoderTaskEntry, "media-decode", kDecoderTaskStackBytes, this,
       kDecoderTaskPriority, &decoderTaskHandle, kDecoderTaskCore);
   if (created != pdPASS) {
@@ -3565,6 +3633,9 @@ void MediaPlayerPoC::requestTrackTransitionStop()
 
 void MediaPlayerPoC::requestStopInternal(bool retainSpdifCarrier)
 {
+  networkProducerGate.invalidate();
+  __atomic_store_n(&networkToken,0U,__ATOMIC_RELEASE);
+  if(networkSource)networkSource->cancel();
   const bool alreadyStopping = stopIsRequested();
   const bool decoderRunning = decoderTaskRunning();
   const bool outputRunning = outputTaskRunning();
@@ -3610,7 +3681,8 @@ void MediaPlayerPoC::stop()
   // Synchronous Stop remains available for explicit user shutdown and legacy
   // call sites. Track changes use requestStop() and cooperative cleanup.
   unsigned long deadline = millis() + kTaskStopTimeoutMs;
-  while ((decoderTaskRunning() || outputTaskRunning()) &&
+  while ((decoderTaskRunning() || outputTaskRunning() ||
+          !networkProducerGate.quiescent()) &&
          (long)(millis() - deadline) < 0) {
     // As soon as the output owner exits, ordinary STOP can disable TX even if
     // a slow SD read keeps the decoder task alive for longer.
@@ -3643,8 +3715,11 @@ bool MediaPlayerPoC::serviceStopCleanup()
 
   if (spdifCarrierRetention() != SpdifCarrierRetention::Ready) stopSpdif();
   if (decoderTaskRunning()) return false;
+  if (!networkProducerGate.quiescent()) return false;
   closeDecoder();
   resetRing();
+  networkPcmMode=false;networkSource=nullptr;
+  __atomic_store_n(&networkDecodeFault,false,__ATOMIC_RELEASE);
   if (seekCommandQueue) xQueueReset(seekCommandQueue);
   if (seekEventQueue) xQueueReset(seekEventQueue);
   if (mediaControlEvents) {

@@ -1,0 +1,104 @@
+Source: https://github.com/WeebLabs/DSPi-Link
+Tag: bridge-v0.1.0
+Commit: 60550e303abdb1ea9de9a5defffcb8837ef0f417
+License: MIT; see LICENSE.
+
+Portable components only: no app_main, independent UART task, updater,
+factory erase, GPIO initializer or standalone server imported.
+Files are flattened and normalised to LF with a final newline.
+
+Local patches:
+- dspi_link.c: native0x90 SET acknowledgement window650ms.
+- hub.h/hub.c: optional reserved_poll_bps (zero preserves upstream
+  behaviour); absent-device budget uses configured baud. Panel reserves
+  3000B/s for local work. Native commands and Master/User Volume unchanged.
+- hub_auth.h/hub_auth.c: optional checked persistence callback; panel PIN,
+  pairing and revocation fail without changing live authentication state
+  when flash rejects the write. Legacy void-save ports remain compatible.
+
+Browser: pinned js/package-lock.json; npm11.6.2; Vite7.3.6.
+local-validation/dspi-link-browser-panel.patch restricts settings to
+Status/Security, requires PIN and replaces standalone reset advice.
+local-validation/dspi-link-browser-controls.patch and browser-overrides/
+volume-writer.ts serialize volume writes, coalesce only unsent values,
+cancel pending writes on disposal and clear warnings on successful writes.
+Build-Link-Web.ps1 invokes upstream bridge/esp32/tools/embed_web.py:
+web_assets_data.c is generated using deterministic gzip(mtime=0).
+Panel refuses /setup and /setup.html; network setup is a separate,
+physically opened, PIN-authorised panel mode.
+
+Vendored files: component path and local SHA256:
+board_table.h: board/include/board_table.h
+  ddece1715e2585b66a1f72404951acc1dcd23f5fe67cfe309200033ea00c3851
+board_tables.c: board/board_tables.c
+  aad923803b0d7c059ab0c750648e1fd3ab5e96297320af5072c2bd078a293fae
+bridge_config.h: bridge_config/include/bridge_config.h
+  da3bc574e33e97421439e1ef374f40a0ce98d276069d73d10b281d0078197eba
+dspi_frame.c: dspi_frame/dspi_frame.c
+  9ab1b4874cc4144186dd36e82095d69a75cd35b32d92adfaddebad9a8b483686
+dspi_frame.h: dspi_frame/include/dspi_frame.h
+  73e4f7d0e97cb0afa24f8ac959c5fdb90ab5f2ce69f744c0a635952a8b52f6b7
+dspi_link.c: dspi_uart/dspi_link.c
+  4c5ea48e531a059ea231da0ef8167ead7ebde6ec83b69a39a06d7944eed47bd9
+dspi_link.h: dspi_uart/include/dspi_link.h
+  5724ceb01eb2ecdaa665c9bc976055e7cefdc711e635b9fc78bc0fb9b96e0779
+hub_admin.c: hub/hub_admin.c
+  f54942a7bb19ae042b862cac1e782d8a186941a30273dc511b1524c64d592ce1
+hub_auth.c: hub_auth/hub_auth.c
+  49134c2df905f27524dca324bec0e0b7c68942ef5a7cf9ad146fa83089527309
+hub_auth.h: hub_auth/include/hub_auth.h
+  4065652ac877b5e659c21e6a1642202f0705bd8833a14777ca0faf952496c6a0
+hub_commands.c: hub/hub_commands.c
+  b5fcad6bd30c9bf6f504d34f335081640c7a069fcb211dae7c47d6a495fe9621
+hub_config.c: hub/hub_config.c
+  6a416d8d3b5939f6e56442e95095634ce148c6daf07a84b8a8c7b957de154b67
+hub_config.h: hub/include/hub_config.h
+  055c78cb640d26957820019887d22028061aee69ed43e604c35480b52efc64b3
+hub_device.c: hub/hub_device.c
+  9b141a6b6186e9aada4b624a08931a6fdadb8ce84e3dd9820f5e3b925da73e74
+hub_internal.h: hub/hub_internal.h
+  ad3101430cfaa1a81db1b025d925a3f5b03beed05d7e92d955bf49ad7039c72c
+hub_io.h: hub/include/hub_io.h
+  04ecf1aaadcc39917ac36c79c56143e75fde3878c838baed388394c9fad83caf
+hub_polls.c: hub/hub_polls.c
+  44e819acc2afbbe12a079974166598a1fb2314ca00b80e439c1e001849122ed0
+hub_update.c: hub/hub_update.c
+  371b88e2c6a51e158b1921955145560ab52fd695b90c9eddba70471f5e2b3334
+hub.c: hub/hub.c
+  8a7c45ef80dfd0ad1ffe19daf2d87727c185c48d9ddeeacdf75ce8c897a33df5
+hub.h: hub/include/hub.h
+  1b54e231a8b0e8096329c1b95820083c1623d4a4bb1de3a348e3385b28c7e2c7
+link_base64.c: link_codec/link_base64.c
+  640fa2c0b579c3796408b0d20143b2b0b51368b51553964db7acba6081fb91de
+link_base64.h: link_codec/include/link_base64.h
+  ed551abad9b62cef4b7cd60eef9d7dc14e25c42ea40b8783d264e55f76e232c1
+link_frames.c: link_codec/link_frames.c
+  3385bcc51718077b19dba85ce9982115f915ce2d2a884d3b88838340f26c624b
+link_frames.h: link_codec/include/link_frames.h
+  b9e2ff9c4f7dae2bdcd89cdbd6bdaa6010be6b1540385cc8725b525b52848709
+link_policy_table.c: link_policy/link_policy_table.c
+  cc3f3ba3c16f0f80ffd47096e7a3ac1bc2a681083a946fd6ede7bfc151ffd7be
+link_policy_table.h: link_policy/link_policy_table.h
+  71c8841ab11fec534fdfcb96a2307ecb3761a611b1c90a140753a7fbaf613391
+link_policy.c: link_policy/link_policy.c
+  092bdbcf4ec7977d8bc34b2915b84b4e56a6f3664d67e5ae988c34b82e1ef5ec
+link_policy.h: link_policy/include/link_policy.h
+  e147db6cb44ec70306110d9c82b3e9b2ec0986d8f60329d12afede111d464cbc
+origin.c: http_server/origin.c
+  0de76d5fcd1cc6370adbf0b0a15d44b93ca657cf899c06ccfd5b367655ed3145
+origin.h: http_server/include/origin.h
+  e18c27e542557242d9f7f4e1438c71e9655b4c83c8df5df7eedba05e99d8cf7b
+settings_model.c: settings/settings_model.c
+  c02e9f20664a571de4bd5b8807e6c5b29a707011fef737ba14b6319391d1b08b
+settings_model.h: settings/include/settings_model.h
+  d579934eb9a8c50863eead4d8a225eaeddb0595653961ddf8c99d9d7210bfb77
+web_assets_table.h: web_assets/web_assets_table.h
+  7990ac9d89b69a258959b1f749e65e3f790763481d8988c38c16ff90a2b67bd8
+web_assets.c: web_assets/web_assets.c
+  928866fc7f0b30a48bbe7ca803c75750e36cacf74ffc5135e1028a01fb264424
+web_assets.h: web_assets/include/web_assets.h
+  d59c98af63b05044901b115f8ac7849a3993ed3b1320d8f0a7e6963d3c7b039d
+ws_header.c: http_server/ws_header.c
+  4c18eb35f80384c9e2ac3d75dde2b52e47401e914a89f3067e7780619eafb8c8
+ws_header.h: http_server/include/ws_header.h
+  5fc776baf1684564dc3bf86a8887ee1f58ff98966307c10405025216be17fb5f

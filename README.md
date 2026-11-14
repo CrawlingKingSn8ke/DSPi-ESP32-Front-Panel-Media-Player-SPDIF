@@ -1,33 +1,36 @@
 # DSPi ESP32 Front Panel — Media Player S/PDIF
 
-Stable ESP32-S3 front-panel firmware with an integrated SD-card music player and a single-wire, 24-bit, 44.1/48 kHz logic-level S/PDIF connection to a WeebLabs DSPi.
+ESP32-S3 front-panel firmware with integrated SD-card and SMB network music playback and a single-wire, 24-bit, 44.1/48 kHz logic-level S/PDIF connection to a WeebLabs DSPi.
 
 > [!IMPORTANT]
 > The ESP32-to-DSPi audio link is direct 3.3 V GPIO-level S/PDIF. It is not a consumer coaxial or optical connection. Read [S/PDIF implementation and wiring](SPDIF-IMPLEMENTATION.md) before connecting the hardware.
 
-The complete front-panel interface, themes, presets, BLE remote support, local Wi-Fi transfer/update portal and DSPi v1.1.5/V28 support remain included.
+The front-panel interface, presets, BLE remote support, analogue VU, stereo Spectrum and local Wi-Fi transfer/update portal remain included.
 
-## Version 1.4.0
+## Version 1.5.0
 
-Version 1.4.0 adds direct output, routing and equaliser control to the panel. The SD player, S/PDIF connection, BLE remotes, Spectrum, analogue VU and local Wi-Fi updater remain included.
+### New since v1.4.0
 
-### New since v1.3.1
+- **Network music:** browse Windows or NAS SMB shares as folders and play WAV, FLAC and MP3 through the existing S/PDIF output. Includes album artwork, scrolling filenames, track controls and the same Now Playing layout as the SD player.
+- **DSPi Link:** connect compatible DSPi Console applications over the local network through the panel's UART bridge. The encoder, BLE remote and panel controls remain available while Link is active.
+- **Wi-Fi setup:** QR-guided phone setup, a network picker, shared connection settings, a connected-only signal page and a Wi-Fi indicator. Network playback tries the strongest matching access point first.
+- **Retro theme:** seven-segment volume, pixel-style text, dimmed inactive segments and separate Retro volume colour.
+- **Volume display and control:** choose User Volume or Master Volume under **System > Screen Settings > Volume display**. The home display, encoder and learned volume controls follow the selected mode.
+- **DSPi source names:** compatible DSPi v1.1.6 firmware shares physical-input names with Console and the panel. Input visibility and order remain panel settings.
+- **Preset navigation:** an explicit Back entry below Preset Tools for encoder-only operation.
+- **DSPi v1.1.6 integration:** supports the current control-interface version 22 alongside capability-based access to output, EQ and hardware controls.
 
-- **Outputs:** named channels with mute, gain, delay, enable, rename, routing and EQ/crossover controls. Disabled channels remain visible.
-- **Precise editing:** dedicated digit editors for frequency, gain and Q, with clear selection indicators and hundredth-dB gain adjustment.
-- **Copy Parameters:** copy a channel's 10 EQ bands, four crossover slots, gain, delay and mute to another output. Routing, names, output enable and GPIO assignments are not copied.
-- **Mono summing:** choose the input pair and edit its Left/Right gains before explicitly saving Mono L+R. No automatic attenuation is added.
-- **Quick Controls:** speaker/subwoofer mute, Sub Level and Balance, using manually assigned speaker groups. Assign groups under **Outputs > Setup**; assigning a role does not change routing or physical connections.
-- **Preset Tools:** name presets, save the current configuration to an empty slot, or start with Effects Off while preserving output EQ/crossover and wiring.
-- **Input presentation:** set full and short source names, hide unused entries and change their order under **System > Inputs**. Input notifications use the chosen names; these panel settings do not disable DSPi inputs.
-- **Hardware settings:** inspect output formats and configure supported pins, S/PDIF and I2S inputs, clocks, ADAT and preset mode. Verify pin ownership and actual wiring in Console before changing hardware settings.
-- **Menu reference:** a complete graphical and text guide covers the menus, conditional settings and controls.
+User Volume represents listening level and drives loudness compensation. Master Volume provides overall attenuation without changing that User level.
 
-Input EQ is under **Effects**; output EQ and crossover are under **Outputs > channel > EQ / Crossover**. Hardware and newer processing controls require compatible DSPi firmware exposing the corresponding UART commands. The panel does not install or modify DSPi firmware.
+Output routing, precise EQ/crossover editors, Copy Parameters, mono summing, speaker/subwoofer Quick Controls and Preset Tools remain included. Input EQ is under **Effects**; output EQ/crossover is under **Outputs > channel**.
 
-See [v1.4.0 release notes](RELEASE-NOTES-v1.4.0.md). Firmware downloads include OTA and full USB images plus `SHA256SUMS-v1.4.0.txt`. Earlier releases remain available for rollback.
+[Download v1.5.0](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/tag/v1.5.0) · [Release notes](RELEASE-NOTES-v1.5.0.md)
+
+The release includes `DSPi-ESP32-Front-Panel-v1.5.0-OTA.bin`, `DSPi-ESP32-Front-Panel-v1.5.0-Full.bin`, source and SHA-256 checksums. Earlier releases remain available for rollback.
 
 ## Menu map
+
+The graphical sheets document the original Outputs/EQ layout. The additional v1.5.0 paths are listed below and in the release notes.
 
 ![Main menus: Input, Music, Preset, Outputs, Effects and System](docs/menu-map/01-overview.png)
 
@@ -82,22 +85,22 @@ Power encoder modules from 3.3 V, not 5 V.
 
 ## Flash on Windows
 
-1. Download the latest v1.4.0 release source or clone `main`.
+1. Download the latest v1.5.0 release source or clone `main`.
 2. Install Python 3 if `py --version` does not show a version.
 3. Connect the ESP32-S3-LCD-2 by USB.
 4. Close Arduino Serial Monitor and any program using the COM port.
 5. Open PowerShell in the project folder and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.4.0.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.5.0.ps1"
 ```
 
-The script asks for or uses the supplied COM port, installs the required build tools when needed, compiles the firmware and performs a clean flash.
+Supply the correct serial port with `-Port COM7` (replace COM7 with your port). Without `-Port`, the script uses COM10. It installs the required build tools when needed, compiles the firmware and performs a clean flash.
 
 To update only the application while preserving BLE pairing and panel settings:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.4.0.ps1" -PreserveSettings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.5.0.ps1" -PreserveSettings
 ```
 
 A clean flash erases BLE pairing, learned key mappings, brightness, screen-power settings and shortcut assignments. After a clean flash, disconnect all power for at least 10 seconds before reconnecting.
@@ -107,7 +110,7 @@ A clean flash erases BLE pairing, learned key mappings, brightness, screen-power
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.4.0.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.5.0.ps1"
 ```
 
 The script installs or verifies:
@@ -123,7 +126,7 @@ The Arduino sketch retains its historical v1.1.2 directory name so the existing 
 firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
 ```
 
-The v1.4.0 wrappers use the version-neutral build engine and name generated artifacts as v1.4.0. The historical sketch-directory name is unchanged.
+The v1.5.0 wrappers use the version-neutral build engine and name generated artifacts as v1.5.0. The historical sketch-directory name is unchanged.
 
 Board profile:
 
@@ -163,21 +166,21 @@ Restrictions:
 
 The first installation must use the full USB image. After that, future application updates can be installed from the panel's local Wi-Fi page while preserving BLE bonds, remote mappings, presets and screen settings. An SD card is not required for firmware updates.
 
-1. Download `DSPi-ESP32-Front-Panel-v1.4.0-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
+1. Download `DSPi-ESP32-Front-Panel-v1.5.0-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
 2. Stop or pause local music playback.
-3. Open **System > Wi-Fi Transfer/Update** on the panel and confirm **Start**.
-4. Connect to the network shown on the panel and open its displayed browser address.
+3. Open **System > WiFi > Transfer/Update** on the panel and confirm **Start**.
+4. Use the displayed connection details or QR code, then open the displayed browser address.
 5. Under **Local firmware update**, select **Choose application .bin** and choose the `-OTA.bin` file.
 6. Select **Install firmware**, confirm the warning and keep the unit powered while it uploads and verifies the image.
 7. Wait for the panel to restart automatically. The browser disconnecting during the restart is normal.
 8. After the restart, switch off or disconnect all power for at least 10 seconds, then power the unit back on before using the media player. A software restart does not power-cycle the SD card, so this step is required for a reliable SD remount.
 
 > [!WARNING]
-> Never upload `DSPi-ESP32-Front-Panel-v1.4.0-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
+> Never upload `DSPi-ESP32-Front-Panel-v1.5.0-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
 
 ## Wi-Fi Music Transfer
 
-Open **System > Wi-Fi Transfer/Update** and confirm **Start**. The panel displays the Wi-Fi connection details and browser address. Music-file transfer requires a mounted SD card.
+Open **System > WiFi > Transfer/Update** and confirm **Start**. The panel displays the Wi-Fi connection details and browser address. Music-file transfer requires a mounted SD card.
 
 From a phone or computer:
 
@@ -196,6 +199,32 @@ Wi-Fi transfer restrictions:
 - Do not remove power or the SD card during an upload.
 - Use Finish Safely before returning to the player.
 - BLE reconnect scanning pauses while transfer mode is active and resumes after normal operation is restored.
+
+## Network music (SMB)
+
+1. Share a music folder on your Windows computer or NAS using SMB. The server must be reachable on the same local network.
+2. Open **System > WiFi > Network > Configure**. Scan the first QR code to join setup Wi-Fi; press OK for the second QR code and open the setup page on your phone.
+3. Choose your home Wi-Fi network and save its credentials.
+4. Open **Music > Network** and use the setup option to add a share through the local browser page. Enter the server address, share name and optional subfolder. Supply an account with read access if the server requires one; guest access depends on server policy.
+5. Browse folders and choose a track using the encoder or BLE remote.
+
+Up to four shares can be saved. This is direct SMB folder playback, not DLNA, a streaming-service client or a phone casting receiver. The existing 44.1/48 kHz playback limits apply. Wi-Fi is 2.4 GHz; signal strength and the server/extender connection affect available throughput.
+
+SD and Network are separate playback modes. Follow the on-screen stop confirmation when changing modes. Leaving Network after use can restart the panel before returning to local playback; saved settings remain.
+
+## DSPi Link
+
+Open **System > WiFi > DSPi Link**, enable Link and set a PIN using the panel. Use the displayed address or QR code to open the bridge page. A browser address includes the port, for example `http://192.168.1.111:11915/`; use your panel's address, not this example.
+
+In a compatible DSPi Console, enable network-device discovery or add the panel by address, then pair using the PIN. Console's own “Share Devices on this Network” setting shares that computer's devices; it does not turn the panel's Link mode on.
+
+External audio inputs and the panel/encoder/BLE controls remain usable. SD and Network music playback are unavailable while Link is active. Stopping Link after use restarts the panel. Do not expose the bridge port to the internet.
+
+## Themes and volume
+
+Choose Classic or Retro under **System > Screen Settings**. Retro volume colour is available when Retro is selected. Spectrum bars/peak markers and analogue VU retain their colour settings.
+
+**Volume display**, beneath Theme, selects both the displayed level and the volume controlled by the panel and BLE remote: User Volume or Master Volume. Volume adjustment releases mute, subject to the selected control's mute floor and configured limits.
 
 ## Notes
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "DspiLinkOta.h"
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
@@ -180,6 +181,7 @@ private:
 
   void handleIndex();
   void handleStatus();
+  void handleAudioDiagnostics();
   void handleList(bool incompleteOnly);
   void handleMkdir();
   void handlePreflight();
@@ -309,6 +311,7 @@ private:
   uint32_t firmwareStartedMs_ = 0;
   uint32_t firmwareRebootAt_ = 0;
   uint8_t firmwareHeader_[kFirmwareHeaderCapacity] = {0};
+  DspiLink::PanelImageIdentity firmwareIdentity_;
   char firmwareResponseReason_[48] = {0};
   char firmwareResponseMessage_[128] = {0};
   char firmwareVersion_[33] = {0};

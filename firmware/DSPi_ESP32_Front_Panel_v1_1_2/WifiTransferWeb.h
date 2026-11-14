@@ -199,6 +199,7 @@ progress{width:100%;height:14px;accent-color:var(--accent)}.meterlabel{display:f
     <h2>Last upload diagnostics</h2>
     <p class="muted">Server-side timings separate network waiting from SD-card writing and final filesystem sync.</p>
     <pre id="uploadDiagnostics" class="diagnostics">No completed upload measured yet.</pre>
+    <p><a class="button" href="/api/audio-diagnostics" download="audio-diagnostics.json">Download audio report</a></p>
   </section>
 
   <section class="card">

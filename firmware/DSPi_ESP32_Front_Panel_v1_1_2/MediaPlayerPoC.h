@@ -7,6 +7,8 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/event_groups.h>
+#include "MediaByteSource.h"
+#include "MediaProducerGate.h"
 
 void mediaSharedSpiLock();
 bool mediaSharedSpiTryLock(uint32_t timeoutMs);
@@ -193,6 +195,15 @@ public:
   bool beginPlay(const char *path, int8_t dataOutPin,
                  MediaRouteCallback routeCallback,
                  void *routeContext, Stream &out);
+  // Main-loop start/stop only. A separate network decoder worker supplies the
+  // identical stereo S32 PCM ring; it never owns DSPi routing or the TX engine.
+  bool beginNetworkPlay(MediaByteSource &source, const MediaFileInfo &info,
+                        int8_t dataOutPin, MediaRouteCallback routeCallback,
+                        void *routeContext, Stream &out);
+  uint32_t networkProducerToken() const;
+  size_t writeNetworkPcm(uint32_t token,const int32_t *stereo,size_t frames);
+  void completeNetworkPcm(uint32_t token,bool failed);
+  bool networkPcmFailed() const;
   MediaStartStatus servicePlayStart(Stream &out,
                                     size_t decodeChunkBudget = 2);
   bool play(const char *path, int8_t dataOutPin,
@@ -319,6 +330,11 @@ private:
   MediaBrowserEntry browserCandidateScratch;
 
   DecoderState *decoder = nullptr;
+  MediaProducerGate networkProducerGate;
+  MediaByteSource *networkSource = nullptr;
+  bool networkPcmMode = false;
+  volatile uint32_t networkToken = 0;
+  volatile bool networkDecodeFault = false;
   int32_t *pcmRing = nullptr;
   void *spdifTxChannel = nullptr;
   int8_t spdifDataOutPin = -1;
