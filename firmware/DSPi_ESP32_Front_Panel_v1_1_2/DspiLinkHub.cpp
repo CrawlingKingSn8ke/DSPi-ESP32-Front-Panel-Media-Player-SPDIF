@@ -54,13 +54,16 @@ void advertise(void*){
   char* text=hub_info_json(&state->hub);if(text){setNetworkInfo(text);cJSON_free(text);}
   if(!state->mdns)return;
   hub_advert_t a{};hub_advert(&state->hub,&a);
-  MDNS.addServiceTxt("dspi-link","tcp","v","1");
-  MDNS.addServiceTxt("dspi-link","tcp","hid",a.hub_id);
-  MDNS.addServiceTxt("dspi-link","tcp","kind","bridge");
-  MDNS.addServiceTxt("dspi-link","tcp","auth",a.auth);
-  MDNS.addServiceTxt("dspi-link","tcp","n",String(a.devices));
-  MDNS.addServiceTxt("dspi-link","tcp","web","1");
-  if(a.serial)MDNS.addServiceTxt("dspi-link","tcp","d",a.serial);
+  // Link spec 3.1: the instance is named after the hub and follows renames.
+  if(a.name&&a.name[0])mdns_service_instance_name_set("_dspi","_tcp",a.name);
+  MDNS.addServiceTxt("dspi","tcp","v","1");
+  MDNS.addServiceTxt("dspi","tcp","hid",a.hub_id);
+  MDNS.addServiceTxt("dspi","tcp","kind","bridge");
+  MDNS.addServiceTxt("dspi","tcp","auth",a.auth);
+  MDNS.addServiceTxt("dspi","tcp","n",String(a.devices));
+  MDNS.addServiceTxt("dspi","tcp","web","1");
+  if(a.serial)MDNS.addServiceTxt("dspi","tcp","d",a.serial);
+  else mdns_service_txt_item_remove("_dspi","_tcp","d");
 }
 bool apply(void*,const bridge_settings_t* settings){
   if(!state||settings->uart_tx_pin!=17||settings->uart_rx_pin!=16||settings->led_type!=SETTINGS_LED_NONE||settings->led_pin!=BOARD_PIN_NONE)return false;
@@ -166,7 +169,7 @@ void serviceHub(bool localJob){
     }
     snprintf(state->status.ip,sizeof(state->status.ip),"%s",ip.c_str());state->status.online=true;state->status.error[0]=0;
     state->mdns=MDNS.begin(state->settings.bridge.hostname);
-    if(state->mdns){MDNS.setInstanceName(state->settings.bridge.name);MDNS.addService("dspi-link","tcp",11915);}advertise(nullptr);
+    if(state->mdns){MDNS.setInstanceName(state->settings.bridge.name);MDNS.addService("dspi","tcp",11915);}advertise(nullptr);
   }
   if(WiFi.status()!=WL_CONNECTED){
     if(state->status.online){stopNetwork();if(!networkStopped())return;state->status.online=false;if(state->mdns){MDNS.end();state->mdns=false;}
