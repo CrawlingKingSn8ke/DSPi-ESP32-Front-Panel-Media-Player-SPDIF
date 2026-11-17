@@ -111,7 +111,7 @@ bool startHub(const LinkNetworkSettings& settings){
   snprintf(state->status.ssid,sizeof(state->status.ssid),"%s",settings.ssid);snprintf(state->status.hostname,sizeof(state->status.hostname),"%s",settings.bridge.hostname);
   hub_io_t io{};io.send_text=sendText;io.send_binary=sendBinary;io.close=close;io.ping=ping;io.submit=submitHub;io.now_ms=now;
   io.apply_settings=apply;io.start_wifi_scan=scan;io.wifi_join=join;io.restart=restart;io.save_device_name=saveName;io.load_device_name=loadName;io.advertise=advertise;io.describe_bridge=describe;
-  hub_config_t config{};config.settings=settings.bridge;config.board=&panelLinkBoard();config.max_sessions=2;config.version="1.5.0";config.reserved_poll_bps=3000;
+  hub_config_t config{};config.settings=settings.bridge;config.board=&panelLinkBoard();config.max_sessions=2;config.version="1.5.1";config.reserved_poll_bps=3000;
   auto crypto=linkCrypto();hub_init(&state->hub,&io,&config,&crypto,&saved);
   if(!PanelWifi::beginStation(PanelWifi::Owner::Link,settings.ssid,settings.password,settings.bridge.hostname)){delete state;state=nullptr;return false;}
   state->retryAt=millis()+30000;return true;

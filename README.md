@@ -7,7 +7,9 @@ ESP32-S3 front-panel firmware with integrated SD-card and SMB network music play
 
 The front-panel interface, presets, BLE remote support, analogue VU, stereo Spectrum and local Wi-Fi transfer/update portal remain included.
 
-## Version 1.5.0
+## Version 1.5.1
+
+DSPi Link now advertises the standard Console discovery service. Hub names follow renaming, and advertised device details follow the connected DSPi.
 
 ### New since v1.4.0
 
@@ -24,13 +26,13 @@ User Volume represents listening level and drives loudness compensation. Master 
 
 Output routing, precise EQ/crossover editors, Copy Parameters, mono summing, speaker/subwoofer Quick Controls and Preset Tools remain included. Input EQ is under **Effects**; output EQ/crossover is under **Outputs > channel**.
 
-[Download v1.5.0](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/tag/v1.5.0) · [Release notes](RELEASE-NOTES-v1.5.0.md)
+[Download v1.5.1](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/tag/v1.5.1) · [Release notes](RELEASE-NOTES-v1.5.1.md)
 
-The release includes `DSPi-ESP32-Front-Panel-v1.5.0-OTA.bin`, `DSPi-ESP32-Front-Panel-v1.5.0-Full.bin`, source and SHA-256 checksums. Earlier releases remain available for rollback.
+The release includes `DSPi-ESP32-Front-Panel-v1.5.1-OTA.bin`, `DSPi-ESP32-Front-Panel-v1.5.1-Full.bin`, source and SHA-256 checksums. Earlier releases remain available for rollback.
 
 ## Menu map
 
-The graphical sheets document the original Outputs/EQ layout. The additional v1.5.0 paths are listed below and in the release notes.
+The graphical sheets document the original Outputs/EQ layout. The additional v1.5.0 paths are listed below and in the v1.5.0 release notes.
 
 ![Main menus: Input, Music, Preset, Outputs, Effects and System](docs/menu-map/01-overview.png)
 
@@ -85,14 +87,14 @@ Power encoder modules from 3.3 V, not 5 V.
 
 ## Flash on Windows
 
-1. Download the latest v1.5.0 release source or clone `main`.
+1. Download the latest v1.5.1 release source or clone `main`.
 2. Install Python 3 if `py --version` does not show a version.
 3. Connect the ESP32-S3-LCD-2 by USB.
 4. Close Arduino Serial Monitor and any program using the COM port.
 5. Open PowerShell in the project folder and run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.5.0.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.5.1.ps1"
 ```
 
 Supply the correct serial port with `-Port COM7` (replace COM7 with your port). Without `-Port`, the script uses COM10. It installs the required build tools when needed, compiles the firmware and performs a clean flash.
@@ -100,7 +102,7 @@ Supply the correct serial port with `-Port COM7` (replace COM7 with your port). 
 To update only the application while preserving BLE pairing and panel settings:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.5.0.ps1" -PreserveSettings
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Flash-DSPi-Front-Panel-v1.5.1.ps1" -PreserveSettings
 ```
 
 A clean flash erases BLE pairing, learned key mappings, brightness, screen-power settings and shortcut assignments. After a clean flash, disconnect all power for at least 10 seconds before reconnecting.
@@ -110,7 +112,7 @@ A clean flash erases BLE pairing, learned key mappings, brightness, screen-power
 Run:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.5.0.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Build-DSPi-Front-Panel-v1.5.1.ps1"
 ```
 
 The script installs or verifies:
@@ -126,7 +128,7 @@ The Arduino sketch retains its historical v1.1.2 directory name so the existing 
 firmware\DSPi_ESP32_Front_Panel_v1_1_2\DSPi_ESP32_Front_Panel_v1_1_2.ino
 ```
 
-The v1.5.0 wrappers use the version-neutral build engine and name generated artifacts as v1.5.0. The historical sketch-directory name is unchanged.
+The v1.5.1 wrappers use the version-neutral build engine and name generated artifacts as v1.5.1. The historical sketch-directory name is unchanged.
 
 Board profile:
 
@@ -166,7 +168,7 @@ Restrictions:
 
 The first installation must use the full USB image. After that, future application updates can be installed from the panel's local Wi-Fi page while preserving BLE bonds, remote mappings, presets and screen settings. An SD card is not required for firmware updates.
 
-1. Download `DSPi-ESP32-Front-Panel-v1.5.0-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
+1. Download `DSPi-ESP32-Front-Panel-v1.5.1-OTA.bin` from the [latest release](https://github.com/CrawlingKingSn8ke/DSPi-ESP32-Front-Panel-Media-Player-SPDIF/releases/latest).
 2. Stop or pause local music playback.
 3. Open **System > WiFi > Transfer/Update** on the panel and confirm **Start**.
 4. Use the displayed connection details or QR code, then open the displayed browser address.
@@ -176,7 +178,7 @@ The first installation must use the full USB image. After that, future applicati
 8. After the restart, switch off or disconnect all power for at least 10 seconds, then power the unit back on before using the media player. A software restart does not power-cycle the SD card, so this step is required for a reliable SD remount.
 
 > [!WARNING]
-> Never upload `DSPi-ESP32-Front-Panel-v1.5.0-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
+> Never upload `DSPi-ESP32-Front-Panel-v1.5.1-Full.bin` through the browser. The 16 MB full image is only for USB installation or recovery at address `0x0`.
 
 ## Wi-Fi Music Transfer
 

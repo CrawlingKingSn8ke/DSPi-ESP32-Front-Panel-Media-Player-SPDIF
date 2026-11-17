@@ -79,7 +79,7 @@ bool formatJson(char* output,size_t capacity,int resetReason){
 #ifdef ESP_PLATFORM
  const auto* app=esp_app_get_description();for(unsigned i=0;i<32;++i)snprintf(sha+i*2,3,"%02x",app->app_elf_sha256[i]);
 #endif
- Json json{output,capacity};json.add("{\"runningBuild\":\"v1.5.0\",\"runningElfSha256\":\"%s\",\"bootResetReason\":%d,\"allocation\":{\"stage\":\"%s\",\"requiredBytes\":%u,\"freeInternal\":%u,\"largestInternal\":%u,\"freePsram\":%u,\"largestPsram\":%u,\"failures\":%u},\"lastNetworkPlayback\":",
+ Json json{output,capacity};json.add("{\"runningBuild\":\"v1.5.1\",\"runningElfSha256\":\"%s\",\"bootResetReason\":%d,\"allocation\":{\"stage\":\"%s\",\"requiredBytes\":%u,\"freeInternal\":%u,\"largestInternal\":%u,\"freePsram\":%u,\"largestPsram\":%u,\"failures\":%u},\"lastNetworkPlayback\":",
  sha,resetReason,label(f.stage),unsigned(f.required),unsigned(f.free),unsigned(f.largest),unsigned(f.psramFree),unsigned(f.psramLargest),unsigned(f.count));json.sample(n);
  json.add(",\"lastUnderrun\":");if(s.lastUnderrun.rate)json.sample(s.lastUnderrun);else json.add("null");
  json.add(",\"modeEvents\":[");for(unsigned i=0;i<8&&s.events[i].kind!=Event::None;++i)json.add("%s{\"kind\":%u,\"uptimeMs\":%u}",i?",":"",unsigned(s.events[i].kind),unsigned(s.events[i].at));json.add("]}");return json.okay;
